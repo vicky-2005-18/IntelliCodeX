@@ -1,0 +1,132 @@
+"""
+Semantic Chunking Engine
+- Python: AST-based extraction of functions/classes (with docstrings, signatures)
+- Other languages: fallback line-window chunking (swap in tree-sitter here later
+  for real multi-language AST support — see README)
+"""
+import ast
+from dataclasses import dataclass, field
+from typing import List, Optional
+from core.parser import SourceFile
+
+
+@dataclass
+class CodeChunk:
+    chunk_id: str        # e.g. "repo/file.py::ClassName.method_name"
+    file_path: str
+    language: str
+    kind: str             # "function" | "class" | "module" | "block"
+    name: str
+    start_line: int
+    end_line: int
+    code: str
+    docstring: Optional[str] = None
+    imports: List[str] = field(default_factory=list)
+
+    def as_embedding_text(self) -> str:
+        """What actually gets embedded — code + surrounding context."""
+        parts = [f"# File: {self.file_path}", f"# {self.kind}: {self.name}"]
+        if self.docstring:
+            parts.append(f'"""{self.docstring}"""')
+        if self.imports:
+            parts.append("# imports: " + ", ".join(self.imports))
+        parts.append(self.code)
+        return "\n".join(parts)
+
+
+def _extract_imports(tree: ast.Module) -> List[str]:
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            imports.extend(f"{mod}.{alias.name}" for alias in node.names)
+    return imports
+
+
+def chunk_python_file(sf: SourceFile) -> List[CodeChunk]:
+    chunks: List[CodeChunk] = []
+    try:
+        tree = ast.parse(sf.content, filename=sf.rel_path)
+    except SyntaxError:
+        return [_fallback_chunk(sf)]
+
+    imports = _extract_imports(tree)
+    lines = sf.content.splitlines()
+
+    def make_chunk(node, kind):
+        start = node.lineno
+        end = getattr(node, "end_lineno", start)
+        code = "\n".join(lines[start - 1:end])
+        name = getattr(node, "name", "module")
+        docstring = ast.get_docstring(node)
+        return CodeChunk(
+            chunk_id=f"{sf.rel_path}::{name}",
+            file_path=sf.rel_path,
+            language=sf.language,
+            kind=kind,
+            name=name,
+            start_line=start,
+            end_line=end,
+            code=code,
+            docstring=docstring,
+            imports=imports,
+        )
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            chunks.append(make_chunk(node, "function"))
+        elif isinstance(node, ast.ClassDef):
+            chunks.append(make_chunk(node, "class"))
+            # also chunk methods individually for finer-grained retrieval
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    start = sub.lineno
+                    end = getattr(sub, "end_lineno", start)
+                    code = "\n".join(lines[start - 1:end])
+                    chunks.append(CodeChunk(
+                        chunk_id=f"{sf.rel_path}::{node.name}.{sub.name}",
+                        file_path=sf.rel_path,
+                        language=sf.language,
+                        kind="method",
+                        name=f"{node.name}.{sub.name}",
+                        start_line=start,
+                        end_line=end,
+                        code=code,
+                        docstring=ast.get_docstring(sub),
+                        imports=imports,
+                    ))
+
+    if not chunks:
+        chunks.append(_fallback_chunk(sf))
+
+    return chunks
+
+
+def _fallback_chunk(sf: SourceFile, window: int = 60) -> CodeChunk:
+    """Non-Python or unparsable files: whole-file or windowed chunk."""
+    lines = sf.content.splitlines()
+    return CodeChunk(
+        chunk_id=f"{sf.rel_path}::whole_file",
+        file_path=sf.rel_path,
+        language=sf.language,
+        kind="block",
+        name=sf.rel_path,
+        start_line=1,
+        end_line=len(lines),
+        code=sf.content,
+    )
+
+
+def chunk_file(sf: SourceFile) -> List[CodeChunk]:
+    if sf.language == "python":
+        return chunk_python_file(sf)
+    return [_fallback_chunk(sf)]
+
+
+def chunk_repository(source_files: List[SourceFile]) -> List[CodeChunk]:
+    all_chunks: List[CodeChunk] = []
+    for sf in source_files:
+        all_chunks.extend(chunk_file(sf))
+    return all_chunks
