@@ -37,53 +37,83 @@ def get_repo_engine(repo_id: str):
     import urllib.parse
     repo_id = urllib.parse.unquote(repo_id).strip()
 
+    backend = settings.DEFAULT_EMBEDDER_BACKEND
+
     if repo_id in ACTIVE_REPOS:
+        # Ensure LLM is instantiated if default backend is Ollama
+        if ACTIVE_REPOS[repo_id]["engine"].llm is None and backend == "ollama":
+            ACTIVE_REPOS[repo_id]["engine"].llm = create_llm("ollama")
         return ACTIVE_REPOS[repo_id]
 
     # Attempt FAISS store & DB metadata auto-reload
     store = load_vector_store(repo_id)
     repo_meta = db_manager.find_one("repositories", {"repo_id": repo_id})
 
-    if not store or not repo_meta:
-        # If repo_id points to an existing local directory (e.g. sample_repo), auto-ingest it!
-        if os.path.exists(repo_id):
-            backend = settings.DEFAULT_EMBEDDER_BACKEND
-            embedder = create_embedder(backend)
-            llm = create_llm(backend)
-            result = ingest_repository(repo_id, embedder)
+    if store and repo_meta:
+        embedder = create_embedder(backend)
+        llm = create_llm(backend)
 
-            from backend.dependency_graph import EnhancedDependencyGraph
-            from backend.parser import parse_repository_files
-            source_files = parse_repository_files(repo_id)
-            enhanced_graph_engine = EnhancedDependencyGraph()
-            enhanced_graph = enhanced_graph_engine.build(source_files)
+        from backend.dependency_graph import EnhancedDependencyGraph
+        from backend.parser import parse_repository_files
+        repo_path = repo_meta.get("repo_path", repo_id)
+        if not os.path.exists(repo_path) and os.path.exists(os.path.join(settings.REPOS_DIR, repo_id)):
+            repo_path = os.path.join(settings.REPOS_DIR, repo_id)
 
-            from rag.query_engine import QueryEngine
-            engine = QueryEngine(result.store, embedder, llm)
+        source_files = parse_repository_files(repo_path) if os.path.exists(repo_path) else []
+        enhanced_graph = EnhancedDependencyGraph().build(source_files) if source_files else EnhancedDependencyGraph().build([])
 
-            repo_record = {
-                "repo_id": repo_id,
-                "repo_path": repo_id,
-                "backend": backend,
-                "owner_id": "default",
-                "num_files": result.num_files,
-                "num_chunks": result.num_chunks,
-                "created_at": time.time(),
-            }
-            db_manager.update("repositories", {"repo_id": repo_id}, repo_record)
-            save_vector_store(repo_id, result.store)
+        from rag.query_engine import QueryEngine
+        engine = QueryEngine(store, embedder, llm)
 
-            ACTIVE_REPOS[repo_id] = {
-                "engine": engine,
-                "graph": enhanced_graph,
-                "store": result.store,
-                "meta": repo_record,
-                "source_files": source_files,
-                "embedder": embedder,
-            }
-            return ACTIVE_REPOS[repo_id]
+        ACTIVE_REPOS[repo_id] = {
+            "engine": engine,
+            "graph": enhanced_graph,
+            "store": store,
+            "meta": repo_meta,
+            "source_files": source_files,
+            "embedder": embedder,
+        }
+        return ACTIVE_REPOS[repo_id]
 
-        raise HTTPException(status_code=404, detail=f"Repository '{repo_id}' not found or not ingested.")
+    # If repo_id points to an existing local directory or inside settings.REPOS_DIR, auto-ingest it!
+    target_path = repo_id if os.path.exists(repo_id) else os.path.join(settings.REPOS_DIR, repo_id)
+    if os.path.exists(target_path):
+        embedder = create_embedder(backend)
+        llm = create_llm(backend)
+        result = ingest_repository(target_path, embedder)
+
+        from backend.dependency_graph import EnhancedDependencyGraph
+        from backend.parser import parse_repository_files
+        source_files = parse_repository_files(target_path)
+        enhanced_graph_engine = EnhancedDependencyGraph()
+        enhanced_graph = enhanced_graph_engine.build(source_files)
+
+        from rag.query_engine import QueryEngine
+        engine = QueryEngine(result.store, embedder, llm)
+
+        repo_record = {
+            "repo_id": repo_id,
+            "repo_path": target_path,
+            "backend": backend,
+            "owner_id": "default",
+            "num_files": result.num_files,
+            "num_chunks": result.num_chunks,
+            "created_at": time.time(),
+        }
+        db_manager.update("repositories", {"repo_id": repo_id}, repo_record)
+        save_vector_store(repo_id, result.store)
+
+        ACTIVE_REPOS[repo_id] = {
+            "engine": engine,
+            "graph": enhanced_graph,
+            "store": result.store,
+            "meta": repo_record,
+            "source_files": source_files,
+            "embedder": embedder,
+        }
+        return ACTIVE_REPOS[repo_id]
+
+    raise HTTPException(status_code=404, detail=f"Repository '{repo_id}' not found or not ingested.")
 
 
 

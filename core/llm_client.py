@@ -11,16 +11,21 @@ class OllamaLLM:
         self.host = host.rstrip("/")
 
     def generate(self, prompt: str, system: str = "", temperature: float = 0.2) -> str:
-        resp = requests.post(
-            f"{self.host}/api/generate",
-            json={
-                "model": self.model,
-                "prompt": prompt,
-                "system": system,
-                "stream": False,
-                "options": {"temperature": temperature},
-            },
-            timeout=120,
-        )
-        resp.raise_for_status()
-        return resp.json()["response"]
+        try:
+            resp = requests.post(
+                f"{self.host}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "system": system,
+                    "stream": False,
+                    "options": {"temperature": temperature},
+                },
+                timeout=300,
+            )
+            resp.raise_for_status()
+            return resp.json().get("response", "")
+        except requests.exceptions.Timeout:
+            return "Local Ollama AI generation timed out (exceeded 300s). Try asking a more targeted question."
+        except Exception as e:
+            return f"Error communicating with local Ollama AI model: {e}"

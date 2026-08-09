@@ -18,9 +18,21 @@ class IngestedRepository:
     num_chunks: int
 
 
+import os
+
+
 def ingest_repository(repo_path: str, embedder: BaseEmbedder) -> IngestedRepository:
+    if not os.path.exists(repo_path):
+        raise FileNotFoundError(f"Repository path does not exist: '{repo_path}'")
+
     source_files = walk_repository(repo_path)
+    if not source_files:
+        raise ValueError(f"No indexable source files (.py, .js, .ts, .java, etc.) found in '{repo_path}'")
+
     chunks = chunk_repository(source_files)
+    if not chunks:
+        raise ValueError(f"No code chunks could be extracted from files in '{repo_path}'")
+
     graph = build_dependency_graph(source_files)
 
     texts = [c.as_embedding_text() for c in chunks]

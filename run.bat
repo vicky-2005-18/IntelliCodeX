@@ -102,8 +102,8 @@ goto :END
 
 :START_CLI
 echo.
-echo Running IntelliCodeX Interactive CLI...
-python cli.py sample_repo --backend tfidf
+echo Running IntelliCodeX Interactive CLI (Ollama)...
+python cli.py sample_repo --backend ollama
 pause
 goto :END
 

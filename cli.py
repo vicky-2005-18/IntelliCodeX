@@ -27,7 +27,12 @@ def main():
     embedder = OllamaEmbedder() if args.backend == "ollama" else TfidfEmbedder()
     llm = OllamaLLM() if args.backend == "ollama" else None
 
-    result = ingest_repository(args.repo_path, embedder)
+    try:
+        result = ingest_repository(args.repo_path, embedder)
+    except Exception as e:
+        print(f"[!] Error ingesting repository: {e}")
+        return 1
+
     print(f"[*] Indexed {result.num_files} files -> {result.num_chunks} chunks")
     print(f"[*] Dependency graph: {result.graph.number_of_nodes()} nodes, "
           f"{result.graph.number_of_edges()} edges")

@@ -25,7 +25,7 @@ class Settings(BaseModel):
     OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
     OLLAMA_LLM_MODEL: str = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5-coder")
     OLLAMA_EMBED_MODEL: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-    DEFAULT_EMBEDDER_BACKEND: str = os.getenv("DEFAULT_EMBEDDER_BACKEND", "tfidf")  # "ollama" or "tfidf"
+    DEFAULT_EMBEDDER_BACKEND: str = os.getenv("DEFAULT_EMBEDDER_BACKEND", "ollama")  # "ollama" or "tfidf"
     
     # Workspace & Repositories
     REPOS_DIR: str = os.getenv("REPOS_DIR", os.path.abspath(".repos"))

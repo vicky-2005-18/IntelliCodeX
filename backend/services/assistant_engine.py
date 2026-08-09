@@ -273,7 +273,7 @@ class AssistantEngine:
         }.get(intent, "")
 
         return (
-            f"Repository context:\n\n{context}\n"
+            f"Repository context:\n\n{context[:6000]}\n"
             f"{dep_text}\n"
             f"Question: {question}\n"
             f"{intent_hint}\n"

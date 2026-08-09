@@ -29,15 +29,56 @@ class OllamaEmbedder(BaseEmbedder):
         self.dim = 768  # nomic-embed-text output size
 
     def embed(self, texts: List[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, self.dim), dtype="float32")
+
         vectors = []
-        for text in texts:
-            resp = requests.post(
-                f"{self.host}/api/embeddings",
-                json={"model": self.model, "prompt": text},
-                timeout=60,
-            )
-            resp.raise_for_status()
-            vectors.append(resp.json()["embedding"])
+        batch_size = 16
+
+        for i in range(0, len(texts), batch_size):
+            batch = [t[:4000] for t in texts[i : i + batch_size]]
+            try:
+                # Try modern Ollama /api/embed endpoint with batching
+                resp = requests.post(
+                    f"{self.host}/api/embed",
+                    json={"model": self.model, "input": batch},
+                    timeout=60,
+                )
+                if resp.status_code == 200 and "embeddings" in resp.json():
+                    vectors.extend(resp.json()["embeddings"])
+                    continue
+
+                # Fallback to single item requests if batching fails
+                for text in batch:
+                    r = requests.post(
+                        f"{self.host}/api/embeddings",
+                        json={"model": self.model, "prompt": text},
+                        timeout=60,
+                    )
+                    r.raise_for_status()
+                    vectors.append(r.json()["embedding"])
+            except Exception:
+                # Per-item fallback to ensure pipeline resilience
+                for text in batch:
+                    try:
+                        r = requests.post(
+                            f"{self.host}/api/embed",
+                            json={"model": self.model, "input": text},
+                            timeout=60,
+                        )
+                        if r.status_code == 200 and "embeddings" in r.json():
+                            vectors.append(r.json()["embeddings"][0])
+                        else:
+                            r2 = requests.post(
+                                f"{self.host}/api/embeddings",
+                                json={"model": self.model, "prompt": text},
+                                timeout=60,
+                            )
+                            r2.raise_for_status()
+                            vectors.append(r2.json()["embedding"])
+                    except Exception:
+                        vectors.append([0.0] * self.dim)
+
         return np.array(vectors, dtype="float32")
 
 
