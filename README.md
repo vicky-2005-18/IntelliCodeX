@@ -39,12 +39,29 @@ graph without waiting on model downloads.
 ### Option B — real local LLM (matches the paper's architecture)
 ```bash
 # 1. Install Ollama: https://ollama.com
-ollama pull qwen2.5-coder
+# For 4GB VRAM GPUs (e.g. RTX 3050):
+ollama pull qwen2.5-coder:3b
 ollama pull nomic-embed-text
+ollama cp qwen2.5-coder:3b qwen2.5-coder
+
+# For 8GB+ VRAM GPUs:
+# ollama pull qwen2.5-coder
+
 ollama serve
 
 # 2. Run IntelliCodeX against it
 python cli.py sample_repo --backend ollama
+```
+
+### Windows One-Click Launcher
+You can also use the included Windows batch files to launch interactive sessions:
+- **`run_cli.bat`**: Directly launches the interactive Ollama CLI.
+- **`run.bat`**: Launcher menu for Full Application, Backend API, Frontend UI, or Interactive CLI.
+
+### Running Unit Tests
+To run the automated test suite:
+```bash
+pytest
 ```
 
 ### Run as a server (multi-user, matches "Distributed AI Infrastructure")
