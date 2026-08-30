@@ -29,6 +29,10 @@ echo Active Branch: !CURRENT_BRANCH!
 echo Repository:    https://github.com/vicky-2005-18/IntelliCodeX.git
 echo.
 
+echo [1/3] Staging all modified and new files...
+git add .
+echo.
+
 :: Show modified/untracked files
 echo Checking local status:
 echo -----------------------------------------------------------------------
@@ -36,19 +40,29 @@ git status -s
 echo -----------------------------------------------------------------------
 echo.
 
+:: Auto-detect changed files for default commit message
+set AUTO_MSG=
+for /f "delims=" %%i in ('python -c "import subprocess; res = subprocess.run(['git', 'diff', '--cached', '--name-only'], capture_output=True, text=True); files = [f.strip() for f in res.stdout.strip().splitlines() if f.strip()]; print(('Update ' + ', '.join(files)) if len(files) <= 3 and files else (f'Update {len(files)} files: ' + ', '.join(files[:3]) + '...') if files else 'Auto-update IntelliCodeX')" 2^>nul') do set AUTO_MSG=%%i
+
+if "!AUTO_MSG!"=="" (
+    set AUTO_MSG=Auto-update IntelliCodeX (%DATE% %TIME:~0,8%)
+)
+
+echo Auto-detected update summary:
+echo   "!AUTO_MSG!"
+echo.
+
 :: Prompt for commit message
 set COMMIT_MSG=
-set /p COMMIT_MSG="Enter commit message (Leave blank for default timestamp): "
+set /p COMMIT_MSG="Enter commit message (Press ENTER to use auto-detected summary): "
 
 if "!COMMIT_MSG!"=="" (
-    set COMMIT_MSG=Auto-update IntelliCodeX (%DATE% %TIME:~0,8%)
+    set COMMIT_MSG=!AUTO_MSG!
 )
 
 echo.
-echo [1/3] Staging all modified and new files...
-git add .
-
-echo [2/3] Committing changes...
+echo [2/3] Committing changes with message:
+echo   "!COMMIT_MSG!"
 git commit -m "!COMMIT_MSG!"
 if %errorlevel% neq 0 (
     echo.
