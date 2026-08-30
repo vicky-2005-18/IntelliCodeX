@@ -30,6 +30,9 @@ if "%~1"=="--docker" goto :START_DOCKER
 if "%~1"=="5" goto :START_DOCKER
 if "%~1"=="--install" goto :INSTALL_DEPS
 if "%~1"=="6" goto :INSTALL_DEPS
+if "%~1"=="--push" goto :UPDATE_GITHUB
+if "%~1"=="--sync" goto :UPDATE_GITHUB
+if "%~1"=="7" goto :UPDATE_GITHUB
 
 :MENU
 cls
@@ -43,10 +46,11 @@ echo   [3] Start Frontend Web App Only (Vite React - Port 5173)
 echo   [4] Run Interactive CLI Tool (Offline TF-IDF / Ollama)
 echo   [5] Run with Docker Compose (MongoDB + Ollama + Backend)
 echo   [6] Install / Update Dependencies (Python + Node.js)
-echo   [7] Exit
+echo   [7] Sync / Push Code to GitHub
+echo   [8] Exit
 echo.
 echo =======================================================================
-set /p choice="Select an option (1-7): "
+set /p choice="Select an option (1-8): "
 
 if "%choice%"=="1" goto :START_FULL
 if "%choice%"=="2" goto :START_BACKEND
@@ -54,7 +58,8 @@ if "%choice%"=="3" goto :START_FRONTEND
 if "%choice%"=="4" goto :START_CLI
 if "%choice%"=="5" goto :START_DOCKER
 if "%choice%"=="6" goto :INSTALL_DEPS
-if "%choice%"=="7" goto :END
+if "%choice%"=="7" goto :UPDATE_GITHUB
+if "%choice%"=="8" goto :END
 echo Invalid choice, please try again.
 pause
 goto :MENU
@@ -127,6 +132,16 @@ cd ..
 echo.
 echo All dependencies installed successfully!
 pause
+goto :MENU
+
+:UPDATE_GITHUB
+echo.
+if exist "%~dp0update_github.bat" (
+    call "%~dp0update_github.bat"
+) else (
+    echo update_github.bat not found in script directory.
+    pause
+)
 goto :MENU
 
 :END
