@@ -5,6 +5,11 @@ if exist "..\venv\Scripts\activate.bat" call ..\venv\Scripts\activate.bat
 if exist ".venv\Scripts\activate.bat" call .venv\Scripts\activate.bat
 if exist "..\.venv\Scripts\activate.bat" call ..\.venv\Scripts\activate.bat
 
-echo Running IntelliCodeX Interactive CLI (Ollama)...
-python cli.py sample_repo --backend ollama
+echo Launching IntelliCodeX Interactive CLI...
+if "%~1"=="" (
+    python cli.py sample_repo --backend ollama
+) else (
+    python cli.py %*
+)
 pause
+
