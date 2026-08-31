@@ -1,10 +1,12 @@
 """
 Semantic Chunking Engine
 - Python: AST-based extraction of functions/classes (with docstrings, signatures)
-- JavaScript, TypeScript, TSX, Java: Tree-Sitter AST semantic chunking
-- Other languages / unparsable files: fallback line-window chunking
+- JavaScript, TypeScript, TSX, Java, C, C++, Go, Rust: Tree-Sitter AST semantic chunking
+- Markdown: Heading-level section chunking (#, ##, ###)
+- Config & Markup (HTML, CSS, YAML, JSON, SQL, Bash, unparsable files): Smart windowed chunking
 """
 import ast
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 from core.parser import SourceFile
@@ -16,7 +18,7 @@ class CodeChunk:
     chunk_id: str        # e.g. "repo/file.py::ClassName.method_name"
     file_path: str
     language: str
-    kind: str             # "function" | "class" | "method" | "interface" | "enum" | "type" | "block"
+    kind: str             # "function" | "class" | "method" | "interface" | "enum" | "type" | "struct" | "section" | "block"
     name: str
     start_line: int
     end_line: int
@@ -51,7 +53,7 @@ def chunk_python_file(sf: SourceFile) -> List[CodeChunk]:
     try:
         tree = ast.parse(sf.content, filename=sf.rel_path)
     except SyntaxError:
-        return [_fallback_chunk(sf)]
+        return _windowed_chunks(sf)
 
     imports = _extract_imports(tree)
     lines = sf.content.splitlines()
@@ -80,7 +82,6 @@ def chunk_python_file(sf: SourceFile) -> List[CodeChunk]:
             chunks.append(make_chunk(node, "function"))
         elif isinstance(node, ast.ClassDef):
             chunks.append(make_chunk(node, "class"))
-            # also chunk methods individually for finer-grained retrieval
             for sub in node.body:
                 if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     start = sub.lineno
@@ -100,32 +101,123 @@ def chunk_python_file(sf: SourceFile) -> List[CodeChunk]:
                     ))
 
     if not chunks:
-        chunks.append(_fallback_chunk(sf))
+        chunks.append(_windowed_chunks(sf)[0])
 
     return chunks
 
 
-def _fallback_chunk(sf: SourceFile, window: int = 60) -> CodeChunk:
-    """Non-Python or unparsable files: whole-file or windowed chunk."""
+def _chunk_markdown_file(sf: SourceFile) -> List[CodeChunk]:
+    """Chunks markdown documents by section headings (# Heading)."""
     lines = sf.content.splitlines()
-    return CodeChunk(
-        chunk_id=f"{sf.rel_path}::whole_file",
-        file_path=sf.rel_path,
-        language=sf.language,
-        kind="block",
-        name=sf.rel_path,
-        start_line=1,
-        end_line=max(1, len(lines)),
-        code=sf.content,
-    )
+    if not lines:
+        return _windowed_chunks(sf)
+
+    chunks: List[CodeChunk] = []
+    heading_pattern = re.compile(r"^(#{1,4})\s+(.+)$")
+    
+    current_title = sf.rel_path
+    current_lines: List[str] = []
+    start_line = 1
+
+    for idx, line in enumerate(lines, start=1):
+        match = heading_pattern.match(line)
+        if match:
+            code_text = "\n".join(current_lines).strip()
+            if code_text:
+                chunks.append(CodeChunk(
+                    chunk_id=f"{sf.rel_path}::{current_title} (L{start_line}-{idx-1})",
+                    file_path=sf.rel_path,
+                    language=sf.language,
+                    kind="section",
+                    name=current_title,
+                    start_line=start_line,
+                    end_line=idx - 1,
+                    code=code_text,
+                ))
+            current_title = match.group(2).strip()
+            current_lines = [line]
+            start_line = idx
+        else:
+            current_lines.append(line)
+
+    if current_lines:
+        code_text = "\n".join(current_lines).strip()
+        if code_text:
+            chunks.append(CodeChunk(
+                chunk_id=f"{sf.rel_path}::{current_title} (L{start_line}-{len(lines)})",
+                file_path=sf.rel_path,
+                language=sf.language,
+                kind="section",
+                name=current_title,
+                start_line=start_line,
+                end_line=len(lines),
+                code=code_text,
+            ))
+
+    return chunks or _windowed_chunks(sf)
+
+
+def _windowed_chunks(sf: SourceFile, window_size: int = 50, overlap: int = 10) -> List[CodeChunk]:
+    """Chunks non-AST or unparsable files into overlapping line windows."""
+    lines = sf.content.splitlines()
+    total_lines = len(lines)
+    if total_lines == 0:
+        return [CodeChunk(
+            chunk_id=f"{sf.rel_path}::empty",
+            file_path=sf.rel_path,
+            language=sf.language,
+            kind="block",
+            name=sf.rel_path,
+            start_line=1,
+            end_line=1,
+            code="",
+        )]
+
+    if total_lines <= window_size:
+        return [CodeChunk(
+            chunk_id=f"{sf.rel_path}::block",
+            file_path=sf.rel_path,
+            language=sf.language,
+            kind="block",
+            name=sf.rel_path,
+            start_line=1,
+            end_line=total_lines,
+            code=sf.content,
+        )]
+
+    chunks: List[CodeChunk] = []
+    step = window_size - overlap
+    for start_idx in range(0, total_lines, step):
+        end_idx = min(start_idx + window_size, total_lines)
+        chunk_lines = lines[start_idx:end_idx]
+        start_line = start_idx + 1
+        end_line = end_idx
+        chunks.append(CodeChunk(
+            chunk_id=f"{sf.rel_path}::block_L{start_line}_L{end_line}",
+            file_path=sf.rel_path,
+            language=sf.language,
+            kind="block",
+            name=f"{sf.rel_path} (L{start_line}-{end_line})",
+            start_line=start_line,
+            end_line=end_line,
+            code="\n".join(chunk_lines),
+        ))
+        if end_idx == total_lines:
+            break
+
+    return chunks
 
 
 def chunk_file(sf: SourceFile) -> List[CodeChunk]:
-    """Chunks a source file using Python AST or Tree-Sitter AST based on language."""
+    """Chunks a source file using AST (Python/Tree-Sitter), Sectioning (Markdown), or Windowing."""
     if sf.language == "python":
         return chunk_python_file(sf)
 
-    if sf.has_tree_sitter and sf.language in ("javascript", "typescript", "tsx", "java"):
+    if sf.language == "markdown":
+        return _chunk_markdown_file(sf)
+
+    ts_supported = ("javascript", "typescript", "tsx", "java", "c", "cpp", "go", "rust")
+    if sf.has_tree_sitter and sf.language in ts_supported:
         ts_chunks = extract_tree_sitter_chunks(sf.content, sf.rel_path, sf.language)
         if ts_chunks:
             return [
@@ -142,7 +234,7 @@ def chunk_file(sf: SourceFile) -> List[CodeChunk]:
                 for c in ts_chunks
             ]
 
-    return [_fallback_chunk(sf)]
+    return _windowed_chunks(sf)
 
 
 def chunk_repository(source_files: List[SourceFile]) -> List[CodeChunk]:
