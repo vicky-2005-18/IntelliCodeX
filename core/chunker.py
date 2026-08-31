@@ -1,13 +1,14 @@
 """
 Semantic Chunking Engine
 - Python: AST-based extraction of functions/classes (with docstrings, signatures)
-- Other languages: fallback line-window chunking (swap in tree-sitter here later
-  for real multi-language AST support — see README)
+- JavaScript, TypeScript, TSX, Java: Tree-Sitter AST semantic chunking
+- Other languages / unparsable files: fallback line-window chunking
 """
 import ast
 from dataclasses import dataclass, field
 from typing import List, Optional
 from core.parser import SourceFile
+from core.tree_sitter_chunker import extract_tree_sitter_chunks
 
 
 @dataclass
@@ -15,7 +16,7 @@ class CodeChunk:
     chunk_id: str        # e.g. "repo/file.py::ClassName.method_name"
     file_path: str
     language: str
-    kind: str             # "function" | "class" | "module" | "block"
+    kind: str             # "function" | "class" | "method" | "interface" | "enum" | "type" | "block"
     name: str
     start_line: int
     end_line: int
@@ -114,14 +115,33 @@ def _fallback_chunk(sf: SourceFile, window: int = 60) -> CodeChunk:
         kind="block",
         name=sf.rel_path,
         start_line=1,
-        end_line=len(lines),
+        end_line=max(1, len(lines)),
         code=sf.content,
     )
 
 
 def chunk_file(sf: SourceFile) -> List[CodeChunk]:
+    """Chunks a source file using Python AST or Tree-Sitter AST based on language."""
     if sf.language == "python":
         return chunk_python_file(sf)
+
+    if sf.has_tree_sitter and sf.language in ("javascript", "typescript", "tsx", "java"):
+        ts_chunks = extract_tree_sitter_chunks(sf.content, sf.rel_path, sf.language)
+        if ts_chunks:
+            return [
+                CodeChunk(
+                    chunk_id=c["chunk_id"],
+                    file_path=sf.rel_path,
+                    language=sf.language,
+                    kind=c["kind"],
+                    name=c["name"],
+                    start_line=c["start_line"],
+                    end_line=c["end_line"],
+                    code=c["code"],
+                )
+                for c in ts_chunks
+            ]
+
     return [_fallback_chunk(sf)]
 
 
