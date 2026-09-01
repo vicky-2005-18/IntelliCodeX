@@ -6,9 +6,17 @@ Semantic Chunking Engine
 - Config & Markup (HTML, CSS, YAML, JSON, SQL, Bash, unparsable files): Smart windowed chunking
 """
 import ast
+import os
+import sys
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional
+
+# Ensure repository root is on sys.path for direct script execution
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
 from core.parser import SourceFile
 from core.tree_sitter_chunker import extract_tree_sitter_chunks
 

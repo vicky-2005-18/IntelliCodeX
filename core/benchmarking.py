@@ -3,9 +3,14 @@ Benchmarking Engine for IntelliCodeX Repository Parsing & Ingestion
 Measures file parsing speed, chunking granularity, AST chunk ratio, FAISS build latency, and RAM footprint.
 """
 import time
-import psutil
 import os
 import sys
+
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
 
 # Ensure repository root is on sys.path
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -37,14 +42,19 @@ def run_benchmark(repo_path: str, embedder: BaseEmbedder = None) -> BenchmarkRep
     if embedder is None:
         embedder = TfidfEmbedder()
 
-    process = psutil.Process(os.getpid())
-    mem_before = process.memory_info().rss / (1024 * 1024)
+    mem_before = 0.0
+    if HAS_PSUTIL:
+        process = psutil.Process(os.getpid())
+        mem_before = process.memory_info().rss / (1024 * 1024)
 
     start_time = time.perf_counter()
     ingested = ingest_repository(repo_path, embedder)
     end_time = time.perf_counter()
 
-    mem_after = process.memory_info().rss / (1024 * 1024)
+    mem_used = 0.0
+    if HAS_PSUTIL:
+        mem_after = process.memory_info().rss / (1024 * 1024)
+        mem_used = round(max(0.0, mem_after - mem_before), 2)
     total_time = max(0.0001, end_time - start_time)
 
     num_files = ingested.num_files
@@ -66,7 +76,7 @@ def run_benchmark(repo_path: str, embedder: BaseEmbedder = None) -> BenchmarkRep
         total_time_seconds=round(total_time, 4),
         files_per_second=round(fps, 2),
         avg_lines_per_chunk=round(avg_lines, 2),
-        memory_used_mb=round(max(0.0, mem_after - mem_before), 2),
+        memory_used_mb=mem_used,
         languages_found=ingested.languages_found
     )
 

@@ -6,9 +6,16 @@ Repository Parser Module
 - Integrates with tree-sitter loader to attach AST availability metadata to each source file
 """
 import os
+import sys
 import fnmatch
 from dataclasses import dataclass
 from typing import List, Set
+
+# Ensure repository root is on sys.path for direct script execution
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
 from core.ts_loader import is_tree_sitter_available
 
 # Comprehensive language mapping by file extension

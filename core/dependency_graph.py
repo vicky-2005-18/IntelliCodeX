@@ -5,9 +5,16 @@ Multi-Language Dependency Analysis Engine
 """
 import ast
 import os
+import sys
 import re
 from typing import List, Dict, Optional, Set, Tuple
 import networkx as nx
+
+# Ensure repository root is on sys.path for direct script execution
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
 from core.parser import SourceFile
 
 # Regex patterns for static import extraction

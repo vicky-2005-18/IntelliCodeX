@@ -5,10 +5,17 @@ Fine-Grained Symbol Call Graph Engine
 - Computes symbol centrality (PageRank / In-degree) to highlight critical hot-spot functions.
 """
 import ast
+import os
+import sys
 import logging
 from dataclasses import dataclass
 from typing import List, Dict, Set, Optional, Tuple
 import networkx as nx
+
+# Ensure repository root is on sys.path for direct script execution
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
 
 from core.parser import SourceFile
 from core.chunker import CodeChunk
