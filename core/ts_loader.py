@@ -7,9 +7,11 @@ from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-# Cache loaded tree-sitter language objects and parsers
+# Cache loaded tree-sitter language objects and parsers (None indicates failed/unsupported)
 _LANGUAGES: Dict[str, Any] = {}
 _PARSERS: Dict[str, Any] = {}
+_TREE_SITTER_WARNED_LANGS = set()
+
 
 def _init_language(lang_name: str):
     """Dynamically loads and registers tree-sitter language grammar bindings."""
@@ -47,12 +49,16 @@ def _init_language(lang_name: str):
             import tree_sitter_rust as tsrust
             lang_obj = Language(tsrust.language())
         else:
+            _LANGUAGES[lang_name] = None
             return None
 
         _LANGUAGES[lang_name] = lang_obj
         return lang_obj
     except Exception as e:
-        logger.warning(f"Failed to load tree-sitter binding for '{lang_name}': {e}")
+        if lang_name not in _TREE_SITTER_WARNED_LANGS:
+            logger.debug(f"Tree-sitter binding for '{lang_name}' unavailable ({e}). Using fallback chunker.")
+            _TREE_SITTER_WARNED_LANGS.add(lang_name)
+        _LANGUAGES[lang_name] = None
         return None
 
 

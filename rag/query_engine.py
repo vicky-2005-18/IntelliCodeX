@@ -45,7 +45,23 @@ class QueryEngine:
         }
 
         if self.llm is None:
-            response["answer"] = "(No LLM configured — retrieval-only mode. See retrieved_chunks.)"
+            relevant_chunks = [(c, s) for c, s in results if s > 0.001]
+            if not relevant_chunks:
+                response["answer"] = (
+                    f"[Offline Mode] TF-IDF search found no direct code symbol matches for '{question}'.\n"
+                    f"Tip: Search for specific functions, classes, or code keywords (e.g., 'session', 'cookies', 'authenticate', 'request').\n"
+                    f"To enable full natural language AI reasoning, switch backend via 'backend ollama'."
+                )
+            else:
+                summary_lines = [f"[Offline Mode Summary] Found {len(relevant_chunks)} matching code references:"]
+                for chunk, score in relevant_chunks:
+                    desc = f"  • {chunk.file_path} :: {chunk.name} (lines {chunk.start_line}-{chunk.end_line}, score={score:.3f})"
+                    if chunk.docstring:
+                        first_line = chunk.docstring.strip().splitlines()[0]
+                        desc += f"\n    \"{first_line[:80]}\""
+                    summary_lines.append(desc)
+                summary_lines.append("\n(Switch to 'backend ollama' for AI-synthesized natural language explanations).")
+                response["answer"] = "\n".join(summary_lines)
             return response
 
         prompt = f"Repository context:\n\n{context}\n\nQuestion: {question}\n\nAnswer:"

@@ -34,8 +34,15 @@ class OllamaEmbedder(BaseEmbedder):
 
         vectors = []
         batch_size = 16
+        total = len(texts)
 
-        for i in range(0, len(texts), batch_size):
+        if total > 20:
+            print(f"[*] Generating Ollama AI embeddings ({self.model}) for {total} code chunks...")
+
+        for i in range(0, total, batch_size):
+            if total > 20:
+                print(f"    -> Embedding progress: {min(i + batch_size, total)}/{total} chunks...", end="\r", flush=True)
+
             batch = [t[:4000] for t in texts[i : i + batch_size]]
             try:
                 # Try modern Ollama /api/embed endpoint with batching
@@ -78,6 +85,9 @@ class OllamaEmbedder(BaseEmbedder):
                             vectors.append(r2.json()["embedding"])
                     except Exception:
                         vectors.append([0.0] * self.dim)
+
+        if total > 20:
+            print(f"    -> Embedding progress: {total}/{total} chunks (Done!)  ")
 
         return np.array(vectors, dtype="float32")
 
