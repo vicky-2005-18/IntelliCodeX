@@ -1,12 +1,12 @@
 """
 Multi-Language Dependency Analysis Engine
 - Builds a file-level import and dependency graph across Python, JS/TS, Java, C/C++, Go, and Rust.
-- Exposes graph as NetworkX DiGraph for querying, impact analysis, and context expansion.
+- Exposes graph as NetworkX DiGraph for querying, impact analysis, and centrality scoring.
 """
 import ast
 import os
 import re
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Tuple
 import networkx as nx
 from core.parser import SourceFile
 
@@ -77,34 +77,27 @@ def resolve_import_to_file(source_rel_path: str, import_str: str, all_files: Dic
     normalized_source = source_rel_path.replace("\\", "/")
     normalized_import = import_str.replace("\\", "/")
 
-    # 1. Exact match in repository files
     if normalized_import in all_files:
         return normalized_import
 
     source_dir = os.path.dirname(normalized_source)
 
-    # 2. Relative import handling (e.g. './api', '../utils/math')
     if normalized_import.startswith("./") or normalized_import.startswith("../"):
         combined = os.path.normpath(os.path.join(source_dir, normalized_import)).replace("\\", "/")
-        
-        # Check direct match or with common code extensions
         extensions = ["", ".ts", ".tsx", ".js", ".jsx", ".py", ".java", ".go", ".rs", ".h", ".hpp", ".cpp", ".c"]
         for ext in extensions:
             cand = combined + ext
             if cand in all_files:
                 return cand
-            # Index file fallback (e.g. ./utils -> ./utils/index.ts)
             index_cand = f"{combined}/index{ext}".replace("//", "/")
             if index_cand in all_files:
                 return index_cand
 
-    # 3. C/C++ Header include match (e.g. 'utils/math.h' or 'math.h')
     header_name = os.path.basename(normalized_import)
     for rel_path in all_files:
         if rel_path.replace("\\", "/").endswith("/" + header_name) or rel_path.replace("\\", "/") == header_name:
             return rel_path
 
-    # 4. Java / Python package resolution (e.g. 'com.app.service.UserService' -> '.../UserService.java')
     if "." in import_str:
         last_part = import_str.split(".")[-1]
         py_cand = import_str.replace(".", "/") + ".py"
@@ -115,7 +108,6 @@ def resolve_import_to_file(source_rel_path: str, import_str: str, all_files: Dic
             if norm_rel.endswith(py_cand) or norm_rel.endswith(java_cand) or norm_rel.endswith(f"/{last_part}.java"):
                 return rel_path
 
-    # 5. Rust / Go module matching (e.g. 'mod user;' -> 'user.rs' or 'user/mod.rs')
     for rel_path in all_files:
         norm_rel = rel_path.replace("\\", "/")
         if norm_rel.endswith(f"/{import_str}.rs") or norm_rel.endswith(f"/{import_str}/mod.rs"):
@@ -131,12 +123,10 @@ def build_dependency_graph(source_files: List[SourceFile]) -> nx.DiGraph:
     graph = nx.DiGraph()
     all_files_map = {sf.rel_path.replace("\\", "/"): sf for sf in source_files}
 
-    # Add all files as primary nodes
     for sf in source_files:
         norm_path = sf.rel_path.replace("\\", "/")
         graph.add_node(norm_path, language=sf.language, external=False)
 
-    # Process imports for each file
     for sf in source_files:
         source_norm = sf.rel_path.replace("\\", "/")
         raw_imports = extract_file_imports(sf)
@@ -146,7 +136,6 @@ def build_dependency_graph(source_files: List[SourceFile]) -> nx.DiGraph:
             if target_file:
                 graph.add_edge(source_norm, target_file, internal=True, raw_import=imp)
             else:
-                # Add node for external dependency (e.g. 'react', 'numpy', 'std')
                 graph.add_node(imp, external=True, language="external")
                 graph.add_edge(source_norm, imp, internal=False, raw_import=imp)
 
@@ -162,6 +151,33 @@ def files_likely_affected_by(graph: nx.DiGraph, changed_file: str) -> List[str]:
     if norm_target not in graph:
         return []
     
-    # Ancestors in DiGraph (edges flow from source -> imported_file)
     ancestors = nx.ancestors(graph, norm_target)
     return [node for node in ancestors if not graph.nodes[node].get("external", False)]
+
+
+def calculate_file_centrality(graph: nx.DiGraph) -> Dict[str, float]:
+    """
+    Calculates PageRank centrality scores for all internal files in the dependency graph.
+    Higher score indicates a foundational file heavily relied upon across the repo.
+    """
+    if len(graph) == 0:
+        return {}
+    try:
+        pr_scores = nx.pagerank(graph, alpha=0.85)
+    except Exception:
+        # Fallback to in-degree centrality if graph is degenerate
+        pr_scores = nx.in_degree_centrality(graph)
+
+    # Filter for internal files and normalize
+    internal_scores = {
+        node: score for node, score in pr_scores.items() 
+        if not graph.nodes[node].get("external", False)
+    }
+    return internal_scores
+
+
+def get_top_central_files(graph: nx.DiGraph, top_n: int = 10) -> List[Tuple[str, float]]:
+    """Returns top N most central files sorted by PageRank score."""
+    scores = calculate_file_centrality(graph)
+    sorted_files = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return sorted_files[:top_n]

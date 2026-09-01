@@ -2,11 +2,12 @@
 Fine-Grained Symbol Call Graph Engine
 - Extracts caller/callee function relationships across Python, JS/TS, Java, C/C++, Go, and Rust.
 - Builds a function-level call graph (NetworkX DiGraph) mapping who calls which function/method.
+- Computes symbol centrality (PageRank / In-degree) to highlight critical hot-spot functions.
 """
 import ast
 import logging
 from dataclasses import dataclass
-from typing import List, Dict, Set, Optional
+from typing import List, Dict, Set, Optional, Tuple
 import networkx as nx
 
 from core.parser import SourceFile
@@ -58,7 +59,6 @@ def _extract_tree_sitter_calls(content: str, rel_path: str, lang: str) -> List[d
         return []
 
     calls = []
-    # AST node types for function/method calls per language
     call_node_types = {
         "call_expression", "method_invocation", "function_call_expression",
         "macro_invocation", "expression_statement"
@@ -69,7 +69,6 @@ def _extract_tree_sitter_calls(content: str, rel_path: str, lang: str) -> List[d
             fn_node = node.children[0]
             call_str = source_bytes[fn_node.start_byte:fn_node.end_byte].decode("utf-8", errors="ignore").strip()
             if call_str:
-                # Normalize object method calls e.g. "db.saveUser" -> "saveUser"
                 simple_name = call_str.split(".")[-1].split("->")[-1].split("::")[-1]
                 line = node.start_point[0] + 1
                 calls.append({"name": simple_name, "full_call": call_str, "line": line})
@@ -98,7 +97,6 @@ def build_call_graph(chunks: List[CodeChunk], source_files: List[SourceFile]) ->
     graph = nx.DiGraph()
     symbol_table: Dict[str, List[CodeChunk]] = {}
 
-    # 1. Populate Symbol Table mapping function/method names to CodeChunk targets
     for chunk in chunks:
         graph.add_node(
             chunk.chunk_id,
@@ -107,13 +105,11 @@ def build_call_graph(chunks: List[CodeChunk], source_files: List[SourceFile]) ->
             kind=chunk.kind,
             name=chunk.name
         )
-        # Key by simple function name (e.g. "fetchUser" or "UserService.fetchUser")
         simple_name = chunk.name.split(".")[-1].split("::")[-1]
         symbol_table.setdefault(simple_name, []).append(chunk)
 
     source_map = {sf.rel_path: sf for sf in source_files}
 
-    # 2. Match function calls inside each chunk to defined symbol targets
     for chunk in chunks:
         sf = source_map.get(chunk.file_path)
         if not sf:
@@ -126,7 +122,6 @@ def build_call_graph(chunks: List[CodeChunk], source_files: List[SourceFile]) ->
             callee_name = call["name"]
             if callee_name in symbol_table:
                 for target_chunk in symbol_table[callee_name]:
-                    # Prevent self-recursive edges from bloating context unless distinct
                     if target_chunk.chunk_id != chunk.chunk_id:
                         graph.add_edge(
                             chunk.chunk_id,
@@ -154,3 +149,23 @@ def find_callees_of_chunk(call_graph: nx.DiGraph, chunk_id: str) -> List[str]:
     if chunk_id not in call_graph:
         return []
     return list(call_graph.successors(chunk_id))
+
+
+def calculate_symbol_centrality(call_graph: nx.DiGraph) -> Dict[str, float]:
+    """
+    Computes PageRank centrality scores for all function chunks in the call graph.
+    Identifies hot-spot core functions that are central to project execution.
+    """
+    if len(call_graph) == 0:
+        return {}
+    try:
+        return nx.pagerank(call_graph, alpha=0.85)
+    except Exception:
+        return nx.in_degree_centrality(call_graph)
+
+
+def get_top_central_symbols(call_graph: nx.DiGraph, top_n: int = 10) -> List[Tuple[str, float]]:
+    """Returns top N most central function/method symbols sorted by PageRank score."""
+    scores = calculate_symbol_centrality(call_graph)
+    sorted_symbols = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return sorted_symbols[:top_n]
