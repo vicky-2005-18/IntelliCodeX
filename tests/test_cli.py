@@ -135,13 +135,15 @@ def test_cli_main_files_ls(capsys):
 
 
 def test_cli_main_deps_command(capsys):
-    user_inputs = ["deps:db.py", "exit"]
+    user_inputs = ["deps:db.py", "callers:get_user", "top", "exit"]
     with patch("builtins.input", side_effect=user_inputs):
         with patch("sys.argv", ["cli.py", "sample_repo", "--backend", "tfidf"]):
             main()
 
     captured = capsys.readouterr()
-    assert "Files depending on db.py" in captured.out
+    assert "Dependency Analysis for 'db.py'" in captured.out
+    assert "Symbol Callers for 'get_user'" in captured.out
+    assert "Top Central Files" in captured.out
 
 
 def test_cli_main_backend_switch(capsys):

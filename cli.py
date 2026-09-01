@@ -17,7 +17,8 @@ from core.pipeline import ingest_repository
 from core.embedder import TfidfEmbedder, OllamaEmbedder
 from core.llm_client import OllamaLLM
 from rag.query_engine import QueryEngine
-from core.dependency_graph import files_likely_affected_by
+from core.dependency_graph import files_likely_affected_by, get_top_central_files
+from core.call_graph import find_callers_of_symbol, get_top_central_symbols
 
 
 def check_ollama_available(host: str = "http://localhost:11434") -> bool:
@@ -75,7 +76,9 @@ def print_banner():
 def print_help():
     help_text = """
 Available Commands:
-  deps:<filepath>        - Find files depending on <filepath> (e.g. 'deps:pkg/db.py')
+  deps:<filepath>        - View direct & reverse dependencies for <filepath> (e.g. 'deps:pkg/db.py')
+  callers:<func>         - Find all function call sites calling <func> (e.g. 'callers:fetch_user')
+  top / centrality       - Show top central files and critical functions (PageRank score)
   repo <path_or_url>     - Switch/clone active repository (e.g. 'repo https://github.com/user/repo')
   backend <ollama|tfidf> - Switch active backend engine dynamically
   files / ls             - List all indexed source files in the active repository
@@ -121,10 +124,12 @@ def main():
         print(f"[!] Error ingesting repository '{args.repo_path}': {e}")
         return 1
 
-    print(f"[*] Indexed {result.num_files} files -> {result.num_chunks} code chunks")
+    print(f"[*] Indexed {result.num_files} files -> {result.num_chunks} code chunks ({result.ast_chunks_count} AST)")
     print(f"[*] Dependency graph: {result.graph.number_of_nodes()} nodes, {result.graph.number_of_edges()} edges")
+    if getattr(result, "call_graph", None):
+        print(f"[*] Call graph: {result.call_graph.number_of_nodes()} nodes, {result.call_graph.number_of_edges()} call edges")
 
-    engine = QueryEngine(result.store, embedder, llm)
+    engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
 
     print("\nIntelliCodeX ready. Type a question or 'help' for options, 'exit' to quit.\n")
 
@@ -135,7 +140,6 @@ def main():
             print("\nExiting IntelliCodeX CLI. Goodbye!")
             break
 
-        # Strip leading prompt markers like '>>' or '>' or '$' if user accidentally included them
         while query.startswith(">") or query.startswith("$"):
             query = query.lstrip(">").lstrip("$").strip()
 
@@ -163,6 +167,27 @@ def main():
             print()
             continue
 
+        if query.lower() in ("top", "centrality"):
+            top_files = get_top_central_files(result.graph, top_n=5)
+            print("\n--- Top Central Files (PageRank Score) ---")
+            if not top_files:
+                print("  (no internal dependencies found)")
+            else:
+                for idx, (fpath, score) in enumerate(top_files, start=1):
+                    print(f"  {idx}. {fpath} (score={score:.3f})")
+
+            call_g = getattr(result, "call_graph", None)
+            if call_g:
+                top_syms = get_top_central_symbols(call_g, top_n=5)
+                print("\n--- Top Central Function Symbols (PageRank Score) ---")
+                if not top_syms:
+                    print("  (no function call edges found)")
+                else:
+                    for idx, (cid, score) in enumerate(top_syms, start=1):
+                        print(f"  {idx}. {cid} (score={score:.3f})")
+            print()
+            continue
+
         if query.lower().startswith("backend "):
             new_backend = query.split(maxsplit=1)[1].strip().lower()
             if new_backend not in ("ollama", "tfidf"):
@@ -171,11 +196,10 @@ def main():
             embedder, llm, active_backend = create_components(new_backend)
             print(f"[*] Re-indexing repository with '{active_backend}' backend...")
             result = ingest_repository(current_path, embedder)
-            engine = QueryEngine(result.store, embedder, llm)
+            engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
             print(f"[*] Backend updated to '{active_backend}'.\n")
             continue
 
-        # Handle repo switching: 'repo <target>', 'repo:<target>', 'use <target>', or direct URLs
         if (query.startswith("repo ") or query.startswith("repo:") or 
             query.startswith("use ") or query.startswith("ingest ") or 
             query.startswith("http://") or query.startswith("https://") or query.startswith("git@")):
@@ -194,7 +218,7 @@ def main():
                 new_result = ingest_repository(new_path, embedder)
                 result = new_result
                 current_path = new_path
-                engine = QueryEngine(result.store, embedder, llm)
+                engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
                 print(f"[*] Indexed {result.num_files} files -> {result.num_chunks} chunks")
                 print(f"[*] Dependency graph: {result.graph.number_of_nodes()} nodes, {result.graph.number_of_edges()} edges")
                 print(f"[*] Successfully switched active repository to '{new_path}'!\n")
@@ -202,20 +226,43 @@ def main():
                 print(f"[!] Error switching repository: {e}\n")
             continue
 
-        if query.startswith("deps:"):
-            target = query[len("deps:"):].strip()
+        if query.startswith("deps:") or query.startswith("deps "):
+            target = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
             affected = files_likely_affected_by(result.graph, target)
-            print(f"\nFiles depending on {target}: {affected or '(none found)'}\n")
+            print(f"\n--- Dependency Analysis for '{target}' ---")
+            print("  Reverse Dependencies (Files affected if modified):")
+            if not affected:
+                print("    (none found)")
+            else:
+                for aff in affected:
+                    print(f"    ├── {aff}")
+            print()
+            continue
+
+        if query.startswith("callers:") or query.startswith("callers "):
+            symbol_target = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+            call_g = getattr(result, "call_graph", None)
+            if not call_g:
+                print("[!] Call graph is unavailable.")
+                continue
+
+            callers = find_callers_of_symbol(call_g, symbol_target)
+            print(f"\n--- Symbol Callers for '{symbol_target}' ---")
+            if not callers:
+                print("  (no calling function sites found)")
+            else:
+                for c_id in callers:
+                    print(f"  ├── {c_id}")
+            print()
             continue
 
         response = engine.ask(query)
         print(f"\n--- Retrieved {len(response['retrieved_chunks'])} chunks ---")
         for c in response["retrieved_chunks"]:
-            print(f"  {c['file']} :: {c['name']} (lines {c['lines']}, score={c['score']:.3f})")
+            reason_str = f", context={c['reason']}" if "reason" in c else ""
+            print(f"  {c['file']} :: {c['name']} (lines {c['lines']}, score={c['score']:.3f}{reason_str})")
         print(f"\n--- Answer ---\n{response['answer']}\n")
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
