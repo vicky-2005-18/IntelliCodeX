@@ -1,7 +1,8 @@
 """
 Vector Database Layer — FAISS-backed similarity search over CodeChunks.
 """
-from typing import List, Tuple
+import os
+from typing import List, Tuple, Optional
 import numpy as np
 import faiss
 from core.chunker import CodeChunk
@@ -35,5 +36,26 @@ class FaissVectorStore:
             results.append((self.chunks[idx], float(score)))
         return results
 
+    def save(self, filepath: str) -> str:
+        """Saves the FAISS index to a binary file on disk."""
+        abs_path = os.path.abspath(filepath)
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        faiss.write_index(self.index, abs_path)
+        return abs_path
+
+    @classmethod
+    def load(cls, filepath: str, chunks: Optional[List[CodeChunk]] = None) -> "FaissVectorStore":
+        """Loads a FAISS index from a binary file on disk and binds provided code chunks."""
+        abs_path = os.path.abspath(filepath)
+        if not os.path.exists(abs_path):
+            raise FileNotFoundError(f"FAISS index file not found at '{abs_path}'")
+        index = faiss.read_index(abs_path)
+        store = cls(dim=index.d)
+        store.index = index
+        if chunks is not None:
+            store.chunks = chunks
+        return store
+
     def __len__(self):
         return len(self.chunks)
+

@@ -189,7 +189,7 @@ def main():
             continue
 
         if query.lower().startswith("backend "):
-            new_backend = query.split(maxsplit=1)[1].strip().lower()
+            new_backend = query.split(maxsplit=1)[1].strip().lstrip("-").lower()
             if new_backend not in ("ollama", "tfidf"):
                 print("[!] Invalid backend. Choose 'ollama' or 'tfidf'.\n")
                 continue

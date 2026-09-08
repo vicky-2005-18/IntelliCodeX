@@ -147,7 +147,7 @@ def test_cli_main_deps_command(capsys):
 
 
 def test_cli_main_backend_switch(capsys):
-    user_inputs = ["backend tfidf", "backend invalid_engine", "exit"]
+    user_inputs = ["backend --tfidf", "backend invalid_engine", "exit"]
     with patch("builtins.input", side_effect=user_inputs):
         with patch("sys.argv", ["cli.py", "sample_repo", "--backend", "tfidf"]):
             main()
