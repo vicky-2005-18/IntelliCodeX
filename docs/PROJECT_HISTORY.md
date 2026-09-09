@@ -4,3 +4,4 @@
 [2026-09-07T18:15:00+05:30] feat: core AST parsing logic update (2026-09-07 part 2)
 [2026-09-08T14:15:00+05:30] fix: handle edge cases in file path resolver (2026-09-08 part 1)
 [2026-09-08T18:15:00+05:30] fix: handle edge cases in file path resolver (2026-09-08 part 2)
+[2026-09-09T14:15:00+05:30] test: add unit tests for query engine (2026-09-09 part 1)
