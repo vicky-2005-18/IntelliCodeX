@@ -272,6 +272,94 @@ def load_index(
     return meta, chunks, store
 
 
+@dataclass
+class RepositoryDelta:
+    added: List[SourceFile]
+    modified: List[SourceFile]
+    deleted: List[str]  # list of relative file paths
+    unchanged: List[SourceFile]
+    is_fresh_index: bool = False
+
+    def has_changes(self) -> bool:
+        return bool(self.added or self.modified or self.deleted)
+
+    @property
+    def total_changed_files(self) -> int:
+        return len(self.added) + len(self.modified) + len(self.deleted)
+
+
+def detect_repository_changes(
+    repo_path: str,
+    current_source_files: List[SourceFile],
+    db_path: str = DEFAULT_DB_PATH
+) -> RepositoryDelta:
+    """
+    Compares current repository source files against stored SHA-256 hashes in SQLite.
+    Categorizes files into added, modified, deleted, and unchanged.
+    """
+    repo_id = get_repo_id(repo_path)
+    if not os.path.exists(db_path):
+        return RepositoryDelta(
+            added=current_source_files,
+            modified=[],
+            deleted=[],
+            unchanged=[],
+            is_fresh_index=True
+        )
+
+    conn = get_db_connection(db_path)
+    try:
+        stored_hashes = load_stored_file_hashes(conn, repo_id)
+    finally:
+        conn.close()
+
+    if not stored_hashes:
+        return RepositoryDelta(
+            added=current_source_files,
+            modified=[],
+            deleted=[],
+            unchanged=[],
+            is_fresh_index=True
+        )
+
+    added: List[SourceFile] = []
+    modified: List[SourceFile] = []
+    unchanged: List[SourceFile] = []
+    current_rel_paths = set()
+
+    for sf in current_source_files:
+        current_rel_paths.add(sf.rel_path)
+        curr_hash = compute_file_hash(sf.content)
+
+        if sf.rel_path not in stored_hashes:
+            added.append(sf)
+        elif stored_hashes[sf.rel_path] != curr_hash:
+            modified.append(sf)
+        else:
+            unchanged.append(sf)
+
+    deleted = [rel_path for rel_path in stored_hashes if rel_path not in current_rel_paths]
+
+    return RepositoryDelta(
+        added=added,
+        modified=modified,
+        deleted=deleted,
+        unchanged=unchanged,
+        is_fresh_index=False
+    )
+
+
+def delete_files_from_db(conn: sqlite3.Connection, repo_id: str, rel_paths: List[str]):
+    """Removes deleted files and their associated code chunks from SQLite DB."""
+    if not rel_paths:
+        return
+    with conn:
+        placeholders = ",".join("?" for _ in rel_paths)
+        conn.execute(f"DELETE FROM chunks WHERE repo_id = ? AND file_path IN ({placeholders})", [repo_id] + rel_paths)
+        conn.execute(f"DELETE FROM files WHERE repo_id = ? AND rel_path IN ({placeholders})", [repo_id] + rel_paths)
+
+
+
 if __name__ == "__main__":
     db_test_path = os.path.join(".storage", "test_metadata.db")
     if os.path.exists(db_test_path):
