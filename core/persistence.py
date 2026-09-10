@@ -131,7 +131,7 @@ def save_repo_metadata(
         for c in chunks:
             imports_str = json.dumps(c.imports) if c.imports else "[]"
             conn.execute("""
-                INSERT INTO chunks (chunk_id, repo_id, file_path, language, kind, name, start_line, end_line, code, docstring, imports_json)
+                INSERT OR REPLACE INTO chunks (chunk_id, repo_id, file_path, language, kind, name, start_line, end_line, code, docstring, imports_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """, (c.chunk_id, repo_id, c.file_path, c.language, c.kind, c.name, c.start_line, c.end_line, c.code, c.docstring, imports_str))
 
