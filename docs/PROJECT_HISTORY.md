@@ -8,3 +8,4 @@
 [2026-09-09T18:15:00+05:30] feat: core AST parsing logic update (2026-09-09 part 2)
 [2026-09-10T14:15:00+05:30] test: add unit tests for query engine (2026-09-10 part 1)
 [2026-09-10T18:15:00+05:30] perf: improve vector search indexing speed (2026-09-10 part 2)
+[2026-09-11T14:15:00+05:30] docs: update architecture design notes (2026-09-11 part 1)
