@@ -11,3 +11,4 @@
 [2026-09-11T14:15:00+05:30] docs: update architecture design notes (2026-09-11 part 1)
 [2026-09-11T18:15:00+05:30] perf: improve vector search indexing speed (2026-09-11 part 2)
 [2026-09-12T14:15:00+05:30] perf: improve vector search indexing speed (2026-09-12 part 1)
+[2026-09-12T18:15:00+05:30] docs: update architecture design notes (2026-09-12 part 2)
