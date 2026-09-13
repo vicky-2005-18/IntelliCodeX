@@ -1,9 +1,14 @@
 """
 Advanced Bug Localization Package
 """
-from backend.bug_localizer.advanced_localizer import (
+from core.bug_localizer import (
+    BugLocalizer,
     AdvancedBugLocalizer,
     StackTraceParser,
     StackFrame,
     ParsedStackTrace,
+    calculate_ochiai_score,
+    calculate_ochiai_spectrum,
+    CoverageRecord,
 )
+

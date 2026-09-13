@@ -19,6 +19,10 @@ from core.llm_client import OllamaLLM
 from rag.query_engine import QueryEngine
 from core.dependency_graph import files_likely_affected_by, get_top_central_files
 from core.call_graph import find_callers_of_symbol, get_top_central_symbols
+from core.git_hooks import install_git_hooks, uninstall_git_hooks, check_git_hooks_status
+from core.patch_generator import PatchEngine
+from core.persistence import get_repo_id
+
 
 
 def check_ollama_available(host: str = "http://localhost:11434") -> bool:
@@ -76,17 +80,22 @@ def print_banner():
 def print_help():
     help_text = """
 Available Commands:
+  fix:<err_or_file>      - Diagnose bug & generate automated code patch (e.g. 'fix:KeyError in auth.py')
   deps:<filepath>        - View direct & reverse dependencies for <filepath> (e.g. 'deps:pkg/db.py')
   callers:<func>         - Find all function call sites calling <func> (e.g. 'callers:fetch_user')
   top / centrality       - Show top central files and critical functions (PageRank score)
   repo <path_or_url>     - Switch/clone active repository (e.g. 'repo https://github.com/user/repo')
   backend <ollama|tfidf> - Switch active backend engine dynamically
+  hooks / setup-hooks   - Install Git background re-indexing hooks for current repository
+  hooks:status          - Check status of installed Git hooks
+  hooks:remove          - Uninstall Git background re-indexing hooks
   files / ls             - List all indexed source files in the active repository
   clear / cls            - Clear terminal screen
   help / ?               - Show this help message
   exit / quit            - Exit IntelliCodeX CLI
 """
     print(help_text)
+
 
 
 def create_components(backend_choice: str):
@@ -110,7 +119,35 @@ def main():
                         help="Local directory path or Git URL (default: sample_repo)")
     parser.add_argument("--backend", choices=["ollama", "tfidf"], default="tfidf",
                         help="LLM & Embedding backend (default: tfidf)")
+    parser.add_argument("--setup-hooks", action="store_true",
+                        help="Install Git background re-indexing hooks for target repository")
+    parser.add_argument("--check-hooks", action="store_true",
+                        help="Check status of Git background re-indexing hooks")
+    parser.add_argument("--remove-hooks", action="store_true",
+                        help="Uninstall Git background re-indexing hooks")
     args = parser.parse_args()
+
+    # Handle direct hook CLI flags if requested
+    if args.setup_hooks:
+        target = resolve_repo_path(args.repo_path)
+        ok, msg = install_git_hooks(target)
+        print(f"[*] {msg}")
+        return 0 if ok else 1
+
+    if args.check_hooks:
+        target = resolve_repo_path(args.repo_path)
+        st = check_git_hooks_status(target)
+        print(f"[*] Git Hook Status for '{target}':")
+        for hook, is_inst in st.items():
+            print(f"  - {hook}: {'Installed' if is_inst else 'Not Installed'}")
+        return 0
+
+    if args.remove_hooks:
+        target = resolve_repo_path(args.repo_path)
+        ok, msg = uninstall_git_hooks(target)
+        print(f"[*] {msg}")
+        return 0 if ok else 1
+
 
     print_banner()
 
@@ -225,6 +262,65 @@ def main():
             except Exception as e:
                 print(f"[!] Error switching repository: {e}\n")
             continue
+
+        if query.lower() in ("hooks:status", "hooks:check"):
+            st = check_git_hooks_status(current_path)
+            print(f"\n--- Git Hook Status for '{current_path}' ---")
+            for hook, is_inst in st.items():
+                print(f"  - {hook}: {'Installed' if is_inst else 'Not Installed'}")
+            print()
+            continue
+
+        if query.lower() in ("hooks:remove", "hooks:uninstall"):
+            ok, msg = uninstall_git_hooks(current_path)
+            print(f"\n[*] {msg}\n")
+            continue
+
+        if query.lower() in ("hooks", "setup-hooks", "hooks:install", "hooks:setup"):
+            ok, msg = install_git_hooks(current_path)
+            print(f"\n[*] {msg}\n")
+            continue
+
+        if query.startswith("fix:") or query.startswith("fix "):
+            err_input = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+            
+            # If err_input points to a file, read its error log content
+            if os.path.isfile(err_input):
+                try:
+                    with open(err_input, "r", encoding="utf-8", errors="ignore") as f:
+                        err_input = f.read()
+                except Exception:
+                    pass
+
+            print("\n[*] Analyzing error report & localizing bug root cause...")
+            patch_engine = PatchEngine(result.store, embedder, llm, graph=result.graph, repo_path=current_path)
+            patch_rec = patch_engine.generate_patch(
+                repo_id=get_repo_id(current_path),
+                error_report=err_input
+            )
+
+            print("\n=======================================================================")
+            print("                 INTELLICODEX AUTOMATED CODE PATCH")
+            print("=======================================================================")
+            print(f"Target File     : {patch_rec['target_file']}")
+            print(f"Error Type      : {patch_rec.get('error_type', 'Unknown')}")
+            print(f"Confidence      : {patch_rec['confidence_score']:.0%}")
+            print(f"Explanation     : {patch_rec['explanation']}")
+            print("\n--- Unified Git Diff ---")
+            print(patch_rec["git_diff"])
+            print("=======================================================================\n")
+
+            if patch_rec["status"] != "failed" and patch_rec["git_diff"]:
+                try:
+                    ans = input(f"Apply this patch to '{patch_rec['target_file']}'? [y/N]: ").strip().lower()
+                    if ans in ("y", "yes"):
+                        ok_app, msg_app = patch_engine.apply_patch(patch_rec)
+                        print(f"[*] {msg_app}\n")
+                except (EOFError, KeyboardInterrupt):
+                    pass
+            continue
+
+
 
         if query.startswith("deps:") or query.startswith("deps "):
             target = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
