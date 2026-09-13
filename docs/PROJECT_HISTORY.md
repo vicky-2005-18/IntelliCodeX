@@ -13,3 +13,4 @@
 [2026-09-12T14:15:00+05:30] perf: improve vector search indexing speed (2026-09-12 part 1)
 [2026-09-12T18:15:00+05:30] docs: update architecture design notes (2026-09-12 part 2)
 [2026-09-13T14:15:00+05:30] fix: handle edge cases in file path resolver (2026-09-13 part 1)
+[2026-09-13T18:15:00+05:30] docs: update architecture design notes (2026-09-13 part 2)
