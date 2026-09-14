@@ -117,19 +117,46 @@ def create_components(backend_choice: str):
         return TfidfEmbedder(), None, "tfidf"
 
 
+from core.benchmarking import run_benchmark
+
+VERSION = "1.0.0-sem1"
+
+
 def main():
-    parser = argparse.ArgumentParser(description="IntelliCodeX CLI")
+    parser = argparse.ArgumentParser(description="IntelliCodeX CLI — AI Repository Intelligence")
     parser.add_argument("repo_path", nargs="?", default="sample_repo",
                         help="Local directory path or Git URL (default: sample_repo)")
     parser.add_argument("--backend", choices=["ollama", "tfidf"], default="tfidf",
                         help="LLM & Embedding backend (default: tfidf)")
+    parser.add_argument("-q", "--query", type=str,
+                        help="Execute a non-interactive query in batch mode and exit")
+    parser.add_argument("--benchmark", action="store_true",
+                        help="Run performance benchmark on target repository and exit")
     parser.add_argument("--setup-hooks", action="store_true",
                         help="Install Git background re-indexing hooks for target repository")
     parser.add_argument("--check-hooks", action="store_true",
                         help="Check status of Git background re-indexing hooks")
     parser.add_argument("--remove-hooks", action="store_true",
                         help="Uninstall Git background re-indexing hooks")
+    parser.add_argument("-v", "--version", action="version", version=f"IntelliCodeX CLI v{VERSION}")
     args = parser.parse_args()
+
+    if args.benchmark:
+        target = resolve_repo_path(args.repo_path)
+        print(f"[*] Running IntelliCodeX Benchmark on '{target}'...")
+        report = run_benchmark(target)
+        print("=" * 65)
+        print(f"Benchmark Target       : {report.repo_path}")
+        print(f"Total Files Ingested   : {report.num_files}")
+        print(f"Total Chunks Extracted : {report.num_chunks}")
+        print(f"AST Chunks Count       : {report.ast_chunks_count} ({report.ast_ratio_percent}%)")
+        print(f"Fresh Ingestion Time   : {report.total_time_seconds}s ({report.files_per_second} files/sec)")
+        print(f"Cached Reload Time     : {report.cached_time_seconds}s ({report.speedup_factor}x faster)")
+        print(f"Query Latency          : {report.query_latency_ms} ms")
+        print(f"Graph Expansion Ratio  : {report.graph_expansion_ratio}x")
+        print(f"RAM Memory Impact      : {report.memory_used_mb} MB")
+        print("=" * 65)
+        return 0
 
     # Handle direct hook CLI flags if requested
     if args.setup_hooks:
@@ -152,7 +179,6 @@ def main():
         print(f"[*] {msg}")
         return 0 if ok else 1
 
-
     print_banner()
 
     embedder, llm, active_backend = create_components(args.backend)
@@ -171,6 +197,14 @@ def main():
         print(f"[*] Call graph: {result.call_graph.number_of_nodes()} nodes, {result.call_graph.number_of_edges()} call edges")
 
     engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
+
+    # Batch Query Non-Interactive Mode
+    if args.query:
+        print(f"\n[*] Executing Batch Query: '{args.query}'\n")
+        response = engine.ask(args.query)
+        print(f"--- Answer ---\n{response['answer']}\n")
+        return 0
+
 
     print("\nIntelliCodeX ready. Type a question or 'help' for options, 'exit' to quit.\n")
 

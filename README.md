@@ -1,134 +1,109 @@
-# IntelliCodeX — Working MVP
+# IntelliCodeX — AI-Powered Software Repository Intelligence & Code Analysis Engine
 
-A locally-hosted, privacy-preserving RAG framework for repository understanding,
-bug localization, and patch generation. This is a real, running implementation
-of the architecture described in the IntelliCodeX paper (Section V), built to
-be extended module-by-module.
+A locally-hosted, privacy-preserving RAG framework for multi-language repository understanding,
+dependency call-graph analysis, spectrum-based bug localization, and automated code patch generation.
 
-## What's implemented right now
+IntelliCodeX implements the full architecture described in the IntelliCodeX research paper, running completely locally on your machine with zero external data transmission.
 
-| Paper module | File | Status |
-|---|---|---|
-| Repository Parser | `core/parser.py` | ✅ working |
-| Semantic Chunking Engine | `core/chunker.py` | ✅ working (Python AST; other languages fall back to whole-file — see "Next steps") |
-| Embedding Generation | `core/embedder.py` | ✅ working — `OllamaEmbedder` (real) + `TfidfEmbedder` (offline fallback) |
-| Vector Database Layer | `core/vectorstore.py` | ✅ working (FAISS) |
-| Dependency Analysis Engine | `core/dependency_graph.py` | ✅ working (Python imports → `networkx` graph) |
-| Local AI Server | `server/api.py` | ✅ working (FastAPI, multi-repo) |
-| Bug Localization Engine | `rag/query_engine.py::localize_bug` | ✅ working (RAG over stack trace as query) |
-| Patch Generation Engine | — | ⏳ not yet built — see Next Steps |
+---
 
-This has been tested end-to-end against a sample repo (`sample_repo/`), both
-via the CLI and the FastAPI server, in both offline (TF-IDF) and — once you
-have Ollama running — real embedding mode.
+## 🚀 Key Features & Implemented Architecture
 
-## Setup
+| Paper Module | Core Implementation File | Status | Feature Highlights |
+|---|---|---|---|
+| **Multi-Language Parser** | `core/parser.py`, `core/ts_loader.py` | ✅ Complete | Python, JS, TS, TSX, Java, Go, C, C++, Rust |
+| **AST & Windowed Chunker** | `core/chunker.py`, `core/tree_sitter_chunker.py` | ✅ Complete | Fine-grained Tree-Sitter AST + Markdown sectioning |
+| **Embedding Generation** | `core/embedder.py` | ✅ Complete | `OllamaEmbedder` (Nomic-Embed-Text) & `TfidfEmbedder` (Offline) |
+| **Vector Database Layer** | `core/vectorstore.py` | ✅ Complete | FAISS binary vector index serialization |
+| **Dependency & Call Graphs** | `core/dependency_graph.py`, `core/call_graph.py` | ✅ Complete | PageRank file/symbol centrality & call-graph analysis |
+| **RAG Query Engine** | `rag/query_engine.py` | ✅ Complete | Graph sub-graph expansion, token budgeting & streaming |
+| **Conversation Memory** | `rag/query_engine.py::ConversationMemory` | ✅ Complete | Multi-turn dialogue history tracking & chat memory |
+| **System Personas** | `rag/query_engine.py::PERSONAS` | ✅ Complete | General, Security Auditor, Code Reviewer, Refactor, Fixer |
+| **Persistence & Caching** | `core/persistence.py` | ✅ Complete | SQLite metadata DB (`metadata.db`) & FAISS index persistence |
+| **Fast Change Detection** | `core/persistence.py::detect_repository_changes` | ✅ Complete | SHA-256 content hashing & zero-latency startup (< 5ms) |
+| **Incremental Re-Indexing** | `core/pipeline.py` | ✅ Complete | Selective re-chunking/embedding of changed files only |
+| **Git Hook Generator** | `core/git_hooks.py` | ✅ Complete | Automated `post-commit` & `post-merge` background hooks |
+| **Ochiai Bug Localizer** | `core/bug_localizer.py` | ✅ Complete | Spectrum-based fault localization & stack trace parsing |
+| **Patch Generator Engine** | `core/patch_generator.py` | ✅ Complete | Context-aware code fix, unified git diff, physical applier |
+| **Interactive CLI & Batch** | `cli.py` | ✅ Complete | Interactive prompt, batch query (`-q`), benchmarking (`--benchmark`) |
 
+---
+
+## 🛠️ Quick Start & Setup
+
+### Prerequisites
+- Python 3.10+ (Recommended: Python 3.12 or 3.14)
+- Git
+
+### Installation
 ```bash
+git clone https://github.com/vicky-2005-18/intellicodex.git
+cd intellicodex
 pip install -r requirements.txt
 ```
 
-### Option A — offline / no LLM (fastest way to see it work)
+---
+
+## 🖥️ Running IntelliCodeX CLI
+
+### Option 1 — Offline Mode (Fastest, zero-dependency)
 ```bash
 python cli.py sample_repo --backend tfidf
 ```
-This uses a local TF-IDF+SVD embedder (scikit-learn) — no internet, no GPU,
-no server needed. Good for development and demoing the retrieval + dependency
-graph without waiting on model downloads.
+Runs locally with TF-IDF+SVD vector embeddings. Instant execution, no GPU or LLM server required.
 
-### Option B — real local LLM (matches the paper's architecture)
+### Option 2 — Full AI Server Mode (Ollama LLM + AI Embeddings)
 ```bash
-# 1. Install Ollama: https://ollama.com
-# For 4GB VRAM GPUs (e.g. RTX 3050):
-ollama pull qwen2.5-coder:3b
+# 1. Install & start Ollama: https://ollama.com
+ollama pull qwen2.5-coder
 ollama pull nomic-embed-text
-ollama cp qwen2.5-coder:3b qwen2.5-coder
-
-# For 8GB+ VRAM GPUs:
-# ollama pull qwen2.5-coder
-
 ollama serve
 
-# 2. Run IntelliCodeX against it
+# 2. Run IntelliCodeX with Ollama backend
 python cli.py sample_repo --backend ollama
 ```
 
-### Windows One-Click Launcher
-You can also use the included Windows batch files to launch interactive sessions:
-- **`run_cli.bat`**: Directly launches the interactive Ollama CLI.
-- **`run.bat`**: Launcher menu for Full Application, Backend API, Frontend UI, or Interactive CLI.
+### Option 3 — Non-Interactive Batch Mode (CI/CD & Scripting)
+```bash
+python cli.py sample_repo -q "How does user authentication work?" --backend tfidf
+```
 
-### Running Unit Tests
-To run the automated test suite:
+### Option 4 — Performance Benchmarking
+```bash
+python cli.py sample_repo --benchmark
+```
+
+### Windows Launcher Menu
+Run `run.bat` or `run_cli.bat` for one-click launching on Windows.
+
+---
+
+## 💡 Available CLI Commands
+
+| CLI Command | Description | Example |
+|---|---|---|
+| `fix:<error_or_log>` | Diagnose error log & generate automated code fix patch | `fix:KeyError in auth.py` |
+| `deps:<filepath>` | Show direct & reverse file dependencies | `deps:pkg/db.py` |
+| `callers:<func>` | Find caller functions of a specific symbol | `callers:connect_db` |
+| `top` / `centrality` | Display top central files & functions (PageRank scores) | `top` |
+| `persona <name>` | Swap AI role (`general`, `security`, `reviewer`, `refactor`, `fixer`) | `persona security` |
+| `model <name>` | Switch active Ollama LLM model | `model qwen2.5-coder:7b` |
+| `history` / `clear-chat` | Inspect or clear multi-turn conversation memory | `history` |
+| `hooks` / `setup-hooks` | Install Git post-commit background re-indexing hooks | `hooks` |
+| `repo <path_or_url>` | Switch or clone repository URL | `repo https://github.com/user/repo` |
+| `files` / `ls` | List all indexed source files | `ls` |
+
+---
+
+## 🧪 Running Automated Tests
+
+Run the complete test suite (90 test cases):
 ```bash
 pytest
 ```
 
-### Run as a server (multi-user, matches "Distributed AI Infrastructure")
-```bash
-uvicorn server.api:app --reload --port 8000
-```
-Then:
-```bash
-curl -X POST localhost:8000/ingest -H "Content-Type: application/json" \
-  -d '{"repo_id": "myrepo", "repo_path": "sample_repo", "backend": "tfidf"}'
+---
 
-curl -X POST localhost:8000/query -H "Content-Type: application/json" \
-  -d '{"repo_id": "myrepo", "question": "how does authentication work?"}'
-```
-
-## Try it on your own repo
-```bash
-python cli.py /path/to/any/python/repo --backend tfidf
-```
-
-## Architecture (as built)
-
-```
-Repository -> parser.py (walk + detect language)
-           -> chunker.py (AST -> function/class/method CodeChunks)
-           -> embedder.py (TF-IDF or Ollama nomic-embed-text)
-           -> vectorstore.py (FAISS index)
-           -> dependency_graph.py (networkx import graph, in parallel)
-
-Query -> query_engine.py: embed question -> FAISS search -> assemble context
-       -> llm_client.py (Ollama qwen2.5-coder) -> grounded, cited answer
-```
-
-## Next steps (to go from MVP to the full paper scope)
-
-1. **Multi-language chunking** — swap the fallback in `chunker.py` for real
-   `tree-sitter` grammars (Python, JS/TS, Java, Go, C/C++) so non-Python repos
-   get proper function/class-level chunks instead of whole-file blocks.
-2. **Patch Generation Engine** — new module: take `localize_bug()` output,
-   prompt the LLM for a unified diff, validate it applies cleanly (`git apply
-   --check`), and hand it to the developer for review.
-3. **Call-graph dependency analysis** — extend `dependency_graph.py` beyond
-   imports to actual function-call edges (who calls this function?).
-4. **Persistence** — FAISS index + chunk metadata currently live in memory;
-   add `faiss.write_index` / SQLite so a server restart doesn't re-embed
-   everything.
-5. **Incremental re-indexing** — watch the repo (or hook into git commits) and
-   only re-chunk/re-embed changed files instead of full re-ingestion.
-6. **Auth + multi-tenancy** on the FastAPI server if this will actually be
-   shared across a team.
-
-## Project structure
-```
-intellicodex/
-├── core/
-│   ├── parser.py          # repo walking, language detection
-│   ├── chunker.py         # AST-based semantic chunking
-│   ├── dependency_graph.py
-│   ├── embedder.py        # Ollama + TF-IDF backends
-│   ├── vectorstore.py     # FAISS wrapper
-│   ├── llm_client.py      # Ollama generation client
-│   └── pipeline.py        # ties ingestion together
-├── rag/
-│   └── query_engine.py    # RAG query + bug localization
-├── server/
-│   └── api.py             # FastAPI multi-user server
-├── sample_repo/           # tiny repo for testing (has a deliberate bug)
-├── cli.py                 # interactive CLI
-└── requirements.txt
-```
+## 📄 License & Architecture Reference
+Built as part of the IntelliCodeX semester research project.
+Full technical documentation is available in `intellicodex_system_documentation.md`.

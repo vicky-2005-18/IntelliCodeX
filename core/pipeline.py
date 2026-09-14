@@ -105,10 +105,21 @@ def ingest_repository(
                 new_chunks = chunk_repository(changed_files) if changed_files else []
 
                 if new_chunks:
+                    if hasattr(embedder, "dim") and getattr(embedder, "dim", None) != cached_store.dim:
+                        embedder.dim = cached_store.dim
+                        if hasattr(embedder, "_svd"):
+                            from sklearn.decomposition import TruncatedSVD
+                            embedder._svd = TruncatedSVD(n_components=cached_store.dim)
+                            embedder._fitted = False
+
+                    if hasattr(embedder, "fit") and callable(getattr(embedder, "fit")) and not getattr(embedder, "_fitted", True):
+                        embedder.fit([c.as_embedding_text() for c in cached_chunks + new_chunks])
+
                     new_texts = [c.as_embedding_text() for c in new_chunks]
                     new_vectors = embedder.embed(new_texts)
                 else:
                     new_vectors = np.zeros((0, cached_store.dim), dtype="float32")
+
 
                 # Combine retained + new
                 all_chunks = retained_chunks + new_chunks
