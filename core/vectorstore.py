@@ -27,11 +27,24 @@ class FaissVectorStore:
         self.chunks.extend(chunks)
 
     def search(self, query_vec: np.ndarray, top_k: int = 5) -> List[Tuple[CodeChunk, float]]:
-        query_vec = self._normalize(query_vec.reshape(1, -1))
-        scores, idxs = self.index.search(query_vec, min(top_k, len(self.chunks)))
+        flat = query_vec.flatten()
+        target_d = self.index.d
+        if len(flat) != target_d:
+            aligned = np.zeros((1, target_d), dtype="float32")
+            min_len = min(len(flat), target_d)
+            aligned[0, :min_len] = flat[:min_len]
+            query_vec = aligned
+        else:
+            query_vec = flat.reshape(1, -1)
+
+        query_vec = self._normalize(query_vec)
+        if len(self.chunks) == 0 or self.index.ntotal == 0:
+            return []
+
+        scores, idxs = self.index.search(query_vec, min(top_k, self.index.ntotal))
         results = []
         for score, idx in zip(scores[0], idxs[0]):
-            if idx == -1:
+            if idx == -1 or idx >= len(self.chunks):
                 continue
             results.append((self.chunks[idx], float(score)))
         return results

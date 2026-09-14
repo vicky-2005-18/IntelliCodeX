@@ -100,26 +100,22 @@ class TfidfEmbedder(BaseEmbedder):
         from sklearn.decomposition import TruncatedSVD
         self.dim = dim
         self._vectorizer = TfidfVectorizer(max_features=20000, token_pattern=r"(?u)\b\w+\b")
-        self._svd = TruncatedSVD(n_components=dim)
+        self._svd = TruncatedSVD(n_components=min(dim, 128))
         self._fitted = False
 
     def fit(self, corpus: List[str]):
         if not corpus or all(not text.strip() for text in corpus):
-            self.dim = 512
             self._fitted = True
             return
 
         try:
             tfidf = self._vectorizer.fit_transform(corpus)
             n_components = min(self.dim, max(1, tfidf.shape[1] - 1), max(1, tfidf.shape[0] - 1))
-            if n_components != self._svd.n_components:
-                from sklearn.decomposition import TruncatedSVD
-                self._svd = TruncatedSVD(n_components=n_components)
+            from sklearn.decomposition import TruncatedSVD
+            self._svd = TruncatedSVD(n_components=n_components)
             self._svd.fit(tfidf)
-            self.dim = n_components
             self._fitted = True
         except Exception:
-            self.dim = 512
             self._fitted = True
 
     def embed(self, texts: List[str]) -> np.ndarray:
@@ -132,6 +128,10 @@ class TfidfEmbedder(BaseEmbedder):
         try:
             tfidf = self._vectorizer.transform(texts)
             vecs = self._svd.transform(tfidf).astype("float32")
-            return vecs
+            if vecs.shape[1] < self.dim:
+                padded = np.zeros((len(texts), self.dim), dtype="float32")
+                padded[:, :vecs.shape[1]] = vecs
+                return padded
+            return vecs[:, :self.dim]
         except Exception:
             return np.zeros((len(texts), self.dim), dtype="float32")

@@ -152,6 +152,8 @@ def walk_repository(repo_root: str) -> List[SourceFile]:
             try:
                 with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read()
+                    if content.startswith("\ufeff"):
+                        content = content[1:]
             except OSError:
                 continue
 

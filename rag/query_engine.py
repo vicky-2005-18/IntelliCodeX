@@ -1,17 +1,69 @@
 """
-Repository-aware RAG query engine with Graph-Augmented Sub-Graph Context Expansion.
-Ties together: VectorStore (retrieval) + Dependency & Call Graphs (structural expansion) + LLM (reasoning).
+Repository-aware RAG query engine with Graph-Augmented Sub-Graph Context Expansion,
+Multi-Turn Dialogue Memory, Token Budgeting, System Personas, and Token Streaming.
 """
-from typing import List, Optional, Dict, Tuple, Set, Any
+from typing import List, Optional, Dict, Tuple, Set, Any, Generator
 import networkx as nx
 from core.vectorstore import FaissVectorStore
 from core.embedder import BaseEmbedder
 from core.chunker import CodeChunk
 
-SYSTEM_PROMPT = """You are IntelliCodeX, an AI assistant with access to a specific \
-software repository via retrieved code context and dependency graphs. Answer using ONLY \
-the provided context. Cite file paths and line numbers for every claim. If the context is \
-insufficient, say so explicitly instead of guessing."""
+
+PERSONAS: Dict[str, str] = {
+    "general": (
+        "You are IntelliCodeX, an AI code assistant with access to a specific software repository "
+        "via retrieved code context and dependency graphs. Answer using ONLY the provided context. "
+        "Cite file paths and line numbers for every claim. If the context is insufficient, say so explicitly."
+    ),
+    "security": (
+        "You are IntelliCodeX Security Auditor. Analyze the provided repository context strictly for security "
+        "vulnerabilities, injection risks, authentication flaws, and unsafe data practices. Highlight risks "
+        "and recommend remediation with exact file paths and line references."
+    ),
+    "reviewer": (
+        "You are IntelliCodeX Code Reviewer. Analyze code quality, readability, modularity, and clean code "
+        "principles in the retrieved context. Provide constructive refactoring recommendations with file citations."
+    ),
+    "refactor": (
+        "You are IntelliCodeX Architecture & Refactoring Specialist. Analyze module dependencies, caller-callee "
+        "couplings, and suggest clean design pattern improvements for the retrieved code."
+    ),
+    "fixer": (
+        "You are IntelliCodeX Automated Bug Fixer. Analyze error reports and code context to identify "
+        "root causes and suggest minimal, correct code fixes."
+    ),
+}
+
+DEFAULT_SYSTEM_PROMPT = PERSONAS["general"]
+
+
+class ConversationMemory:
+    """Manages multi-turn conversation dialogue history for RAG queries."""
+
+    def __init__(self, max_turns: int = 5):
+        self.max_turns = max_turns
+        self.turns: List[Tuple[str, str]] = []  # [(user_query, assistant_response)]
+
+    def add_turn(self, query: str, response: str):
+        self.turns.append((query, response))
+        if len(self.turns) > self.max_turns:
+            self.turns = self.turns[-self.max_turns:]
+
+    def clear(self):
+        self.turns.clear()
+
+    def format_history(self) -> str:
+        if not self.turns:
+            return ""
+        history_lines = ["--- Conversation History ---"]
+        for idx, (q, r) in enumerate(self.turns, start=1):
+            history_lines.append(f"Turn {idx} User: {q}")
+            r_snippet = r[:250].replace("\n", " ") + ("..." if len(r) > 250 else "")
+            history_lines.append(f"Turn {idx} Assistant: {r_snippet}")
+        return "\n".join(history_lines)
+
+    def __len__(self):
+        return len(self.turns)
 
 
 def expand_retrieved_context(
@@ -98,9 +150,12 @@ def expand_retrieved_context(
     return expanded_list
 
 
-def format_context(expanded_results: List[Any]) -> str:
-    """Formats expanded code chunks into markdown code blocks for LLM prompt context."""
+def format_context(expanded_results: List[Any], max_token_budget: int = 3000) -> str:
+    """Formats expanded code chunks into markdown code blocks with dynamic token budgeting."""
     blocks = []
+    char_budget = max_token_budget * 4
+    current_chars = 0
+
     for item in expanded_results:
         if isinstance(item, tuple):
             chunk, score = item[0], item[1]
@@ -113,24 +168,61 @@ def format_context(expanded_results: List[Any]) -> str:
             continue
 
         header = f"### {chunk.file_path} :: {chunk.name} (lines {chunk.start_line}-{chunk.end_line}, relevance={score:.2f}, context={reason})"
-        blocks.append(f"{header}\n```{chunk.language}\n{chunk.code}\n```")
+        block = f"{header}\n```{chunk.language}\n{chunk.code}\n```"
+
+        if current_chars + len(block) > char_budget:
+            remaining_chars = max(200, char_budget - current_chars)
+            truncated_code = chunk.code[:remaining_chars] + "\n... [truncated due to token budget]"
+            block = f"{header}\n```{chunk.language}\n{truncated_code}\n```"
+            blocks.append(block)
+            break
+
+        blocks.append(block)
+        current_chars += len(block)
+
     return "\n\n".join(blocks)
 
 
 class QueryEngine:
+    """
+    Multi-Turn Repository-Aware Query Engine.
+    """
+
     def __init__(
         self,
         store: FaissVectorStore,
         embedder: BaseEmbedder,
         llm=None,
         dep_graph: Optional[nx.DiGraph] = None,
-        call_graph: Optional[nx.DiGraph] = None
+        call_graph: Optional[nx.DiGraph] = None,
+        max_turns: int = 5,
     ):
         self.store = store
         self.embedder = embedder
         self.llm = llm
         self.dep_graph = dep_graph
         self.call_graph = call_graph
+        self.memory = ConversationMemory(max_turns=max_turns)
+        self.active_persona = "general"
+        self.system_prompt = PERSONAS["general"]
+
+    def set_persona(self, persona_name: str) -> str:
+        """Sets the active AI persona and system prompt."""
+        key = persona_name.lower().strip()
+        if key not in PERSONAS:
+            raise ValueError(f"Unknown persona '{persona_name}'. Available: {list(PERSONAS.keys())}")
+        self.active_persona = key
+        self.system_prompt = PERSONAS[key]
+        return self.active_persona
+
+    def set_model(self, model_name: str):
+        """Switches the active LLM model if supported."""
+        if self.llm and hasattr(self.llm, "set_model"):
+            self.llm.set_model(model_name)
+
+    def clear_memory(self):
+        """Clears current conversation history."""
+        self.memory.clear()
 
     def retrieve(self, query: str, top_k: int = 5):
         query_vec = self.embedder.embed([query])[0]
@@ -147,12 +239,20 @@ class QueryEngine:
             store_chunks=store_chunks
         )
 
-    def ask(self, question: str, top_k: int = 5) -> dict:
+    def ask(
+        self,
+        question: str,
+        top_k: int = 5,
+        use_memory: bool = True,
+        max_token_budget: int = 3000
+    ) -> dict:
+        """Performs RAG query answering with context expansion, conversation history, and persona reasoning."""
         expanded_results = self.retrieve_expanded(question, top_k=top_k)
-        context = format_context(expanded_results)
+        context = format_context(expanded_results, max_token_budget=max_token_budget)
 
         response = {
             "question": question,
+            "persona": self.active_persona,
             "retrieved_chunks": [
                 {
                     "file": item["chunk"].file_path,
@@ -168,7 +268,7 @@ class QueryEngine:
         if self.llm is None:
             relevant_items = [item for item in expanded_results if item["score"] > 0.001]
             if not relevant_items:
-                response["answer"] = (
+                ans = (
                     f"[Offline Mode] TF-IDF search found no direct code symbol matches for '{question}'.\n"
                     f"Tip: Search for specific functions, classes, or code keywords.\n"
                     f"To enable full natural language AI reasoning, switch backend via 'backend ollama'."
@@ -185,12 +285,61 @@ class QueryEngine:
                         desc += f"\n    \"{first_line[:80]}\""
                     summary_lines.append(desc)
                 summary_lines.append("\n(Switch to 'backend ollama' for AI-synthesized natural language explanations).")
-                response["answer"] = "\n".join(summary_lines)
+                ans = "\n".join(summary_lines)
+
+            response["answer"] = ans
+            if use_memory:
+                self.memory.add_turn(question, ans)
             return response
 
-        prompt = f"Repository context:\n\n{context}\n\nQuestion: {question}\n\nAnswer:"
-        response["answer"] = self.llm.generate(prompt, system=SYSTEM_PROMPT)
+        history_str = self.memory.format_history() if (use_memory and len(self.memory) > 0) else ""
+        prompt_parts = []
+        if history_str:
+            prompt_parts.append(history_str)
+        prompt_parts.append(f"Repository context:\n\n{context}")
+        prompt_parts.append(f"Question: {question}\n\nAnswer:")
+
+        prompt = "\n\n".join(prompt_parts)
+        answer = self.llm.generate(prompt, system=self.system_prompt)
+
+        response["answer"] = answer
+        if use_memory:
+            self.memory.add_turn(question, answer)
         return response
+
+    def stream_ask(
+        self,
+        question: str,
+        top_k: int = 5,
+        use_memory: bool = True,
+        max_token_budget: int = 3000
+    ) -> Generator[str, None, None]:
+        """Streams AI response tokens in real-time while updating conversation memory."""
+        expanded_results = self.retrieve_expanded(question, top_k=top_k)
+        context = format_context(expanded_results, max_token_budget=max_token_budget)
+
+        if self.llm is None or not hasattr(self.llm, "stream_generate"):
+            resp = self.ask(question, top_k=top_k, use_memory=use_memory, max_token_budget=max_token_budget)
+            yield resp["answer"]
+            return
+
+        history_str = self.memory.format_history() if (use_memory and len(self.memory) > 0) else ""
+        prompt_parts = []
+        if history_str:
+            prompt_parts.append(history_str)
+        prompt_parts.append(f"Repository context:\n\n{context}")
+        prompt_parts.append(f"Question: {question}\n\nAnswer:")
+
+        prompt = "\n\n".join(prompt_parts)
+        accumulated_tokens = []
+
+        for token in self.llm.stream_generate(prompt, system=self.system_prompt):
+            accumulated_tokens.append(token)
+            yield token
+
+        full_answer = "".join(accumulated_tokens)
+        if use_memory:
+            self.memory.add_turn(question, full_answer)
 
     def localize_bug(self, error_report: str, top_k: int = 5) -> dict:
         """Bug localization: treat error/stack trace as query and expand caller context graph."""

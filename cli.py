@@ -86,6 +86,9 @@ Available Commands:
   top / centrality       - Show top central files and critical functions (PageRank score)
   repo <path_or_url>     - Switch/clone active repository (e.g. 'repo https://github.com/user/repo')
   backend <ollama|tfidf> - Switch active backend engine dynamically
+  persona <name>         - Switch AI persona (general, security, reviewer, refactor, fixer)
+  model <model_name>     - Switch active Ollama model (e.g. 'model qwen2.5-coder:7b')
+  history / clear-chat   - View or clear multi-turn chat memory
   hooks / setup-hooks   - Install Git background re-indexing hooks for current repository
   hooks:status          - Check status of installed Git hooks
   hooks:remove          - Uninstall Git background re-indexing hooks
@@ -95,6 +98,7 @@ Available Commands:
   exit / quit            - Exit IntelliCodeX CLI
 """
     print(help_text)
+
 
 
 
@@ -280,6 +284,40 @@ def main():
             ok, msg = install_git_hooks(current_path)
             print(f"\n[*] {msg}\n")
             continue
+
+        if query.lower().startswith("persona"):
+            parts = query.split(maxsplit=1)
+            if len(parts) == 1:
+                print(f"\n[*] Active Persona: '{engine.active_persona}'")
+                print("Available Personas: general, security, reviewer, refactor, fixer\n")
+            else:
+                p_name = parts[1].strip()
+                try:
+                    active_p = engine.set_persona(p_name)
+                    print(f"[*] Active Persona updated to: '{active_p}'\n")
+                except ValueError as e:
+                    print(f"[!] {e}\n")
+            continue
+
+        if query.lower().startswith("model "):
+            new_model = query.split(maxsplit=1)[1].strip()
+            engine.set_model(new_model)
+            print(f"[*] Ollama LLM model set to: '{new_model}'\n")
+            continue
+
+        if query.lower() in ("history", "chat"):
+            hist = engine.memory.format_history()
+            if not hist:
+                print("\n[*] Conversation history is empty.\n")
+            else:
+                print(f"\n{hist}\n")
+            continue
+
+        if query.lower() in ("clear-chat", "clear:history", "clear-memory"):
+            engine.clear_memory()
+            print("\n[*] Conversation history cleared.\n")
+            continue
+
 
         if query.startswith("fix:") or query.startswith("fix "):
             err_input = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()

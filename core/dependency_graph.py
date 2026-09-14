@@ -105,15 +105,16 @@ def resolve_import_to_file(source_rel_path: str, import_str: str, all_files: Dic
         if rel_path.replace("\\", "/").endswith("/" + header_name) or rel_path.replace("\\", "/") == header_name:
             return rel_path
 
-    if "." in import_str:
-        last_part = import_str.split(".")[-1]
-        py_cand = import_str.replace(".", "/") + ".py"
-        java_cand = import_str.replace(".", "/") + ".java"
+    last_part = import_str.split(".")[-1]
+    py_cand = import_str.replace(".", "/") + ".py"
+    java_cand = import_str.replace(".", "/") + ".java"
 
-        for rel_path in all_files:
-            norm_rel = rel_path.replace("\\", "/")
-            if norm_rel.endswith(py_cand) or norm_rel.endswith(java_cand) or norm_rel.endswith(f"/{last_part}.java"):
-                return rel_path
+    for rel_path in all_files:
+        norm_rel = rel_path.replace("\\", "/")
+        if (norm_rel == py_cand or norm_rel.endswith("/" + py_cand) or 
+            norm_rel == java_cand or norm_rel.endswith("/" + java_cand) or 
+            norm_rel.endswith(f"/{last_part}.java")):
+            return rel_path
 
     for rel_path in all_files:
         norm_rel = rel_path.replace("\\", "/")
