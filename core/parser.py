@@ -49,12 +49,13 @@ LANGUAGE_BY_EXT = {
     ".sh": "bash",
 }
 
-# Directories to always skip during repository walking
+# Directories to always skip during repository walking (build artifacts, dependencies, tests, docs)
 IGNORE_DIRS = {
     ".git", "__pycache__", "node_modules", "venv", ".venv",
     "dist", "build", ".idea", ".vscode", "target", "egg-info",
     ".repos", ".storage", "coverage", ".next", "out", "vendor",
     ".pytest_cache", ".cache", "bin", "obj",
+    "tests", "test", "docs", "doc", "documentation", "locale", "translations", "fixtures", "site-packages",
 }
 
 # Binary and non-text file extensions to skip

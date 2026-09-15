@@ -2,6 +2,7 @@
 Repository-aware RAG query engine with Graph-Augmented Sub-Graph Context Expansion,
 Multi-Turn Dialogue Memory, Token Budgeting, System Personas, and Token Streaming.
 """
+import time
 from typing import List, Optional, Dict, Tuple, Set, Any, Generator
 import networkx as nx
 from core.vectorstore import FaissVectorStore
@@ -247,7 +248,9 @@ class QueryEngine:
         max_token_budget: int = 3000
     ) -> dict:
         """Performs RAG query answering with context expansion, conversation history, and persona reasoning."""
+        t_start = time.perf_counter()
         expanded_results = self.retrieve_expanded(question, top_k=top_k)
+        t_retrieval = time.perf_counter() - t_start
         context = format_context(expanded_results, max_token_budget=max_token_budget)
 
         response = {
@@ -287,7 +290,11 @@ class QueryEngine:
                 summary_lines.append("\n(Switch to 'backend ollama' for AI-synthesized natural language explanations).")
                 ans = "\n".join(summary_lines)
 
+            t_total = time.perf_counter() - t_start
             response["answer"] = ans
+            response["elapsed_seconds"] = round(t_total, 3)
+            response["retrieval_seconds"] = round(t_retrieval, 3)
+            response["llm_seconds"] = round(max(0.0, t_total - t_retrieval), 3)
             if use_memory:
                 self.memory.add_turn(question, ans)
             return response
@@ -302,7 +309,13 @@ class QueryEngine:
         prompt = "\n\n".join(prompt_parts)
         answer = self.llm.generate(prompt, system=self.system_prompt)
 
+        t_total = time.perf_counter() - t_start
+        t_llm = max(0.0, t_total - t_retrieval)
+
         response["answer"] = answer
+        response["elapsed_seconds"] = round(t_total, 3)
+        response["retrieval_seconds"] = round(t_retrieval, 3)
+        response["llm_seconds"] = round(t_llm, 3)
         if use_memory:
             self.memory.add_turn(question, answer)
         return response

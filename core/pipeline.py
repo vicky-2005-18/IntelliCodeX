@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
@@ -29,6 +30,8 @@ class IngestedRepository:
     ast_chunks_count: int = 0
     files: List[SourceFile] = field(default_factory=list)
     call_graph: Any = None
+    elapsed_seconds: float = 0.0
+    indexing_mode: str = "fresh"  # "cached", "incremental", "fresh"
 
 
 def ingest_repository(
@@ -44,6 +47,7 @@ def ingest_repository(
     3. If partially changed -> Re-chunks & re-embeds changed/added files only, reusing retained FAISS vectors.
     4. If fresh index or force_reindex -> Performs full end-to-end ingestion.
     """
+    start_t = time.perf_counter()
     if not os.path.exists(repo_path):
         raise FileNotFoundError(f"Repository path does not exist: '{repo_path}'")
 
@@ -76,6 +80,7 @@ def ingest_repository(
                     ast_count = sum(1 for c in cached_chunks if c.kind in ("function", "class", "method", "interface", "enum", "type", "struct", "section"))
 
 
+                    elapsed = time.perf_counter() - start_t
                     return IngestedRepository(
                         store=cached_store,
                         graph=graph,
@@ -85,6 +90,8 @@ def ingest_repository(
                         ast_chunks_count=ast_count,
                         files=source_files,
                         call_graph=call_g,
+                        elapsed_seconds=round(elapsed, 3),
+                        indexing_mode="cached",
                     )
 
                 # Case B: Partial changes -> incremental re-indexing
@@ -147,6 +154,7 @@ def ingest_repository(
                 if save_to_disk:
                     save_index(repo_path, backend_name, source_files, all_chunks, store)
 
+                elapsed = time.perf_counter() - start_t
                 return IngestedRepository(
                     store=store,
                     graph=graph,
@@ -156,6 +164,8 @@ def ingest_repository(
                     ast_chunks_count=ast_chunks_count,
                     files=source_files,
                     call_graph=call_g,
+                    elapsed_seconds=round(elapsed, 3),
+                    indexing_mode="incremental",
                 )
 
     # Full Ingestion (Fresh or force_reindex)
@@ -176,7 +186,8 @@ def ingest_repository(
     if save_to_disk:
         save_index(repo_path, backend_name, source_files, chunks, store)
 
-    logger.info(f"Ingested '{repo_path}': {len(source_files)} files, {len(chunks)} chunks ({ast_chunks_count} AST), call graph: {call_g.number_of_nodes()} nodes.")
+    elapsed = time.perf_counter() - start_t
+    logger.info(f"Ingested '{repo_path}': {len(source_files)} files, {len(chunks)} chunks ({ast_chunks_count} AST), call graph: {call_g.number_of_nodes()} nodes in {elapsed:.2f}s.")
 
     return IngestedRepository(
         store=store,
@@ -187,5 +198,7 @@ def ingest_repository(
         ast_chunks_count=ast_chunks_count,
         files=source_files,
         call_graph=call_g,
+        elapsed_seconds=round(elapsed, 3),
+        indexing_mode="fresh",
     )
 

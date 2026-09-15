@@ -8,10 +8,23 @@ Two backends:
   offline development, unit tests, or environments without Ollama installed.
   Swap this out for OllamaEmbedder once your server is running.
 """
+import time
 from abc import ABC, abstractmethod
 from typing import List
 import numpy as np
 import requests
+
+
+def _format_time(seconds: float) -> str:
+    """Formats duration in human-readable format."""
+    if seconds < 1.0:
+        return f"{seconds*1000:.0f}ms"
+    elif seconds < 60.0:
+        return f"{seconds:.1f}s"
+    else:
+        m = int(seconds // 60)
+        s = int(seconds % 60)
+        return f"{m}m {s:02d}s"
 
 
 class BaseEmbedder(ABC):
@@ -33,15 +46,27 @@ class OllamaEmbedder(BaseEmbedder):
             return np.zeros((0, self.dim), dtype="float32")
 
         vectors = []
-        batch_size = 16
+        batch_size = 64
         total = len(texts)
+        start_time = time.perf_counter()
 
         if total > 20:
             print(f"[*] Generating Ollama AI embeddings ({self.model}) for {total} code chunks...")
 
         for i in range(0, total, batch_size):
+            processed = min(i + batch_size, total)
+            elapsed = time.perf_counter() - start_time
+            rate = processed / elapsed if elapsed > 0.05 else 0.0
+            eta = (total - processed) / rate if rate > 0 else 0.0
+
             if total > 20:
-                print(f"    -> Embedding progress: {min(i + batch_size, total)}/{total} chunks...", end="\r", flush=True)
+                pct = (processed / total) * 100
+                print(
+                    f"    -> Progress: {processed}/{total} chunks ({pct:.1f}%) | "
+                    f"{rate:.1f} chunks/s | Elapsed: {_format_time(elapsed)} | ETA: {_format_time(eta)}   ",
+                    end="\r",
+                    flush=True,
+                )
 
             batch = [t[:4000] for t in texts[i : i + batch_size]]
             try:
@@ -87,7 +112,9 @@ class OllamaEmbedder(BaseEmbedder):
                         vectors.append([0.0] * self.dim)
 
         if total > 20:
-            print(f"    -> Embedding progress: {total}/{total} chunks (Done!)  ")
+            total_elapsed = time.perf_counter() - start_time
+            avg_rate = total / total_elapsed if total_elapsed > 0 else 0.0
+            print(f"\n[*] Embedding complete: {total}/{total} chunks in {_format_time(total_elapsed)} ({avg_rate:.1f} chunks/s)")
 
         return np.array(vectors, dtype="float32")
 

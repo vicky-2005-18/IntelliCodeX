@@ -12,7 +12,17 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 import requests
+
+# Ensure console output handles unicode without crashing on Windows cp1252
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from core.pipeline import ingest_repository
 from core.embedder import TfidfEmbedder, OllamaEmbedder
 from core.llm_client import OllamaLLM
@@ -23,6 +33,36 @@ from core.git_hooks import install_git_hooks, uninstall_git_hooks, check_git_hoo
 from core.patch_generator import PatchEngine
 from core.persistence import get_repo_id
 
+
+def format_time_consumed(seconds: float) -> str:
+    """Formats seconds into human-readable duration with high precision."""
+    if seconds < 0.001:
+        return "<1ms"
+    elif seconds < 1.0:
+        return f"{seconds*1000:.0f}ms"
+    elif seconds < 60.0:
+        return f"{seconds:.2f}s"
+    else:
+        m = int(seconds // 60)
+        s = seconds % 60
+        return f"{m}m {s:04.1f}s"
+
+
+def print_ingestion_summary(result, current_path: str, elapsed: float):
+    """Prints repository ingestion results with elapsed time, throughput, and cache mode."""
+    time_str = format_time_consumed(elapsed)
+    mode = getattr(result, "indexing_mode", "fresh").lower()
+    mode_badge = {
+        "cached": "Instant Disk Cache",
+        "incremental": "Incremental Update",
+        "fresh": "Fresh Indexing"
+    }.get(mode, "Fresh Indexing")
+    speed_str = f" ({result.num_files / elapsed:.1f} files/sec)" if elapsed > 0.05 and mode != "cached" else ""
+    print(f"[*] Indexed {result.num_files} files -> {result.num_chunks} code chunks ({result.ast_chunks_count} AST)")
+    print(f"[*] Dependency graph: {result.graph.number_of_nodes()} nodes, {result.graph.number_of_edges()} edges")
+    if getattr(result, "call_graph", None):
+        print(f"[*] Call graph: {result.call_graph.number_of_nodes()} nodes, {result.call_graph.number_of_edges()} call edges")
+    print(f"[*] [Time Consumed]: {time_str}{speed_str} [{mode_badge}]")
 
 
 def check_ollama_available(host: str = "http://localhost:11434") -> bool:
@@ -45,8 +85,10 @@ def resolve_repo_path(repo_target: str) -> str:
 
         if os.path.exists(target_dir) and os.path.exists(os.path.join(target_dir, ".git")):
             print(f"[*] Local clone found at '{target_dir}'. Syncing latest changes...")
+            t_pull = time.perf_counter()
             try:
                 subprocess.run(["git", "pull"], cwd=target_dir, capture_output=True, text=True, timeout=15)
+                print(f"[*] Git sync finished in {format_time_consumed(time.perf_counter() - t_pull)}.")
             except subprocess.TimeoutExpired:
                 print(f"[!] Warning: 'git pull' timed out after 15s. Using existing local files.")
             except Exception as e:
@@ -54,10 +96,12 @@ def resolve_repo_path(repo_target: str) -> str:
         else:
             os.makedirs(".repos", exist_ok=True)
             print(f"[*] Cloning remote Git repository '{repo_target}' into '{target_dir}'...")
+            t_clone = time.perf_counter()
             try:
                 res = subprocess.run(["git", "clone", "--depth", "50", repo_target, target_dir], capture_output=True, text=True, timeout=45)
                 if res.returncode != 0:
                     raise RuntimeError(f"Git clone failed: {res.stderr.strip() or 'Unknown error or empty repository'}")
+                print(f"[*] Git clone finished in {format_time_consumed(time.perf_counter() - t_clone)}.")
             except subprocess.TimeoutExpired:
                 raise RuntimeError("Git clone operation timed out (45s). Please check repository URL or network connection.")
         return target_dir
@@ -186,23 +230,25 @@ def main():
     try:
         current_path = resolve_repo_path(args.repo_path)
         print(f"[*] Ingesting repository: {current_path}")
+        t0 = time.perf_counter()
         result = ingest_repository(current_path, embedder)
+        elapsed = result.elapsed_seconds if getattr(result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t0)
     except Exception as e:
         print(f"[!] Error ingesting repository '{args.repo_path}': {e}")
         return 1
 
-    print(f"[*] Indexed {result.num_files} files -> {result.num_chunks} code chunks ({result.ast_chunks_count} AST)")
-    print(f"[*] Dependency graph: {result.graph.number_of_nodes()} nodes, {result.graph.number_of_edges()} edges")
-    if getattr(result, "call_graph", None):
-        print(f"[*] Call graph: {result.call_graph.number_of_nodes()} nodes, {result.call_graph.number_of_edges()} call edges")
+    print_ingestion_summary(result, current_path, elapsed)
 
     engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
 
     # Batch Query Non-Interactive Mode
     if args.query:
         print(f"\n[*] Executing Batch Query: '{args.query}'\n")
+        t_batch = time.perf_counter()
         response = engine.ask(args.query)
+        total_batch = response.get("elapsed_seconds", time.perf_counter() - t_batch)
         print(f"--- Answer ---\n{response['answer']}\n")
+        print(f"[*] [Time Consumed]: {format_time_consumed(total_batch)} (Retrieval: {format_time_consumed(response.get('retrieval_seconds', 0.0))}, Generation: {format_time_consumed(response.get('llm_seconds', 0.0))})\n")
         return 0
 
 
@@ -243,6 +289,7 @@ def main():
             continue
 
         if query.lower() in ("top", "centrality"):
+            t_top = time.perf_counter()
             top_files = get_top_central_files(result.graph, top_n=5)
             print("\n--- Top Central Files (PageRank Score) ---")
             if not top_files:
@@ -260,7 +307,7 @@ def main():
                 else:
                     for idx, (cid, score) in enumerate(top_syms, start=1):
                         print(f"  {idx}. {cid} (score={score:.3f})")
-            print()
+            print(f"\n[*] [Time Consumed]: Centrality computed in {format_time_consumed(time.perf_counter() - t_top)}\n")
             continue
 
         if query.lower().startswith("backend "):
@@ -270,8 +317,11 @@ def main():
                 continue
             embedder, llm, active_backend = create_components(new_backend)
             print(f"[*] Re-indexing repository with '{active_backend}' backend...")
+            t_sw = time.perf_counter()
             result = ingest_repository(current_path, embedder)
+            elapsed_sw = result.elapsed_seconds if getattr(result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t_sw)
             engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
+            print_ingestion_summary(result, current_path, elapsed_sw)
             print(f"[*] Backend updated to '{active_backend}'.\n")
             continue
 
@@ -290,12 +340,13 @@ def main():
             try:
                 new_path = resolve_repo_path(target)
                 print(f"[*] Parsing files and generating embeddings for '{new_path}'...")
+                t_repo = time.perf_counter()
                 new_result = ingest_repository(new_path, embedder)
+                elapsed_repo = new_result.elapsed_seconds if getattr(new_result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t_repo)
                 result = new_result
                 current_path = new_path
                 engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
-                print(f"[*] Indexed {result.num_files} files -> {result.num_chunks} chunks")
-                print(f"[*] Dependency graph: {result.graph.number_of_nodes()} nodes, {result.graph.number_of_edges()} edges")
+                print_ingestion_summary(result, current_path, elapsed_repo)
                 print(f"[*] Successfully switched active repository to '{new_path}'!\n")
             except Exception as e:
                 print(f"[!] Error switching repository: {e}\n")
@@ -365,11 +416,13 @@ def main():
                     pass
 
             print("\n[*] Analyzing error report & localizing bug root cause...")
+            t_fix = time.perf_counter()
             patch_engine = PatchEngine(result.store, embedder, llm, graph=result.graph, repo_path=current_path)
             patch_rec = patch_engine.generate_patch(
                 repo_id=get_repo_id(current_path),
                 error_report=err_input
             )
+            fix_time = time.perf_counter() - t_fix
 
             print("\n=======================================================================")
             print("                 INTELLICODEX AUTOMATED CODE PATCH")
@@ -377,6 +430,7 @@ def main():
             print(f"Target File     : {patch_rec['target_file']}")
             print(f"Error Type      : {patch_rec.get('error_type', 'Unknown')}")
             print(f"Confidence      : {patch_rec['confidence_score']:.0%}")
+            print(f"Time Consumed   : {format_time_consumed(fix_time)}")
             print(f"Explanation     : {patch_rec['explanation']}")
             print("\n--- Unified Git Diff ---")
             print(patch_rec["git_diff"])
@@ -396,6 +450,7 @@ def main():
 
         if query.startswith("deps:") or query.startswith("deps "):
             target = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+            t_deps = time.perf_counter()
             affected = files_likely_affected_by(result.graph, target)
             print(f"\n--- Dependency Analysis for '{target}' ---")
             print("  Reverse Dependencies (Files affected if modified):")
@@ -404,7 +459,7 @@ def main():
             else:
                 for aff in affected:
                     print(f"    ├── {aff}")
-            print()
+            print(f"\n[*] [Time Consumed]: Dependencies analyzed in {format_time_consumed(time.perf_counter() - t_deps)}\n")
             continue
 
         if query.startswith("callers:") or query.startswith("callers "):
@@ -414,6 +469,7 @@ def main():
                 print("[!] Call graph is unavailable.")
                 continue
 
+            t_callers = time.perf_counter()
             callers = find_callers_of_symbol(call_g, symbol_target)
             print(f"\n--- Symbol Callers for '{symbol_target}' ---")
             if not callers:
@@ -421,15 +477,21 @@ def main():
             else:
                 for c_id in callers:
                     print(f"  ├── {c_id}")
-            print()
+            print(f"\n[*] [Time Consumed]: Callers resolved in {format_time_consumed(time.perf_counter() - t_callers)}\n")
             continue
 
+        t_ask = time.perf_counter()
         response = engine.ask(query)
-        print(f"\n--- Retrieved {len(response['retrieved_chunks'])} chunks ---")
+        total_time = response.get("elapsed_seconds", time.perf_counter() - t_ask)
+        retrieval_time = response.get("retrieval_seconds", 0.0)
+        llm_time = response.get("llm_seconds", 0.0)
+
+        print(f"\n--- Retrieved {len(response['retrieved_chunks'])} chunks ({format_time_consumed(retrieval_time)}) ---")
         for c in response["retrieved_chunks"]:
             reason_str = f", context={c['reason']}" if "reason" in c else ""
             print(f"  {c['file']} :: {c['name']} (lines {c['lines']}, score={c['score']:.3f}{reason_str})")
-        print(f"\n--- Answer ---\n{response['answer']}\n")
+        print(f"\n--- Answer ---\n{response['answer']}")
+        print(f"\n[*] [Time Consumed]: {format_time_consumed(total_time)} (Retrieval: {format_time_consumed(retrieval_time)}, Generation: {format_time_consumed(llm_time)})\n")
 
 
 if __name__ == "__main__":
