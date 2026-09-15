@@ -109,8 +109,14 @@ goto :END
 echo.
 echo Running IntelliCodeX Interactive CLI (Ollama)...
 python cli.py sample_repo --backend ollama
-pause
-goto :END
+echo.
+echo =======================================================================
+echo IntelliCodeX CLI has stopped.
+echo =======================================================================
+set "RESTART_CLI=Y"
+set /p "RESTART_CLI=Restart CLI? [Y/N] (default Y): "
+if /i "%RESTART_CLI%"=="N" goto :MENU
+goto :START_CLI
 
 :START_DOCKER
 echo.

@@ -233,6 +233,20 @@ def main():
         t0 = time.perf_counter()
         result = ingest_repository(current_path, embedder)
         elapsed = result.elapsed_seconds if getattr(result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t0)
+    except KeyboardInterrupt:
+        print("\n[!] Initial repository ingestion cancelled by user (Ctrl+C).")
+        if args.repo_path != "sample_repo" and os.path.exists("sample_repo"):
+            print("[*] Falling back to default 'sample_repo'...")
+            try:
+                current_path = "sample_repo"
+                result = ingest_repository(current_path, embedder)
+                elapsed = result.elapsed_seconds if getattr(result, "elapsed_seconds", 0) > 0 else 0.1
+            except Exception as e_inner:
+                print(f"[!] Fallback error: {e_inner}")
+                return 1
+        else:
+            print("[*] Exiting.")
+            return 0
     except Exception as e:
         print(f"[!] Error ingesting repository '{args.repo_path}': {e}")
         return 1
@@ -315,14 +329,21 @@ def main():
             if new_backend not in ("ollama", "tfidf"):
                 print("[!] Invalid backend. Choose 'ollama' or 'tfidf'.\n")
                 continue
-            embedder, llm, active_backend = create_components(new_backend)
-            print(f"[*] Re-indexing repository with '{active_backend}' backend...")
-            t_sw = time.perf_counter()
-            result = ingest_repository(current_path, embedder)
-            elapsed_sw = result.elapsed_seconds if getattr(result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t_sw)
-            engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
-            print_ingestion_summary(result, current_path, elapsed_sw)
-            print(f"[*] Backend updated to '{active_backend}'.\n")
+            try:
+                new_embedder, new_llm, new_active_backend = create_components(new_backend)
+                print(f"[*] Re-indexing repository with '{new_active_backend}' backend...")
+                t_sw = time.perf_counter()
+                new_result = ingest_repository(current_path, new_embedder)
+                elapsed_sw = new_result.elapsed_seconds if getattr(new_result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t_sw)
+                embedder, llm, active_backend = new_embedder, new_llm, new_active_backend
+                result = new_result
+                engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
+                print_ingestion_summary(result, current_path, elapsed_sw)
+                print(f"[*] Backend updated to '{active_backend}'.\n")
+            except KeyboardInterrupt:
+                print(f"\n[!] Backend switch interrupted by user (Ctrl+C). Active backend remains '{active_backend}'.\n")
+            except Exception as e_be:
+                print(f"[!] Error switching backend: {e_be}\n")
             continue
 
         if (query.startswith("repo ") or query.startswith("repo:") or 
@@ -348,6 +369,9 @@ def main():
                 engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
                 print_ingestion_summary(result, current_path, elapsed_repo)
                 print(f"[*] Successfully switched active repository to '{new_path}'!\n")
+            except KeyboardInterrupt:
+                print(f"\n[!] Repository ingestion interrupted by user (Ctrl+C).")
+                print(f"[*] Active repository remains '{current_path}'. Any completed embeddings were saved to cache.\n")
             except Exception as e:
                 print(f"[!] Error switching repository: {e}\n")
             continue
@@ -481,17 +505,24 @@ def main():
             continue
 
         t_ask = time.perf_counter()
-        response = engine.ask(query)
-        total_time = response.get("elapsed_seconds", time.perf_counter() - t_ask)
-        retrieval_time = response.get("retrieval_seconds", 0.0)
-        llm_time = response.get("llm_seconds", 0.0)
+        try:
+            response = engine.ask(query)
+            total_time = response.get("elapsed_seconds", time.perf_counter() - t_ask)
+            retrieval_time = response.get("retrieval_seconds", 0.0)
+            llm_time = response.get("llm_seconds", 0.0)
 
-        print(f"\n--- Retrieved {len(response['retrieved_chunks'])} chunks ({format_time_consumed(retrieval_time)}) ---")
-        for c in response["retrieved_chunks"]:
-            reason_str = f", context={c['reason']}" if "reason" in c else ""
-            print(f"  {c['file']} :: {c['name']} (lines {c['lines']}, score={c['score']:.3f}{reason_str})")
-        print(f"\n--- Answer ---\n{response['answer']}")
-        print(f"\n[*] [Time Consumed]: {format_time_consumed(total_time)} (Retrieval: {format_time_consumed(retrieval_time)}, Generation: {format_time_consumed(llm_time)})\n")
+            print(f"\n--- Retrieved {len(response['retrieved_chunks'])} chunks ({format_time_consumed(retrieval_time)}) ---")
+            for c in response["retrieved_chunks"]:
+                reason_str = f", context={c['reason']}" if "reason" in c else ""
+                print(f"  {c['file']} :: {c['name']} (lines {c['lines']}, score={c['score']:.3f}{reason_str})")
+            print(f"\n--- Answer ---\n{response['answer']}")
+            print(f"\n[*] [Time Consumed]: {format_time_consumed(total_time)} (Retrieval: {format_time_consumed(retrieval_time)}, Generation: {format_time_consumed(llm_time)})\n")
+        except KeyboardInterrupt:
+            print("\n[!] Query cancelled by user (Ctrl+C).\n")
+            continue
+        except Exception as e:
+            print(f"\n[!] Error processing query: {e}\n")
+            continue
 
 
 if __name__ == "__main__":
