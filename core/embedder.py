@@ -66,6 +66,10 @@ class OllamaEmbedder(BaseEmbedder):
         self.host = host.rstrip("/")
         self.dim = 768  # nomic-embed-text output size
         self.cache_dir = cache_dir
+        # Fix 1: Hot in-memory layer — avoids Ollama HTTP round-trip on repeated queries
+        self._ram_cache: Dict[str, np.ndarray] = {}
+        # Fix 2: Persistent SQLite connection — opened once, reused across all embed() calls
+        self._db_conn = _get_embedding_cache(self.cache_dir)
 
     def embed(self, texts: List[str]) -> np.ndarray:
         if not texts:
@@ -78,20 +82,28 @@ class OllamaEmbedder(BaseEmbedder):
         hashes = [hashlib.sha256(t[:4000].encode("utf-8", errors="ignore")).hexdigest() for t in texts]
         cached_map: Dict[str, np.ndarray] = {}
 
-        # Step 2: Check SQLite persistent embedding cache
-        conn = _get_embedding_cache(self.cache_dir)
+        # Step 2a: Check hot in-memory RAM cache first (zero latency)
+        for h in hashes:
+            if h in self._ram_cache:
+                cached_map[h] = self._ram_cache[h]
+
+        # Step 2b: Check persistent SQLite cache for any still-missing hashes
+        conn = self._db_conn
         if conn:
             try:
+                remaining_hashes = [h for h in hashes if h not in cached_map]
                 cur = conn.cursor()
-                for chunk_start in range(0, len(hashes), 900):
-                    batch_hashes = hashes[chunk_start : chunk_start + 900]
+                for chunk_start in range(0, len(remaining_hashes), 900):
+                    batch_hashes = remaining_hashes[chunk_start : chunk_start + 900]
                     placeholders = ",".join("?" for _ in batch_hashes)
                     rows = cur.execute(
                         f"SELECT text_hash, vector FROM chunk_embeddings WHERE model = ? AND text_hash IN ({placeholders})",
                         [self.model] + batch_hashes
                     ).fetchall()
                     for h, blob in rows:
-                        cached_map[h] = np.frombuffer(blob, dtype=np.float32)
+                        vec = np.frombuffer(blob, dtype=np.float32)
+                        cached_map[h] = vec
+                        self._ram_cache[h] = vec  # promote to RAM cache
             except Exception:
                 pass
 
@@ -179,12 +191,13 @@ class OllamaEmbedder(BaseEmbedder):
                     except Exception:
                         batch_vectors.append([0.0] * self.dim)
 
-            # Checkpoint new batch into SQLite cache immediately
+            # Checkpoint new batch into SQLite cache + RAM cache immediately
             new_cache_rows = []
             for sub_idx, vec in zip(sub_indices, batch_vectors):
                 h = hashes[sub_idx]
                 vec_np = np.array(vec, dtype="float32")
                 cached_map[h] = vec_np
+                self._ram_cache[h] = vec_np  # promote to hot RAM cache
                 new_cache_rows.append((self.model, h, len(vec_np), vec_np.tobytes()))
 
             if conn and new_cache_rows:

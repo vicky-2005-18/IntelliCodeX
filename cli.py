@@ -506,23 +506,63 @@ def main():
 
         t_ask = time.perf_counter()
         try:
-            response = engine.ask(query)
-            total_time = response.get("elapsed_seconds", time.perf_counter() - t_ask)
-            retrieval_time = response.get("retrieval_seconds", 0.0)
-            llm_time = response.get("llm_seconds", 0.0)
+            # Fix 4: Two-phase streaming — retrieve+display chunks first, then stream LLM tokens.
+            # This lets the user see retrieved context in ~3s instead of waiting for the full 54s response.
 
-            print(f"\n--- Retrieved {len(response['retrieved_chunks'])} chunks ({format_time_consumed(retrieval_time)}) ---")
-            for c in response["retrieved_chunks"]:
-                reason_str = f", context={c['reason']}" if "reason" in c else ""
-                print(f"  {c['file']} :: {c['name']} (lines {c['lines']}, score={c['score']:.3f}{reason_str})")
-            print(f"\n--- Answer ---\n{response['answer']}")
-            print(f"\n[*] [Time Consumed]: {format_time_consumed(total_time)} (Retrieval: {format_time_consumed(retrieval_time)}, Generation: {format_time_consumed(llm_time)})\n")
+            # Phase 1: Retrieve and display chunks immediately
+            expanded_results = engine.retrieve_expanded(query, top_k=5)
+            t_retrieval = time.perf_counter() - t_ask
+
+            print(f"\n--- Retrieved {len(expanded_results)} chunks ({format_time_consumed(t_retrieval)}) ---")
+            for item in expanded_results:
+                chunk = item["chunk"]
+                score = item["score"]
+                reason = item.get("reason", "")
+                reason_str = f", context={reason}" if reason else ""
+                lines_str = f"{chunk.start_line}-{chunk.end_line}"
+                print(f"  {chunk.file_path} :: {chunk.name} (lines {lines_str}, score={score:.3f}{reason_str})")
+
+            # Phase 2: Stream LLM answer tokens in real-time (or fall back to ask() for tfidf mode)
+            print(f"\n--- Answer ---")
+            if engine.llm is not None and hasattr(engine.llm, "stream_generate"):
+                # Streaming path: tokens appear immediately as they are generated
+                from rag.query_engine import format_context
+                context = format_context(expanded_results, max_token_budget=3000)
+                history_str = engine.memory.format_history() if len(engine.memory) > 0 else ""
+                prompt_parts = []
+                if history_str:
+                    prompt_parts.append(history_str)
+                prompt_parts.append(f"Repository context:\n\n{context}")
+                prompt_parts.append(f"Question: {query}\n\nAnswer:")
+                prompt = "\n\n".join(prompt_parts)
+
+                accumulated = []
+                t_gen_start = time.perf_counter()
+                for token in engine.llm.stream_generate(prompt, system=engine.system_prompt):
+                    print(token, end="", flush=True)
+                    accumulated.append(token)
+                print()
+
+                full_answer = "".join(accumulated)
+                engine.memory.add_turn(query, full_answer)
+                t_llm = time.perf_counter() - t_gen_start
+                total_time = time.perf_counter() - t_ask
+            else:
+                # Offline / tfidf fallback: use standard ask() without streaming
+                response = engine.ask(query)
+                print(response["answer"])
+                total_time = response.get("elapsed_seconds", time.perf_counter() - t_ask)
+                t_retrieval = response.get("retrieval_seconds", t_retrieval)
+                t_llm = response.get("llm_seconds", 0.0)
+
+            print(f"\n[*] [Time Consumed]: {format_time_consumed(total_time)} (Retrieval: {format_time_consumed(t_retrieval)}, Generation: {format_time_consumed(t_llm)})\n")
         except KeyboardInterrupt:
             print("\n[!] Query cancelled by user (Ctrl+C).\n")
             continue
         except Exception as e:
             print(f"\n[!] Error processing query: {e}\n")
             continue
+
 
 
 if __name__ == "__main__":

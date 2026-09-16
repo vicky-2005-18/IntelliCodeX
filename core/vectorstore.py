@@ -7,6 +7,9 @@ import numpy as np
 import faiss
 from core.chunker import CodeChunk
 
+# Fix 5: IVF index kicks in above this chunk count for ~10x faster approximate search
+_IVF_THRESHOLD = 5000
+
 
 class FaissVectorStore:
     def __init__(self, dim: int):
@@ -25,6 +28,30 @@ class FaissVectorStore:
         vectors = self._normalize(vectors)
         self.index.add(vectors)
         self.chunks.extend(chunks)
+        # Fix 5: Auto-promote to IVF when crossing the large-repo threshold
+        if len(self.chunks) >= _IVF_THRESHOLD and isinstance(self.index, faiss.IndexFlatIP):
+            self.promote_to_ivf()
+
+    def promote_to_ivf(self):
+        """Promote the flat index to an IVFFlat approximate index for faster large-repo search.
+        No-op if the index is already IVF or has fewer than _IVF_THRESHOLD vectors."""
+        n = self.index.ntotal
+        if n < _IVF_THRESHOLD or not isinstance(self.index, faiss.IndexFlatIP):
+            return
+        try:
+            # Reconstruct all existing vectors from the flat index
+            all_vecs = np.zeros((n, self.dim), dtype="float32")
+            for i in range(n):
+                all_vecs[i] = self.index.reconstruct(i)
+            nlist = min(256, max(4, n // 50))
+            quantizer = faiss.IndexFlatIP(self.dim)
+            ivf = faiss.IndexIVFFlat(quantizer, self.dim, nlist, faiss.METRIC_INNER_PRODUCT)
+            ivf.train(all_vecs)
+            ivf.add(all_vecs)
+            ivf.nprobe = min(32, nlist)  # search 32 cells for accuracy/speed balance
+            self.index = ivf
+        except Exception:
+            pass  # keep flat index on any failure
 
     def search(self, query_vec: np.ndarray, top_k: int = 5) -> List[Tuple[CodeChunk, float]]:
         flat = query_vec.flatten()

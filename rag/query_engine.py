@@ -81,11 +81,15 @@ def expand_retrieved_context(
     seen_chunk_ids: Set[str] = {chunk.chunk_id for chunk, _ in results}
     expanded_list: List[Dict] = []
 
-    # Map chunk IDs to CodeChunk objects for fast lookup
+    # Map chunk IDs to CodeChunk objects for fast O(1) lookup
     chunk_map: Dict[str, CodeChunk] = {}
+    # Fix 3: Pre-build file→chunks index for O(1) dep expansion (replaces O(n) inner scan)
+    file_to_chunks: Dict[str, List[CodeChunk]] = {}
     if store_chunks:
         for c in store_chunks:
             chunk_map[c.chunk_id] = c
+            key = c.file_path.replace("\\", "/")
+            file_to_chunks.setdefault(key, []).append(c)
 
     # 1. Add direct vector search results
     for chunk, score in results:
@@ -126,7 +130,7 @@ def expand_retrieved_context(
                         "is_expanded": True
                     })
 
-    # 3. Expand Dependency Graph relations (files imported by top-K files)
+    # 3. Expand Dependency Graph relations — O(1) per imported file via pre-built index
     if dep_graph is not None:
         for chunk, score in results:
             rel_file = chunk.file_path.replace("\\", "/")
@@ -136,9 +140,8 @@ def expand_retrieved_context(
                     if data.get("internal", False)
                 ]
                 for imp_file in imported_files[:2]:
-                    # Find first chunk in imported file
-                    for c in chunk_map.values():
-                        if c.file_path.replace("\\", "/") == imp_file and c.chunk_id not in seen_chunk_ids:
+                    for c in file_to_chunks.get(imp_file, []):
+                        if c.chunk_id not in seen_chunk_ids:
                             seen_chunk_ids.add(c.chunk_id)
                             expanded_list.append({
                                 "chunk": c,
