@@ -128,7 +128,9 @@ Available Commands:
   deps:<filepath>        - View direct & reverse dependencies for <filepath> (e.g. 'deps:pkg/db.py')
   callers:<func>         - Find all function call sites calling <func> (e.g. 'callers:fetch_user')
   top / centrality       - Show top central files and critical functions (PageRank score)
+  repos / list-repos     - List all already-added repositories and switch by number
   repo <path_or_url>     - Switch/clone active repository (e.g. 'repo https://github.com/user/repo')
+  repo <number>          - Switch to a previously added repo by its list number (e.g. 'repo 2')
   backend <ollama|tfidf> - Switch active backend engine dynamically
   persona <name>         - Switch AI persona (general, security, reviewer, refactor, fixer)
   model <model_name>     - Switch active Ollama model (e.g. 'model qwen2.5-coder:7b')
@@ -142,6 +144,43 @@ Available Commands:
   exit / quit            - Exit IntelliCodeX CLI
 """
     print(help_text)
+
+
+def get_available_repos(current_path: str) -> list:
+    """Returns a list of (label, abs_path) tuples for all known local repositories.
+
+    Scans:
+    - The .repos/ folder (cloned remote repos)
+    - sample_repo (built-in demo)
+    - The currently active repository (if not already listed)
+    """
+    known: list = []  # list of (label, abs_path)
+    seen_paths: set = set()
+
+    # 1. Built-in sample_repo
+    sample_abs = os.path.abspath("sample_repo")
+    if os.path.isdir(sample_abs):
+        known.append(("sample_repo", sample_abs))
+        seen_paths.add(sample_abs)
+
+    # 2. Everything cloned into .repos/
+    repos_dir = os.path.abspath(".repos")
+    if os.path.isdir(repos_dir):
+        for entry in sorted(os.scandir(repos_dir), key=lambda e: e.name.lower()):
+            if entry.is_dir() and os.path.isdir(os.path.join(entry.path, ".git")):
+                abs_p = os.path.abspath(entry.path)
+                if abs_p not in seen_paths:
+                    known.append((entry.name, abs_p))
+                    seen_paths.add(abs_p)
+
+    # 3. Currently active repo if not already listed
+    active_abs = os.path.abspath(current_path)
+    if active_abs not in seen_paths and os.path.isdir(active_abs):
+        label = os.path.basename(active_abs)
+        known.append((label, active_abs))
+        seen_paths.add(active_abs)
+
+    return known
 
 
 
@@ -346,16 +385,38 @@ def main():
                 print(f"[!] Error switching backend: {e_be}\n")
             continue
 
+        # --- repos / list-repos: show all known repos with numbered selection ---
+        if query.lower() in ("repos", "list-repos", "list repos", "show repos"):
+            available = get_available_repos(current_path)
+            active_abs = os.path.abspath(current_path)
+            print(f"\n--- Available Repositories ({len(available)}) ---")
+            for idx, (label, abs_p) in enumerate(available, start=1):
+                active_marker = " (active ✓)" if abs_p == active_abs else ""
+                print(f"  [{idx}] {label:<25} {abs_p}{active_marker}")
+            print("\n  Tip: type 'repo <number>' to switch, e.g. 'repo 2'\n")
+            continue
+
         if (query.startswith("repo ") or query.startswith("repo:") or 
             query.startswith("use ") or query.startswith("ingest ") or 
             query.startswith("http://") or query.startswith("https://") or query.startswith("git@")):
-            
+
             if query.startswith("repo:"):
                 target = query[len("repo:"):].strip()
             elif query.startswith("repo ") or query.startswith("use ") or query.startswith("ingest "):
                 target = query.split(maxsplit=1)[1].strip()
             else:
                 target = query
+
+            # Support switching by list number: 'repo 2'
+            if target.isdigit():
+                available = get_available_repos(current_path)
+                idx = int(target) - 1
+                if 0 <= idx < len(available):
+                    target = available[idx][1]  # use the abs_path
+                    print(f"[*] Selected: {available[idx][0]} -> {target}")
+                else:
+                    print(f"[!] Invalid number '{target}'. Run 'repos' to see the list.\n")
+                    continue
 
             print(f"[*] Processing repository target: {target}")
             try:
