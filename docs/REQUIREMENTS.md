@@ -130,17 +130,10 @@ Requirements are categorized into:
   1. Mount all enterprise routers under `/api/*` prefix.
   2. Implement JWT authentication (`/api/auth/register`, `/api/auth/login`, `/api/auth/me`).
   3. Provide legacy endpoint compatibility (`/ingest`, `/query`, `/localize_bug`, `/dependencies`).
-  4. Enable CORS middleware for local React frontend development.
+  4. Enable CORS middleware for local development.
 * **Implementation**: [`backend/main.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/backend/main.py), [`backend/api/`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/backend/api/), [`server/api.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/server/api.py)
 
-### [REQ-F-11] React Web Frontend UI `[CONFIRMED]`
-* **Description**: Provide a modern dark-themed web application built with React, Vite, and Tailwind CSS.
-* **Acceptance Criteria**:
-  1. Deliver 8 core views: Dashboard, Repositories, Chat, Dependency Graph (Cytoscape), Bug Localization, Patch Review, Documentation Generator, and Code Review.
-  2. Provide real-time repository switching and side-by-side Git diff review with "Approve & Apply" action.
-* **Implementation**: [`frontend/src/App.tsx`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/frontend/src/App.tsx), [`frontend/src/pages/`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/frontend/src/pages/)
-
-### [REQ-F-12] Interactive Multi-Command CLI `[CONFIRMED]`
+### [REQ-F-11] Interactive Multi-Command CLI `[CONFIRMED]`
 * **Description**: Deliver a standalone command-line interface supporting interactive querying, remote Git repository cloning, batch queries, benchmarking, and hook configuration.
 * **Acceptance Criteria**:
   1. Support `python cli.py <repo> [--backend ollama|tfidf] [-q "query"] [--benchmark]`.
@@ -179,7 +172,8 @@ Requirements are categorized into:
 
 ## 6. Proposed Additions (Future Milestones) `[PROPOSED]`
 
-* **[REQ-PROP-01] Autonomous Test-Driven Patch Refinement Loop**: Execute test suites (`pytest`, `npm test`) inside an isolated subprocess sandbox upon patch generation and iteratively feed failure assertions back to the LLM until green.
-* **[REQ-PROP-02] Real-Time Filesystem Watcher Daemon**: Background service utilizing `watchdog` to re-embed modified files automatically upon save events.
-* **[REQ-PROP-03] Dedicated Telemetry & Code Health UI**: Visual radar charts for cyclomatic complexity, Halstead metrics, and test coverage ratios in `AnalyticsPage.tsx`.
-* **[REQ-PROP-04] Distributed Vector Storage Integration**: Connector support for external vector databases (Qdrant, ChromaDB, Milvus) for enterprise enterprise repositories exceeding 100,000 files.
+* **[REQ-PROP-01] Semester 2 Web Application UI**: Single-page application built on Next.js/React with Cytoscape interactive graph view, Monaco code editor, and visual patch review.
+* **[REQ-PROP-02] Autonomous Test-Driven Patch Refinement Loop**: Execute test suites (`pytest`, `npm test`) inside an isolated subprocess sandbox upon patch generation and iteratively feed failure assertions back to the LLM until green.
+* **[REQ-PROP-03] Real-Time Filesystem Watcher Daemon**: Background service utilizing `watchdog` to re-embed modified files automatically upon save events.
+* **[REQ-PROP-04] Dedicated Telemetry & Code Health UI**: Visual radar charts for cyclomatic complexity, Halstead metrics, and test coverage ratios.
+* **[REQ-PROP-05] Distributed Vector Storage Integration**: Connector support for external vector databases (Qdrant, ChromaDB, Milvus) for enterprise repositories exceeding 100,000 files.

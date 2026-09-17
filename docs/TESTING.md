@@ -1,9 +1,9 @@
 # IntelliCodeX — Test Suite, Verification Guide & Quality Assurance
 
 > **Inspection & Execution Date**: 2026-09-17  
-> **Environment**: Windows 11, Python 3.14 (Virtual Environment `.venv`), Node.js v20+  
+> **Environment**: Windows 11, Python 3.14 (Virtual Environment `.venv`)  
 > **Automated Test Results**: **91 Passed**, 0 Failed, 12 SVD Divide Warnings (Duration: 5.66 seconds)  
-> **Frontend Build Status**: **Clean** (`tsc && vite build` exited with code 0)
+> **Target Scope**: CLI Core, Tree-Sitter Parsers, FAISS Vector Engine, RAG, and Patch Generator
 
 ---
 
@@ -45,7 +45,7 @@ tests/
 
 ## 2. Test Execution Commands
 
-### 2.1 Complete Automated Backend Test Suite
+### 2.1 Complete Automated Test Suite
 ```bash
 # Run complete test suite (from intellicodex directory)
 .\.venv\Scripts\pytest -v
@@ -56,18 +56,14 @@ pytest --tb=short
 # Run a specific test module
 pytest tests/test_patch_generator.py -v
 
+# Run CLI interaction tests
+pytest tests/test_cli.py -v
+
 # Run only Tree-Sitter chunker tests
 pytest tests/test_tree_sitter_chunker.py -v
 ```
 
-### 2.2 Complete Automated Frontend Build Verification
-```bash
-# Typecheck and production bundle build (from intellicodex/frontend directory)
-cd frontend
-npm run build
-```
-
-### 2.3 Performance Benchmarking Command
+### 2.2 Performance Benchmarking Command
 ```bash
 # Execute benchmarking against sample_repo
 python cli.py sample_repo --benchmark

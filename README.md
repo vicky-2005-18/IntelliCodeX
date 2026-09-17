@@ -2,11 +2,13 @@
 
 [![Tests: 91 Passed](https://img.shields.io/badge/Tests-91%20Passed-brightgreen)](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/docs/TESTING.md)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
-[![FastAPI: Enterprise Backend](https://img.shields.io/badge/Backend-FastAPI-009688)](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/backend/main.py)
-[![Frontend: React 18 + Vite](https://img.shields.io/badge/Frontend-React%2018%20%7C%20Vite-61DAFB)](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/frontend/)
+[![CLI: Interactive Terminal Assistant](https://img.shields.io/badge/Interface-CLI%20First-orange)](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/cli.py)
+[![Backend: FastAPI Bridge](https://img.shields.io/badge/Backend-FastAPI-009688)](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/backend/main.py)
 [![Architecture: Local & Privacy-Preserving](https://img.shields.io/badge/Privacy-100%25%20Local-purple)](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/docs/ARCHITECTURE.md)
 
 > **A locally-hosted, privacy-preserving Retrieval-Augmented Generation (RAG) framework for multi-language codebase navigation, dependency call-graph analysis, spectrum-based bug localization, and automated code patch generation.**
+> 
+> *Current Semester Focus: **CLI Core & Local Intelligence Engine**. Full Web Application UI is preserved in roadmap for future development phases.*
 
 ---
 
@@ -15,7 +17,7 @@
 IntelliCodeX is built for software engineers, security auditors, and system architects who need deep semantic understanding and automated repair capabilities across large codebases without transmitting source code to third-party cloud servers.
 
 ### Target Users:
-* **Developers & Maintainers**: Rapidly understand unknown repositories, trace caller-callee hierarchies, and synthesize verified bug fix patches.
+* **Developers & Maintainers**: Rapidly understand unknown repositories, trace caller-callee hierarchies, and synthesize verified bug fix patches via the interactive terminal CLI.
 * **Security Auditors & Code Reviewers**: Inspect dependency choke points, scan for vulnerabilities using dedicated security personas, and analyze reverse blast radius before refactoring.
 * **Privacy-Sensitive Organizations**: Navigate and analyze proprietary code completely offline with zero telemetry or data exfiltration.
 
@@ -31,10 +33,11 @@ IntelliCodeX is built for software engineers, security auditors, and system arch
 * **Spectrum-Based Fault Localization (SBFL)**: Ochiai suspiciousness ranking combined with multi-language stack trace parsing (Python, JS, Java, Go, Rust).
 * **Safe Patch Generation & Application**: Deterministic low-temperature code synthesis, unified Git diff generation, AST syntax validation, and atomic file overwrites with timestamped `.bak` backups.
 * **Zero-Latency SQLite Cache**: SHA-256 content hashing enabling $<5\text{ms}$ index reloading for unmodified repositories.
+* **Interactive CLI Tooling**: Standalone terminal interface with command loops (`fix:`, `deps:`, `callers:`, `top`, `persona`, `model`, `repo`, `hooks`).
 
 ### Important Limitations
 * **Single-Shot Patching**: Patch generation currently produces single-shot diffs with syntax and dry-run checks; autonomous multi-turn test iteration (running tests in a sandbox and re-prompting on failure) is scheduled for Milestone 2.
-* **Analytics UI Delegation**: The web frontend's `AnalyticsPage.tsx` currently delegates rendering to the main `DashboardPage` rather than presenting dedicated custom telemetry widgets.
+* **Web UI Scope**: The React web UI has been detached to prioritize the CLI and core engine this semester; Web UI workspace features are scheduled for the Semester 2 roadmap.
 * **Manual / Hook Sync**: Real-time incremental synchronization is triggered via Git commit hooks, CLI startup, or API endpoints; continuous filesystem background monitoring (`watchdog`) is in active development.
 
 ---
@@ -44,7 +47,6 @@ IntelliCodeX is built for software engineers, security auditors, and system arch
 ### Prerequisites
 * **Operating System**: Windows 10/11, Linux, or macOS.
 * **Python**: Version `3.10` or higher (Tested on Python 3.12 and 3.14).
-* **Node.js**: Version `18+` (for React web dashboard).
 * **Git**: Installed and available on system `PATH`.
 * **Ollama (Optional, for full AI features)**: [Download Ollama](https://ollama.com).
 
@@ -84,6 +86,9 @@ pip install -r requirements.txt
 
 ### 4.2 Run IntelliCodeX Interactive CLI `[TESTED]`
 
+* **Using Windows Launcher**: Run [`run_cli.bat`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/run_cli.bat) or [`run.bat`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/run.bat) (Option 1).
+
+* **Direct Terminal Command**:
 ```bash
 # Option A: Offline Mode (Fastest, zero external dependencies)
 python cli.py sample_repo --backend tfidf
@@ -93,24 +98,14 @@ python cli.py sample_repo --backend tfidf
 python cli.py sample_repo --backend ollama
 ```
 
-### 4.3 Start Web Application (Backend + Frontend) `[TESTED]`
+### 4.3 Start Local Backend API Server (Optional) `[TESTED]`
 
-* **One-Click Windows Launcher**: Run [`run.bat`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/run.bat) and choose `Option 1` (Start Full Application).
-
-* **Manual Startup**:
 ```bash
-# Terminal 1 — FastAPI Backend Server (Port 8000)
+# Launch FastAPI backend server (Port 8000)
 python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
-
-# Terminal 2 — React Web App (Port 5173)
-cd frontend
-npm install
-npm run dev
+# Or run: run_backend.bat
 ```
-
-* **Access Points**:
-  - Web UI: `http://localhost:5173`
-  - REST API Swagger Docs: `http://localhost:8000/docs`
+* **API Documentation**: Access Swagger UI at `http://localhost:8000/docs`.
 
 ---
 

@@ -9,15 +9,15 @@
 ## 1. Architectural Overview & System Decomposition
 
 IntelliCodeX is structured as a modular, three-tier local architecture:
-1. **Presentation Layer**: Interactive Terminal UI (`cli.py`) and a modern Single-Page Application (SPA) built with React, Vite, and Tailwind CSS.
-2. **Application & Service Layer**: Modular FastAPI REST server (`backend/main.py`) providing endpoints for authentication, repository management, RAG chat, bug localization, patch generation, graph topology, analytics, and documentation.
+1. **Presentation Layer**: Interactive Terminal UI ([`cli.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/cli.py)) serving as the primary developer interface for Semester 1. Full Web Application UI is preserved in the Semester 2 roadmap.
+2. **Application & Service Layer**: Modular FastAPI REST server ([`backend/main.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/backend/main.py)) providing endpoints for authentication, repository management, RAG chat, bug localization, patch generation, graph topology, analytics, and documentation.
 3. **Core Intelligence & Storage Layer**: High-performance multi-language Tree-Sitter AST parsers, NetworkX dependency and call-graph engines, dual embedding generators (`OllamaEmbedder` + `TfidfEmbedder`), FAISS vector index, SQLite metadata store (`.storage/metadata.db`), and local disk store (`.storage/db.json`).
 
 ```mermaid
 graph TD
-    subgraph Presentation_Layer [Presentation Layer]
+    subgraph Presentation_Layer [Presentation Layer (Active: CLI)]
         CLI["Interactive CLI (cli.py)"]
-        SPA["React 18 SPA (frontend/src/)"]
+        WebUIFuture["[Future Phase] React / Next.js Web UI"]
     end
 
     subgraph Service_Layer [Service & API Layer (FastAPI)]
@@ -28,7 +28,7 @@ graph TD
         ChatRouter["/api/chat (RAG Assistant)"]
         BugRouter["/api/bugs (Ochiai SBFL)"]
         PatchRouter["/api/patches (Diff Engine)"]
-        GraphRouter["/api/graph (Cytoscape)"]
+        GraphRouter["/api/graph (Cytoscape Export)"]
         AnalyticsRouter["/api/analytics"]
         DocRouter["/api/docs"]
         ReviewRouter["/api/review"]
@@ -57,7 +57,7 @@ graph TD
     end
 
     CLI --> Core_Engine
-    SPA --> MainAPI
+    WebUIFuture -.-> MainAPI
     MainAPI --> AuthRouter & RepoRouter & ChatRouter & BugRouter & PatchRouter & GraphRouter & AnalyticsRouter & DocRouter & ReviewRouter
     LegacyBridge --> MainAPI
     RepoRouter & ChatRouter & BugRouter & PatchRouter --> Core_Engine
@@ -78,6 +78,7 @@ graph TD
 | Subsystem | Technology / Library | Version | Role in Architecture |
 | :--- | :--- | :--- | :--- |
 | **Runtime** | Python | `>= 3.10` (Tested on 3.12/3.14) | Core backend, pipeline, and CLI execution |
+| **Primary Interface**| Interactive CLI (`cli.py`) | Version 1.0.0-sem1 | Interactive terminal assistant, batch query, benchmarks |
 | **API Server** | FastAPI, Uvicorn, Pydantic | `fastapi>=0.110`, `uvicorn>=0.27` | High-throughput async REST server |
 | **AST Parsers** | Tree-Sitter (`tree-sitter-*`) | `tree-sitter>=0.22.0` | Multi-language syntax tree semantic chunking |
 | **Vector Index** | FAISS CPU (`faiss-cpu`) | `>= 1.7.4` | Inner-product cosine similarity vector search |
@@ -86,25 +87,21 @@ graph TD
 | **LLM Inference**| Ollama (`qwen2.5-coder`) | Local Server (HTTP 11434) | Grounded RAG synthesis and patch generation |
 | **Relational DB**| SQLite3 (`sqlite3`) | Standard Library | File hash caching and chunk relational metadata |
 | **Document DB** | PyMongo / Local JSON Store | `pymongo` (optional) | User accounts, chat logs, bug reports, patches |
-| **Web Frontend** | React 18, Vite 5, Tailwind CSS | `react@18.2`, `vite@5.1.6` | Modern dark-themed dashboard SPA |
-| **Graph Visual** | Cytoscape.js (`cytoscape`) | `^3.28.1` | Interactive module dependency topology visualization |
+| **Future Web UI**| React 18, Vite 5, Tailwind CSS | Preserved for Semester 2 | Full web dashboard workspace |
 
 ### 2.2 Application Entry Points
 
-1. **Standalone CLI**:
+1. **Standalone CLI (Primary Interface)**:
    - [`cli.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/cli.py)
-   - Invocation: `python cli.py [repo_path] [--backend ollama|tfidf]` or Windows launcher `run_cli.bat`.
-2. **FastAPI Enterprise Backend**:
+   - Invocation: `python cli.py [repo_path] [--backend ollama|tfidf]` or Windows launcher [`run_cli.bat`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/run_cli.bat).
+2. **FastAPI Enterprise Backend (Local API Server)**:
    - [`backend/main.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/backend/main.py)
-   - Invocation: `uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload` or Windows launcher `run_backend.bat`.
+   - Invocation: `uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload` or Windows launcher [`run_backend.bat`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/run_backend.bat).
 3. **Legacy FastAPI Bridge**:
    - [`server/api.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/server/api.py)
    - Mounts legacy endpoints (`/ingest`, `/query`, `/localize_bug`, `/dependencies`) pointing directly to `backend.main.app`.
-4. **React Web Frontend**:
-   - [`frontend/src/main.tsx`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/frontend/src/main.tsx)
-   - Invocation: `cd frontend && npm run dev` (Port 5173) or Windows launcher `run_frontend.bat`.
-5. **Full System Launcher**:
-   - [`run.bat`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/run.bat) (Interactive menu to launch Full App, Backend, Frontend, CLI, or Docker Compose).
+4. **Interactive Launcher**:
+   - [`run.bat`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/run.bat) (Menu to launch CLI with Ollama/TF-IDF, Backend Server, Docker, or Install Dependencies).
 
 ---
 
