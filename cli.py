@@ -32,6 +32,7 @@ from core.call_graph import find_callers_of_symbol, get_top_central_symbols
 from core.git_hooks import install_git_hooks, uninstall_git_hooks, check_git_hooks_status
 from core.patch_generator import PatchEngine
 from core.persistence import get_repo_id
+from backend.services.incremental_indexer import RepositoryWatcher
 
 
 def format_time_consumed(seconds: float) -> str:
@@ -138,6 +139,8 @@ Available Commands:
   hooks / setup-hooks   - Install Git background re-indexing hooks for current repository
   hooks:status          - Check status of installed Git hooks
   hooks:remove          - Uninstall Git background re-indexing hooks
+  watch / watch:status   - Check real-time file watcher status
+  watch:stop / watch:start - Stop or restart real-time file watching
   files / ls             - List all indexed source files in the active repository
   clear / cls            - Clear terminal screen
   help / ?               - Show this help message
@@ -304,6 +307,30 @@ def main():
         print(f"[*] [Time Consumed]: {format_time_consumed(total_batch)} (Retrieval: {format_time_consumed(response.get('retrieval_seconds', 0.0))}, Generation: {format_time_consumed(response.get('llm_seconds', 0.0))})\n")
         return 0
 
+    def on_auto_reindex(new_result, changed_paths, elapsed_s):
+        nonlocal result, engine
+        result = new_result
+        engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
+        changed_names = [os.path.basename(p) for p in changed_paths[:3]]
+        diff_desc = ", ".join(changed_names) if changed_names else "files"
+        if len(changed_paths) > 3:
+            diff_desc += f" (+{len(changed_paths)-3} more)"
+        t_str = format_time_consumed(elapsed_s)
+        sys.stdout.write(f"\n[*] [Watchdog] Detected changes in {diff_desc}. Auto-reindexed ({result.num_chunks} chunks in {t_str}).\n>> ")
+        sys.stdout.flush()
+
+    watcher = None
+    try:
+        watcher = RepositoryWatcher(
+            repo_path=current_path,
+            embedder=embedder,
+            on_reindex=on_auto_reindex,
+            debounce_delay=0.5,
+        )
+        if watcher.start():
+            print("[*] Real-Time Watcher: Active (background auto-reindex enabled)")
+    except Exception:
+        pass
 
     print("\nIntelliCodeX ready. Type a question or 'help' for options, 'exit' to quit.\n")
 
@@ -379,6 +406,8 @@ def main():
                 engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
                 print_ingestion_summary(result, current_path, elapsed_sw)
                 print(f"[*] Backend updated to '{active_backend}'.\n")
+                if watcher:
+                    watcher.embedder = embedder
             except KeyboardInterrupt:
                 print(f"\n[!] Backend switch interrupted by user (Ctrl+C). Active backend remains '{active_backend}'.\n")
             except Exception as e_be:
@@ -430,6 +459,13 @@ def main():
                 engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
                 print_ingestion_summary(result, current_path, elapsed_repo)
                 print(f"[*] Successfully switched active repository to '{new_path}'!\n")
+                if watcher:
+                    watcher.stop()
+                try:
+                    watcher = RepositoryWatcher(current_path, embedder, on_reindex=on_auto_reindex, debounce_delay=0.5)
+                    watcher.start()
+                except Exception:
+                    pass
             except KeyboardInterrupt:
                 print(f"\n[!] Repository ingestion interrupted by user (Ctrl+C).")
                 print(f"[*] Active repository remains '{current_path}'. Any completed embeddings were saved to cache.\n")
@@ -453,6 +489,38 @@ def main():
         if query.lower() in ("hooks", "setup-hooks", "hooks:install", "hooks:setup"):
             ok, msg = install_git_hooks(current_path)
             print(f"\n[*] {msg}\n")
+            continue
+
+        if query.lower() in ("watch", "watch:status", "watcher"):
+            if watcher and watcher.is_alive():
+                print(f"\n[*] Real-Time Filesystem Watcher: ACTIVE")
+                print(f"    Target Directory: '{current_path}'")
+                print("    Debounce Window : 500ms")
+                print("    Auto-reindex    : Enabled (updates in-memory vector store on save)\n")
+            else:
+                print("\n[*] Real-Time Filesystem Watcher: INACTIVE / STOPPED\n")
+            continue
+
+        if query.lower() in ("watch:stop", "watch:pause"):
+            if watcher and watcher.is_alive():
+                watcher.stop()
+                print("\n[*] Real-Time Filesystem Watcher stopped.\n")
+            else:
+                print("\n[*] Real-Time Filesystem Watcher is already inactive.\n")
+            continue
+
+        if query.lower() in ("watch:start", "watch:resume"):
+            if watcher and watcher.is_alive():
+                print("\n[*] Real-Time Filesystem Watcher is already active.\n")
+            else:
+                try:
+                    watcher = RepositoryWatcher(current_path, embedder, on_reindex=on_auto_reindex, debounce_delay=0.5)
+                    if watcher.start():
+                        print(f"\n[*] Real-Time Filesystem Watcher started on '{current_path}'.\n")
+                    else:
+                        print("\n[!] Watcher failed to start (watchdog package missing or unsupported).\n")
+                except Exception as e_w:
+                    print(f"\n[!] Error starting watcher: {e_w}\n")
             continue
 
         if query.lower().startswith("persona"):
@@ -635,6 +703,10 @@ def main():
         except Exception as e:
             print(f"\n[!] Error processing query: {e}\n")
             continue
+
+    if watcher:
+        watcher.stop()
+    return 0
 
 
 

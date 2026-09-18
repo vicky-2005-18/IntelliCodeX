@@ -49,11 +49,10 @@ graph TD
 * **Dependencies**: `core/pipeline.py`, `backend/services/incremental_indexer.py`.
 
 ### Tasks:
-1. **Task 2.1: Watchdog Background Observer Integration**
+1. **Task 2.1: Watchdog Background Observer Integration** `[COMPLETED ✓]`
    - **File**: [`backend/services/incremental_indexer.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/backend/services/incremental_indexer.py)
-   - **Description**: Implement a thread-safe `watchdog.observers.Observer` monitoring active repository directories for `on_modified`, `on_created`, and `on_deleted` file events with debouncing (500ms).
-   - **Owner**: Unassigned
-   - **Estimated Effort**: ~2 days (Estimate)
+   - **Description**: Thread-safe `watchdog.observers.Observer` monitoring active repository directories for `on_modified`, `on_created`, and `on_deleted` file events with 500ms debouncing, path filtering (`.git`, `.venv`, `.bak`), and live interactive CLI synchronization (`watch:status`, `watch:stop`, `watch:start`).
+   - **Status**: Completed & verified via `tests/test_file_watcher.py` (6/6 tests passed).
    - **Completion Criteria**: Saving a file in `sample_repo` triggers selective re-embedding and FAISS index update in $<200\text{ms}$.
 
 ---

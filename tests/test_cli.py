@@ -188,3 +188,15 @@ def test_cli_main_keyboard_interrupt(capsys):
 
     captured = capsys.readouterr()
     assert "Exiting IntelliCodeX CLI. Goodbye!" in captured.out
+
+
+def test_cli_main_watch_commands(capsys):
+    user_inputs = ["watch", "watch:status", "watch:stop", "watch:start", "exit"]
+    with patch("builtins.input", side_effect=user_inputs):
+        with patch("sys.argv", ["cli.py", "sample_repo", "--backend", "tfidf"]):
+            main()
+
+    captured = capsys.readouterr()
+    assert "Real-Time Filesystem Watcher" in captured.out
+    assert "stopped" in captured.out.lower()
+    assert "started" in captured.out.lower()

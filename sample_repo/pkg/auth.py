@@ -13,7 +13,11 @@ def authenticate(username: str, password: str) -> bool:
     user = get_user_by_username(username)
     if user is None:
         return False
-    return user["password_hash"] == hash_password(password)
+    # Guard against missing 'password_hash' key in user record
+    password_hash = user.get("password_hash")
+    if password_hash is None:
+        return False
+    return password_hash == hash_password(password)
 
 
 class SessionManager:
@@ -28,4 +32,5 @@ class SessionManager:
         return token
 
     def is_valid(self, token: str) -> bool:
+        """Returns True if token exists in active sessions."""
         return token in self.sessions

@@ -50,4 +50,4 @@ The implementation status of each system capability is evaluated strictly agains
 3. **Patch Generation Refinement Loop (Milestone 1)**:
    - *Status*: Completed and verified. The patch engine now supports closed-loop test execution via [`core/sandbox_runner.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/core/sandbox_runner.py), multi-turn self-correction prompting, and live sandbox validation in the interactive CLI.
 4. **Live File Watcher (Milestone 2)**:
-   - *Status*: Scheduled next. Incremental re-indexing currently triggers on startup, via Git hooks, or manual API request. A background `watchdog` daemon will provide real-time updates.
+   - *Status*: Completed and verified. Real-time background `watchdog` daemon implemented in [`backend/services/incremental_indexer.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/backend/services/incremental_indexer.py) with debounced file filtering (`.git`, `.venv`, `.bak`), thread-safe auto-reindexing, and interactive CLI integration (`watch:status`, `watch:stop`, `watch:start`). Fully verified with 6 dedicated test cases in `tests/test_file_watcher.py`.
