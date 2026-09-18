@@ -1,9 +1,9 @@
 # IntelliCodeX — Project Implementation & Verification Status
 
-> **Inspection Date**: 2026-09-17  
+> **Inspection Date**: 2026-09-18  
 > **Inspected Git Commit**: `270d33514fc70e16b41eb7f2e0b947d5909d012f` (Branch: `main`)  
-> **Working Tree Status**: Clean (untracked documentation files only: `docs/PROJECT_STATUS_GUIDE.md`)  
-> **Automated Test Run**: 91 passing tests in 5.66s (`pytest`), TypeScript compilation clean (`tsc && vite build`)
+> **Working Tree Status**: Clean (Milestone 1 completed)  
+> **Automated Test Run**: 99 passing tests in 7.08s (`pytest` in `.venv`), zero failures.
 
 ---
 
@@ -31,7 +31,7 @@ The implementation status of each system capability is evaluated strictly agains
 | **REQ-F-06** | Graph-Augmented RAG Query Engine | **Verified against stated acceptance criteria** | [`rag/query_engine.py::QueryEngine`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/rag/query_engine.py#L190) | [`tests/test_graph_context_expansion.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_graph_context_expansion.py), [`tests/test_week5_verification.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_week5_verification.py) (6 tests pass) | Add BM25 hybrid lexical rank fusion (RRF) alongside dense vectors. |
 | **REQ-F-07** | SQLite Persistence & Incremental Re-Index | **Verified against stated acceptance criteria** | [`core/persistence.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/core/persistence.py), [`core/pipeline.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/core/pipeline.py), [`core/git_hooks.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/core/git_hooks.py) | [`tests/test_change_detection.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_change_detection.py), [`tests/test_incremental_pipeline.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_incremental_pipeline.py), [`tests/test_git_hooks.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_git_hooks.py), [`tests/test_week3_verification.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_week3_verification.py) (14 tests pass) | Add live file-system watching daemon (`watchdog`). |
 | **REQ-F-08** | Multi-Language Ochiai Bug Localization | **Verified against stated acceptance criteria** | [`core/bug_localizer.py::BugLocalizer`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/core/bug_localizer.py#L203) | [`tests/test_bug_localizer.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_bug_localizer.py), [`tests/test_week4_verification.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_week4_verification.py) (6 tests pass) | Add automated pytest-cov / lcov trace ingestion. |
-| **REQ-F-09** | Safe Patch Generation & Diff Merging | **Verified against stated acceptance criteria** | [`core/patch_generator.py::PatchEngine`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/core/patch_generator.py#L57), [`backend/patch_generator/patch_applier.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/backend/patch_generator/patch_applier.py) | [`tests/test_patch_generator.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_patch_generator.py) (8 tests pass) | Implement iterative test execution feedback loop (self-healing patch agent). |
+| **REQ-F-09** | Safe Patch Generation & Closed-Loop Repair | **Verified against stated acceptance criteria** | [`core/patch_generator.py::PatchEngine`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/core/patch_generator.py), [`core/sandbox_runner.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/core/sandbox_runner.py) | [`tests/test_patch_generator.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_patch_generator.py), [`tests/test_sandbox_runner.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_sandbox_runner.py) (16 tests pass) | Milestone 1 completed; extend sandbox to Docker containers in Semester 2. |
 | **REQ-F-10** | Modular FastAPI Enterprise REST Server | **Verified against stated acceptance criteria** | [`backend/main.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/backend/main.py), [`backend/api/`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/backend/api/), [`server/api.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/server/api.py) | [`tests/test_full_system_integration.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_full_system_integration.py) (Passes) | Add WebSocket endpoints for live progress updates during long ingestions. |
 | **REQ-F-11** | Interactive Multi-Command CLI | **Verified against stated acceptance criteria** | [`cli.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/cli.py) | [`tests/test_cli.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/tests/test_cli.py) (14 tests pass) | Add auto-completion using `prompt_toolkit`. |
 | **REQ-PROP-01**| React Web UI Dashboard | **Planned / future phase** | Preserved in Semester 2 roadmap | Frontend code backed up to scratch directory | Web UI workspace integration scheduled for Semester 2. |
@@ -44,12 +44,10 @@ The implementation status of each system capability is evaluated strictly agains
 
 1. **Tree-Sitter Test Claims in Old Docs**:
    - *Previous Documentation claim (`PROJECT_STATUS_GUIDE.md` L133)*: "14 failing multi-language tests".
-   - *Inspected Reality*: Tree-sitter native bindings for Python, JS, TS, Java, C, C++, Go, and Rust are fully installed and configured in `.venv`. All 91 test cases pass cleanly with zero failures.
+   - *Inspected Reality*: Tree-sitter native bindings for Python, JS, TS, Java, C, C++, Go, and Rust are fully installed and configured in `.venv`. All 99 test cases pass cleanly with zero failures.
 2. **Semester 1 Scope Realignment**:
    - *Decision*: Prioritize the standalone CLI and local intelligence engine as the primary interface for Semester 1. The React web dashboard has been backed up and scheduled for Semester 2.
-3. **Patch Generation Refinement Loop**:
-   - *Current Implementation*: The patch engine generates single-shot diffs, validates Python syntax via `ast.parse`, and runs dry-run checks via `git apply --check`.
-   - *Roadmap Requirement*: An autonomous closed-loop test runner (running `pytest` in a temporary sandbox and re-prompting on failure) is scheduled for Milestone 2.
-4. **Live File Watcher**:
-   - *Current Implementation*: Incremental re-indexing is supported on startup, via manual API trigger (`POST /api/repos/{repo_id}/sync`), or via Git commit hooks (`core/git_hooks.py`).
-   - *Roadmap Requirement*: A persistent background daemon using `watchdog` is not yet running as a continuous service.
+3. **Patch Generation Refinement Loop (Milestone 1)**:
+   - *Status*: Completed and verified. The patch engine now supports closed-loop test execution via [`core/sandbox_runner.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/core/sandbox_runner.py), multi-turn self-correction prompting, and live sandbox validation in the interactive CLI.
+4. **Live File Watcher (Milestone 2)**:
+   - *Status*: Scheduled next. Incremental re-indexing currently triggers on startup, via Git hooks, or manual API request. A background `watchdog` daemon will provide real-time updates.

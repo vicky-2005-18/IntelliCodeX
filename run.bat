@@ -35,7 +35,7 @@ if "%~1"=="6" goto :UPDATE_GITHUB
 :MENU
 cls
 echo =======================================================================
-echo                 INTELLICODEX LAUNCHER (CLI & ENGINE)
+echo                 INTELLICODEX LAUNCHER - CLI AND LOCAL ENGINE
 echo =======================================================================
 echo.
 echo   [1] Run Interactive CLI (Ollama Mode - qwen2.5-coder)

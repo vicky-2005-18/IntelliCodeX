@@ -503,11 +503,22 @@ def main():
             print("\n[*] Analyzing error report & localizing bug root cause...")
             t_fix = time.perf_counter()
             patch_engine = PatchEngine(result.store, embedder, llm, graph=result.graph, repo_path=current_path)
+
+            def _on_fix_progress(turn: int, max_turns: int, msg: str):
+                print(f"[*] [{turn}/{max_turns}] {msg}")
+
             patch_rec = patch_engine.generate_patch(
                 repo_id=get_repo_id(current_path),
-                error_report=err_input
+                error_report=err_input,
+                verify_in_sandbox=True,
+                max_iterations=3,
+                progress_callback=_on_fix_progress,
             )
             fix_time = time.perf_counter() - t_fix
+
+            sb_val = patch_rec.get("sandbox_validation", {})
+            sb_status = sb_val.get("test_status", "skipped").upper()
+            sb_turns = sb_val.get("iterations_count", 1)
 
             print("\n=======================================================================")
             print("                 INTELLICODEX AUTOMATED CODE PATCH")
@@ -515,6 +526,7 @@ def main():
             print(f"Target File     : {patch_rec['target_file']}")
             print(f"Error Type      : {patch_rec.get('error_type', 'Unknown')}")
             print(f"Confidence      : {patch_rec['confidence_score']:.0%}")
+            print(f"Sandbox Tests   : {sb_status} (Iterations: {sb_turns})")
             print(f"Time Consumed   : {format_time_consumed(fix_time)}")
             print(f"Explanation     : {patch_rec['explanation']}")
             print("\n--- Unified Git Diff ---")
