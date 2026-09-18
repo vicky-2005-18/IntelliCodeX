@@ -33,4 +33,5 @@ def test_graph_context_expansion():
     assert len(results) >= 1
     # Check that expanded results include context reason tags
     reasons = [r["reason"] for r in results]
-    assert "Direct Vector Match" in reasons
+    assert any("Match" in r for r in reasons)
+    assert any("Called by process" in r for r in reasons)

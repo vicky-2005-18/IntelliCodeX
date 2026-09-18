@@ -16,6 +16,7 @@ from core.persistence import (
     load_index,
     detect_repository_changes,
 )
+from core.lexical_index import BM25Index
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class IngestedRepository:
     call_graph: Any = None
     elapsed_seconds: float = 0.0
     indexing_mode: str = "fresh"  # "cached", "incremental", "fresh"
+    lexical_index: Any = None
 
 
 def ingest_repository(
@@ -82,6 +84,7 @@ def ingest_repository(
                         call_g = build_call_graph(cached_chunks, source_files)
                         ast_count = sum(1 for c in cached_chunks if c.kind in ("function", "class", "method", "interface", "enum", "type", "struct", "section"))
 
+                        lex_idx = BM25Index(cached_chunks)
                         elapsed = time.perf_counter() - start_t
                         return IngestedRepository(
                             store=cached_store,
@@ -94,6 +97,7 @@ def ingest_repository(
                             call_graph=call_g,
                             elapsed_seconds=round(elapsed, 3),
                             indexing_mode="cached",
+                            lexical_index=lex_idx,
                         )
 
                     # Case B: Partial changes -> incremental re-indexing
@@ -155,6 +159,7 @@ def ingest_repository(
                     if save_to_disk:
                         save_index(repo_path, backend_name, source_files, all_chunks, store)
 
+                    lex_idx = BM25Index(all_chunks)
                     elapsed = time.perf_counter() - start_t
                     return IngestedRepository(
                         store=store,
@@ -167,6 +172,7 @@ def ingest_repository(
                         call_graph=call_g,
                         elapsed_seconds=round(elapsed, 3),
                         indexing_mode="incremental",
+                        lexical_index=lex_idx,
                     )
 
     # Full Ingestion (Fresh or force_reindex)
@@ -187,6 +193,7 @@ def ingest_repository(
     if save_to_disk:
         save_index(repo_path, backend_name, source_files, chunks, store)
 
+    lex_idx = BM25Index(chunks)
     elapsed = time.perf_counter() - start_t
     logger.info(f"Ingested '{repo_path}': {len(source_files)} files, {len(chunks)} chunks ({ast_chunks_count} AST), call graph: {call_g.number_of_nodes()} nodes in {elapsed:.2f}s.")
 
@@ -201,5 +208,6 @@ def ingest_repository(
         call_graph=call_g,
         elapsed_seconds=round(elapsed, 3),
         indexing_mode="fresh",
+        lexical_index=lex_idx,
     )
 

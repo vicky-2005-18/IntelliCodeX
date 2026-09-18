@@ -141,6 +141,8 @@ Available Commands:
   hooks:remove          - Uninstall Git background re-indexing hooks
   watch / watch:status   - Check real-time file watcher status
   watch:stop / watch:start - Stop or restart real-time file watching
+  hybrid / hybrid:status - Check hybrid search status (BM25 + Dense RRF)
+  hybrid:on / hybrid:off - Enable or disable BM25 hybrid ranking
   files / ls             - List all indexed source files in the active repository
   clear / cls            - Clear terminal screen
   help / ?               - Show this help message
@@ -295,7 +297,15 @@ def main():
 
     print_ingestion_summary(result, current_path, elapsed)
 
-    engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
+    engine = QueryEngine(
+        result.store,
+        embedder,
+        llm,
+        dep_graph=result.graph,
+        call_graph=getattr(result, "call_graph", None),
+        lexical_index=getattr(result, "lexical_index", None),
+        hybrid_search=True,
+    )
 
     # Batch Query Non-Interactive Mode
     if args.query:
@@ -310,7 +320,15 @@ def main():
     def on_auto_reindex(new_result, changed_paths, elapsed_s):
         nonlocal result, engine
         result = new_result
-        engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
+        engine = QueryEngine(
+            result.store,
+            embedder,
+            llm,
+            dep_graph=result.graph,
+            call_graph=getattr(result, "call_graph", None),
+            lexical_index=getattr(result, "lexical_index", None),
+            hybrid_search=getattr(engine, "hybrid_search", True),
+        )
         changed_names = [os.path.basename(p) for p in changed_paths[:3]]
         diff_desc = ", ".join(changed_names) if changed_names else "files"
         if len(changed_paths) > 3:
@@ -403,7 +421,15 @@ def main():
                 elapsed_sw = new_result.elapsed_seconds if getattr(new_result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t_sw)
                 embedder, llm, active_backend = new_embedder, new_llm, new_active_backend
                 result = new_result
-                engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
+                engine = QueryEngine(
+                    result.store,
+                    embedder,
+                    llm,
+                    dep_graph=result.graph,
+                    call_graph=getattr(result, "call_graph", None),
+                    lexical_index=getattr(result, "lexical_index", None),
+                    hybrid_search=getattr(engine, "hybrid_search", True),
+                )
                 print_ingestion_summary(result, current_path, elapsed_sw)
                 print(f"[*] Backend updated to '{active_backend}'.\n")
                 if watcher:
@@ -456,7 +482,15 @@ def main():
                 elapsed_repo = new_result.elapsed_seconds if getattr(new_result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t_repo)
                 result = new_result
                 current_path = new_path
-                engine = QueryEngine(result.store, embedder, llm, dep_graph=result.graph, call_graph=getattr(result, "call_graph", None))
+                engine = QueryEngine(
+                    result.store,
+                    embedder,
+                    llm,
+                    dep_graph=result.graph,
+                    call_graph=getattr(result, "call_graph", None),
+                    lexical_index=getattr(result, "lexical_index", None),
+                    hybrid_search=getattr(engine, "hybrid_search", True),
+                )
                 print_ingestion_summary(result, current_path, elapsed_repo)
                 print(f"[*] Successfully switched active repository to '{new_path}'!\n")
                 if watcher:
@@ -521,6 +555,29 @@ def main():
                         print("\n[!] Watcher failed to start (watchdog package missing or unsupported).\n")
                 except Exception as e_w:
                     print(f"\n[!] Error starting watcher: {e_w}\n")
+            continue
+
+        if query.lower() in ("hybrid", "hybrid:status"):
+            st = "ACTIVE (Dense Vectors + BM25 Lexical with RRF)" if engine.hybrid_search else "INACTIVE (Dense Vectors only)"
+            print(f"\n[*] Hybrid Search: {st}")
+            print("    Algorithm  : Reciprocal Rank Fusion (k=60)")
+            print("    Lexical    : Inverted BM25Okapi (sub-token identifier splitting)")
+            print("    Commands   : 'hybrid:on', 'hybrid:off', 'hybrid:toggle'\n")
+            continue
+
+        if query.lower() in ("hybrid:on", "hybrid:enable"):
+            engine.toggle_hybrid(True)
+            print("\n[*] Hybrid Search ENABLED (Dense + BM25 RRF).\n")
+            continue
+
+        if query.lower() in ("hybrid:off", "hybrid:disable"):
+            engine.toggle_hybrid(False)
+            print("\n[*] Hybrid Search DISABLED (Dense vector only).\n")
+            continue
+
+        if query.lower() in ("hybrid:toggle",):
+            now_st = engine.toggle_hybrid()
+            print(f"\n[*] Hybrid Search {'ENABLED' if now_st else 'DISABLED'}.\n")
             continue
 
         if query.lower().startswith("persona"):

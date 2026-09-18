@@ -234,9 +234,9 @@
     "semantic_hash": ""
   },
   "cli.py": {
-    "mtime": 1789755691.0835,
-    "seen": 1789755871.6837933,
-    "ast_hash": "e185ab487f2efb21b5768b679a3d20bb",
+    "mtime": 1789754909.0735505,
+    "seen": 1789755021.7461839,
+    "ast_hash": "40cdfb8f4739a9bc2c7310f1b8f3d756",
     "semantic_hash": ""
   },
   "core/__init__.py": {
@@ -312,9 +312,9 @@
     "semantic_hash": ""
   },
   "core/pipeline.py": {
-    "mtime": 1789755665.5798116,
-    "seen": 1789755871.6838212,
-    "ast_hash": "4df8df90e9c93b66cd3f71368a479559",
+    "mtime": 1789746850.4533932,
+    "seen": 1789755021.7461946,
+    "ast_hash": "86a15575866d366ad7bfe3df2bb8e34a",
     "semantic_hash": ""
   },
   "core/sandbox_runner.py": {
@@ -348,9 +348,9 @@
     "semantic_hash": ""
   },
   "rag/query_engine.py": {
-    "mtime": 1789755648.2699575,
-    "seen": 1789755871.6838324,
-    "ast_hash": "14ce7c5531ddaf10019291fc7a6ed933",
+    "mtime": 1789581068.3522966,
+    "seen": 1789755021.746203,
+    "ast_hash": "5c60957ced7cf7208521ef43f162a58e",
     "semantic_hash": ""
   },
   "sample_repo/pkg/__init__.py": {
@@ -510,9 +510,9 @@
     "semantic_hash": ""
   },
   "tests/test_graph_context_expansion.py": {
-    "mtime": 1789755818.1515803,
-    "seen": 1789755871.6838934,
-    "ast_hash": "95c243f8fa19c5640f4dd14567441854",
+    "mtime": 1788280749.7232351,
+    "seen": 1789755021.7462246,
+    "ast_hash": "5546899fee57648f85b3665e62bf62fc",
     "semantic_hash": ""
   },
   "tests/test_incremental_pipeline.py": {
@@ -612,9 +612,9 @@
     "semantic_hash": ""
   },
   "docs/PROJECT_STATUS.md": {
-    "mtime": 1789755840.5745673,
-    "seen": 1789755871.6839283,
-    "ast_hash": "ba2818be6d25b8b5e652775cf8ebdf65",
+    "mtime": 1789754995.112996,
+    "seen": 1789755021.7462382,
+    "ast_hash": "01621c4651ee0e1c4fc443898a9ab38c",
     "semantic_hash": ""
   },
   "docs/PROJECT_STATUS_GUIDE.md": {
@@ -630,9 +630,9 @@
     "semantic_hash": ""
   },
   "docs/ROADMAP.md": {
-    "mtime": 1789755852.457019,
-    "seen": 1789755871.6839337,
-    "ast_hash": "b53be754cba5c32ab302d97a760f10ba",
+    "mtime": 1789755004.79644,
+    "seen": 1789755021.7462401,
+    "ast_hash": "3aea6ea251c22ffad6af84a3234df097",
     "semantic_hash": ""
   },
   "docs/TESTING.md": {
@@ -699,18 +699,6 @@
     "mtime": 1789754812.7980537,
     "seen": 1789755021.7462487,
     "ast_hash": "50865467201045a16042d1d0f8c4c660",
-    "semantic_hash": ""
-  },
-  "core/lexical_index.py": {
-    "mtime": 1789755555.4539096,
-    "seen": 1789755871.6838114,
-    "ast_hash": "c51567e5e674e9ab2a04444a90a347c0",
-    "semantic_hash": ""
-  },
-  "tests/test_hybrid_search.py": {
-    "mtime": 1789755703.9826427,
-    "seen": 1789755871.683895,
-    "ast_hash": "83b7dc0f093d4fbd5a10b3d6feb8cfdc",
     "semantic_hash": ""
   }
 }
