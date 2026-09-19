@@ -34,6 +34,30 @@ from core.patch_generator import PatchEngine
 from core.persistence import get_repo_id
 from backend.services.incremental_indexer import RepositoryWatcher
 
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.markdown import Markdown
+    from rich.table import Table
+    from rich.syntax import Syntax
+    from rich.text import Text
+    console = Console()
+    HAS_RICH = True
+except ImportError:
+    console = None
+    HAS_RICH = False
+
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.formatted_text import HTML
+    HAS_PROMPT_TOOLKIT = True
+except ImportError:
+    HAS_PROMPT_TOOLKIT = False
+    Completer = object
+    Completion = None
+
 
 def format_time_consumed(seconds: float) -> str:
     """Formats seconds into human-readable duration with high precision."""
@@ -188,8 +212,331 @@ def get_available_repos(current_path: str) -> list:
     return known
 
 
+def should_use_tui() -> bool:
+    """Returns True if rich prompt_toolkit interactive session should be enabled."""
+    if not HAS_PROMPT_TOOLKIT:
+        return False
+    if os.environ.get("INTELLICODEX_NO_TUI", "").strip() == "1":
+        return False
+    try:
+        if not sys.stdin.isatty():
+            return False
+    except Exception:
+        return False
+    return True
 
 
+def render_banner():
+    """Renders interactive banner with rich styling if available."""
+    if HAS_RICH and console:
+        title_text = Text()
+        title_text.append("INTELLICODEX INTERACTIVE CLI ASSISTANT\n", style="bold cyan")
+        title_text.append("AI-Powered Repository Search, Dependency Analysis & Code Intelligence", style="dim white")
+        console.print(Panel(title_text, border_style="cyan", padding=(1, 2)))
+    else:
+        print_banner()
+
+
+def render_markdown_panel(md_text: str, title: str = "Answer", border_style: str = "cyan"):
+    """Renders Markdown text inside a styled terminal panel."""
+    if HAS_RICH and console:
+        md = Markdown(md_text)
+        console.print(Panel(md, title=f"[bold {border_style}]{title}[/bold {border_style}]", border_style=border_style, padding=(1, 2)))
+    else:
+        print(f"\n--- {title} ---\n{md_text}\n")
+
+
+def render_diff(diff_text: str):
+    """Renders unified Git diff with syntax highlighting."""
+    if HAS_RICH and console and diff_text.strip():
+        syntax = Syntax(diff_text, "diff", theme="monokai", line_numbers=True)
+        console.print(Panel(syntax, title="[bold green]Unified Git Diff[/bold green]", border_style="green"))
+    else:
+        print("\n--- Unified Git Diff ---")
+        print(diff_text)
+
+
+def render_files_table(indexed_files: list):
+    """Renders indexed file list in a rich formatted table."""
+    if HAS_RICH and console:
+        table = Table(title=f"Indexed Source Files ({len(indexed_files)})", border_style="bright_blue")
+        table.add_column("#", style="dim", width=6)
+        table.add_column("File Path", style="cyan")
+        table.add_column("Type", style="yellow")
+        for idx, f in enumerate(indexed_files, start=1):
+            ext = os.path.splitext(f)[1] or "file"
+            table.add_row(str(idx), f, ext)
+        console.print(table)
+        print()
+    else:
+        print(f"\n--- Indexed Source Files ({len(indexed_files)}) ---")
+        for f in indexed_files:
+            print(f"  - {f}")
+        print()
+
+
+def render_centrality_tables(top_files, top_syms):
+    """Renders PageRank centrality rankings in structured tables."""
+    if HAS_RICH and console:
+        table_f = Table(title="Top Central Files (PageRank Score)", border_style="bright_blue")
+        table_f.add_column("Rank", style="dim", width=6)
+        table_f.add_column("File Path", style="cyan")
+        table_f.add_column("PageRank Score", style="bold green", justify="right")
+        if not top_files:
+            table_f.add_row("-", "(no internal dependencies found)", "-")
+        else:
+            for idx, (fpath, score) in enumerate(top_files, start=1):
+                table_f.add_row(str(idx), fpath, f"{score:.4f}")
+        console.print(table_f)
+
+        if top_syms is not None:
+            table_s = Table(title="Top Central Symbols (PageRank Score)", border_style="magenta")
+            table_s.add_column("Rank", style="dim", width=6)
+            table_s.add_column("Symbol Identifier", style="magenta")
+            table_s.add_column("PageRank Score", style="bold green", justify="right")
+            if not top_syms:
+                table_s.add_row("-", "(no function call edges found)", "-")
+            else:
+                for idx, (cid, score) in enumerate(top_syms, start=1):
+                    table_s.add_row(str(idx), cid, f"{score:.4f}")
+            console.print(table_s)
+        print()
+    else:
+        print("\n--- Top Central Files (PageRank Score) ---")
+        if not top_files:
+            print("  (no internal dependencies found)")
+        else:
+            for idx, (fpath, score) in enumerate(top_files, start=1):
+                print(f"  {idx}. {fpath} (score={score:.3f})")
+        if top_syms is not None:
+            print("\n--- Top Central Function Symbols (PageRank Score) ---")
+            if not top_syms:
+                print("  (no function call edges found)")
+            else:
+                for idx, (cid, score) in enumerate(top_syms, start=1):
+                    print(f"  {idx}. {cid} (score={score:.3f})")
+        print()
+
+
+def render_repos_table(available: list, active_path: str):
+    """Renders available repositories list in a formatted table."""
+    active_abs = os.path.abspath(active_path)
+    if HAS_RICH and console:
+        table = Table(title=f"Available Repositories ({len(available)})", border_style="bright_blue")
+        table.add_column("#", style="bold yellow", width=5)
+        table.add_column("Name", style="bold cyan")
+        table.add_column("Path", style="dim white")
+        table.add_column("Status", style="bold green")
+        for idx, (label, abs_p) in enumerate(available, start=1):
+            is_act = (abs_p == active_abs)
+            st = "[bold green]ACTIVE ✓[/bold green]" if is_act else "[dim]Available[/dim]"
+            table.add_row(str(idx), label, abs_p, st)
+        console.print(table)
+        console.print("[dim]Tip: type 'repo <number>' or 'repo <name>' to switch[/dim]\n")
+    else:
+        print(f"\n--- Available Repositories ({len(available)}) ---")
+        for idx, (label, abs_p) in enumerate(available, start=1):
+            active_marker = " (active ✓)" if abs_p == active_abs else ""
+            print(f"  [{idx}] {label:<25} {abs_p}{active_marker}")
+        print("\n  Tip: type 'repo <number>' to switch, e.g. 'repo 2'\n")
+
+
+def render_hooks_table(st_dict: dict, target_path: str):
+    """Renders Git hook status table."""
+    if HAS_RICH and console:
+        table = Table(title=f"Git Hook Status for '{os.path.basename(target_path)}'", border_style="bright_blue")
+        table.add_column("Hook Name", style="cyan")
+        table.add_column("Status", style="bold")
+        for hook, is_inst in st_dict.items():
+            badge = "[bold green]Installed ✓[/bold green]" if is_inst else "[dim yellow]Not Installed[/dim yellow]"
+            table.add_row(hook, badge)
+        console.print(table)
+        print()
+    else:
+        print(f"\n--- Git Hook Status for '{target_path}' ---")
+        for hook, is_inst in st_dict.items():
+            print(f"  - {hook}: {'Installed' if is_inst else 'Not Installed'}")
+        print()
+
+
+def render_patch_card(patch_rec: dict, fix_time: float):
+    """Renders automated patch diagnosis and git diff."""
+    sb_val = patch_rec.get("sandbox_validation", {})
+    sb_status = sb_val.get("test_status", "skipped").upper()
+    sb_turns = sb_val.get("iterations_count", 1)
+    time_str = format_time_consumed(fix_time)
+    conf = f"{patch_rec.get('confidence_score', 0):.0%}"
+
+    if HAS_RICH and console:
+        status_color = "green" if sb_status == "PASSED" else ("red" if sb_status == "FAILED" else "yellow")
+        info_table = Table.grid(padding=(0, 2))
+        info_table.add_column(style="bold cyan", justify="right")
+        info_table.add_column(style="white")
+        info_table.add_row("Target File:", patch_rec.get("target_file", "Unknown"))
+        info_table.add_row("Error Type:", str(patch_rec.get("error_type", "Unknown")))
+        info_table.add_row("Confidence:", conf)
+        info_table.add_row("Sandbox Tests:", f"[{status_color}]{sb_status} (Iterations: {sb_turns})[/{status_color}]")
+        info_table.add_row("Time Consumed:", time_str)
+        info_table.add_row("Explanation:", patch_rec.get("explanation", ""))
+
+        console.print(Panel(info_table, title="[bold cyan]INTELLICODEX AUTOMATED CODE PATCH[/bold cyan]", border_style="cyan"))
+        render_diff(patch_rec.get("git_diff", ""))
+    else:
+        print("\n=======================================================================")
+        print("                 INTELLICODEX AUTOMATED CODE PATCH")
+        print("=======================================================================")
+        print(f"Target File     : {patch_rec['target_file']}")
+        print(f"Error Type      : {patch_rec.get('error_type', 'Unknown')}")
+        print(f"Confidence      : {conf}")
+        print(f"Sandbox Tests   : {sb_status} (Iterations: {sb_turns})")
+        print(f"Time Consumed   : {time_str}")
+        print(f"Explanation     : {patch_rec['explanation']}")
+        print("\n--- Unified Git Diff ---")
+        print(patch_rec.get("git_diff", ""))
+        print("=======================================================================\n")
+
+
+class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
+    """Context-aware autocompleter for commands, files, symbols, and settings."""
+
+    COMMANDS = [
+        ("help", "Show available CLI commands"),
+        ("?", "Show available CLI commands"),
+        ("exit", "Exit IntelliCodeX CLI"),
+        ("quit", "Exit IntelliCodeX CLI"),
+        ("clear", "Clear terminal screen"),
+        ("cls", "Clear terminal screen"),
+        ("files", "List all indexed repository files"),
+        ("ls", "List all indexed repository files"),
+        ("top", "Show PageRank centrality rankings"),
+        ("centrality", "Show PageRank centrality rankings"),
+        ("repos", "List all known local & cloned repositories"),
+        ("list-repos", "List all known repositories"),
+        ("repo ", "Switch active repository by path, URL, or number"),
+        ("backend ", "Switch backend engine (ollama | tfidf)"),
+        ("persona ", "Switch AI persona (general, security, reviewer, refactor, fixer)"),
+        ("model ", "Switch Ollama LLM model"),
+        ("history", "View conversation history"),
+        ("chat", "View conversation history"),
+        ("clear-chat", "Clear conversation history"),
+        ("hooks", "Install Git background re-indexing hooks"),
+        ("setup-hooks", "Install Git background re-indexing hooks"),
+        ("hooks:status", "Check Git hooks installation status"),
+        ("hooks:remove", "Uninstall Git background re-indexing hooks"),
+        ("watch", "Check real-time filesystem watcher status"),
+        ("watch:status", "Check filesystem watcher status"),
+        ("watch:stop", "Stop real-time filesystem watcher"),
+        ("watch:start", "Start real-time filesystem watcher"),
+        ("hybrid", "Check BM25 hybrid search status"),
+        ("hybrid:status", "Check hybrid search status"),
+        ("hybrid:on", "Enable hybrid BM25 lexical ranking"),
+        ("hybrid:off", "Disable hybrid search (dense only)"),
+        ("hybrid:toggle", "Toggle hybrid BM25 search on/off"),
+        ("deps:", "Inspect reverse dependency impact for a file"),
+        ("callers:", "Find all function callers across repository AST"),
+        ("fix:", "Diagnose error and generate automated sandbox patch"),
+    ]
+
+    PERSONAS = ["general", "security", "reviewer", "refactor", "fixer"]
+    BACKENDS = ["ollama", "tfidf"]
+    COMMON_ERRORS = [
+        "KeyError", "IndexError", "TypeError", "ValueError",
+        "ZeroDivisionError", "AttributeError", "FileNotFoundError"
+    ]
+
+    def __init__(self, get_files_fn=None, get_symbols_fn=None, get_repos_fn=None):
+        self.get_files_fn = get_files_fn
+        self.get_symbols_fn = get_symbols_fn
+        self.get_repos_fn = get_repos_fn
+
+    def get_completions(self, document, complete_event=None):
+        if not HAS_PROMPT_TOOLKIT or Completion is None:
+            return
+
+        text = document.text_before_cursor
+        stripped = text.lstrip(">").lstrip("$").lstrip()
+
+        # 1. Parameter completion: deps:<file> or deps <file>
+        for prefix in ("deps:", "deps "):
+            if stripped.startswith(prefix):
+                arg = stripped[len(prefix):]
+                if self.get_files_fn:
+                    files = self.get_files_fn() or []
+                    for f in files:
+                        if arg.lower() in f.lower():
+                            yield Completion(f, start_position=-len(arg), display=f, display_meta="File")
+                return
+
+        # 2. Parameter completion: fix:<file_or_err> or fix <file_or_err>
+        for prefix in ("fix:", "fix "):
+            if stripped.startswith(prefix):
+                arg = stripped[len(prefix):]
+                for err in self.COMMON_ERRORS:
+                    if arg.lower() in err.lower():
+                        yield Completion(err, start_position=-len(arg), display=err, display_meta="Error")
+                if self.get_files_fn:
+                    files = self.get_files_fn() or []
+                    for f in files:
+                        if arg.lower() in f.lower():
+                            yield Completion(f, start_position=-len(arg), display=f, display_meta="File")
+                return
+
+        # 3. Parameter completion: callers:<symbol> or callers <symbol>
+        for prefix in ("callers:", "callers "):
+            if stripped.startswith(prefix):
+                arg = stripped[len(prefix):]
+                if self.get_symbols_fn:
+                    symbols = self.get_symbols_fn() or []
+                    for sym in symbols:
+                        if arg.lower() in sym.lower():
+                            yield Completion(sym, start_position=-len(arg), display=sym, display_meta="Symbol")
+                return
+
+        # 4. Parameter completion: persona <name>
+        if stripped.startswith("persona "):
+            arg = stripped[len("persona "):]
+            for p in self.PERSONAS:
+                if p.lower().startswith(arg.lower()):
+                    yield Completion(p, start_position=-len(arg), display=p, display_meta="Persona")
+            return
+
+        # 5. Parameter completion: backend <name>
+        if stripped.startswith("backend "):
+            arg = stripped[len("backend "):]
+            for b in self.BACKENDS:
+                if b.lower().startswith(arg.lower()):
+                    yield Completion(b, start_position=-len(arg), display=b, display_meta="Backend")
+            return
+
+        # 6. Parameter completion: repo <name_or_number>
+        if stripped.startswith("repo "):
+            arg = stripped[len("repo "):]
+            if self.get_repos_fn:
+                repos = self.get_repos_fn() or []
+                for idx, (lbl, p) in enumerate(repos, start=1):
+                    s_idx = str(idx)
+                    if s_idx.startswith(arg):
+                        yield Completion(s_idx, start_position=-len(arg), display=f"[{s_idx}] {lbl}", display_meta="Repo Number")
+                    if lbl.lower().startswith(arg.lower()):
+                        yield Completion(lbl, start_position=-len(arg), display=lbl, display_meta="Repo Name")
+            return
+
+        # 7. Sub-command completions
+        for group, options in (("hybrid:", ("status", "on", "off", "toggle")),
+                               ("watch:", ("status", "start", "stop")),
+                               ("hooks:", ("status", "remove", "install"))):
+            if stripped.startswith(group):
+                sub = stripped[len(group):]
+                for opt in options:
+                    if opt.startswith(sub.lower()):
+                        full_cmd = f"{group}{opt}"
+                        yield Completion(full_cmd, start_position=-len(stripped), display=full_cmd, display_meta="Command")
+                return
+
+        # 8. Top-level commands
+        for cmd, desc in self.COMMANDS:
+            if cmd.lower().startswith(stripped.lower()):
+                yield Completion(cmd, start_position=-len(stripped), display=cmd, display_meta=desc)
 def create_components(backend_choice: str):
     """Factory helper to instantiate embedder and LLM with automatic fallback."""
     if backend_choice == "ollama":
@@ -207,7 +554,7 @@ def create_components(backend_choice: str):
 
 from core.benchmarking import run_benchmark
 
-VERSION = "1.0.0-sem1"
+VERSION = "1.0.0"
 
 
 def main():
@@ -267,7 +614,7 @@ def main():
         print(f"[*] {msg}")
         return 0 if ok else 1
 
-    print_banner()
+    render_banner()
 
     embedder, llm, active_backend = create_components(args.backend)
 
@@ -313,7 +660,7 @@ def main():
         t_batch = time.perf_counter()
         response = engine.ask(args.query)
         total_batch = response.get("elapsed_seconds", time.perf_counter() - t_batch)
-        print(f"--- Answer ---\n{response['answer']}\n")
+        render_markdown_panel(response['answer'], title="Answer")
         print(f"[*] [Time Consumed]: {format_time_consumed(total_batch)} (Retrieval: {format_time_consumed(response.get('retrieval_seconds', 0.0))}, Generation: {format_time_consumed(response.get('llm_seconds', 0.0))})\n")
         return 0
 
@@ -350,11 +697,60 @@ def main():
     except Exception:
         pass
 
+    # Configure auto-completion and rich session
+    def get_indexed_files():
+        if result and getattr(result, "store", None) and result.store.chunks:
+            return sorted(list(set(c.file_path for c in result.store.chunks)))
+        return []
+
+    def get_indexed_symbols():
+        syms = set()
+        if result:
+            call_g = getattr(result, "call_graph", None)
+            if call_g:
+                syms.update(call_g.nodes())
+            if getattr(result, "store", None) and result.store.chunks:
+                for c in result.store.chunks:
+                    if c.name and "::" in c.name:
+                        syms.add(c.name.split("::")[-1])
+                    elif c.name:
+                        syms.add(c.name)
+        return sorted(list(syms))
+
+    completer = IntelliCodeXCompleter(
+        get_files_fn=get_indexed_files,
+        get_symbols_fn=get_indexed_symbols,
+        get_repos_fn=lambda: get_available_repos(current_path),
+    )
+
+    use_tui = should_use_tui()
+    session = None
+    if use_tui:
+        try:
+            session = PromptSession(completer=completer, history=InMemoryHistory())
+        except Exception:
+            session = None
+            use_tui = False
+
     print("\nIntelliCodeX ready. Type a question or 'help' for options, 'exit' to quit.\n")
 
     while True:
         try:
-            query = input(">> ").strip()
+            if session is not None and use_tui:
+                def get_toolbar():
+                    watcher_st = "ON" if (watcher and watcher.is_alive()) else "OFF"
+                    hybrid_st = "ON" if getattr(engine, "hybrid_search", True) else "OFF"
+                    repo_label = os.path.basename(current_path) or current_path
+                    return HTML(
+                        f" <b>Repo:</b> <ansicyan>{repo_label}</ansicyan> | "
+                        f"<b>Backend:</b> <ansiyellow>{active_backend}</ansiyellow> | "
+                        f"<b>Persona:</b> <ansigreen>{engine.active_persona}</ansigreen> | "
+                        f"<b>Hybrid:</b> {hybrid_st} | "
+                        f"<b>Watcher:</b> {watcher_st} "
+                    )
+                query = session.prompt(">> ", bottom_toolbar=get_toolbar).strip()
+            else:
+                query = input(">> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nExiting IntelliCodeX CLI. Goodbye!")
             break
@@ -375,37 +771,21 @@ def main():
 
         if query.lower() in ("clear", "cls"):
             os.system("cls" if os.name == "nt" else "clear")
-            print_banner()
+            render_banner()
             continue
 
         if query.lower() in ("files", "ls"):
             indexed_files = sorted(list(set(c.file_path for c in result.store.chunks)))
-            print(f"\n--- Indexed Source Files ({len(indexed_files)}) ---")
-            for f in indexed_files:
-                print(f"  - {f}")
-            print()
+            render_files_table(indexed_files)
             continue
 
         if query.lower() in ("top", "centrality"):
             t_top = time.perf_counter()
             top_files = get_top_central_files(result.graph, top_n=5)
-            print("\n--- Top Central Files (PageRank Score) ---")
-            if not top_files:
-                print("  (no internal dependencies found)")
-            else:
-                for idx, (fpath, score) in enumerate(top_files, start=1):
-                    print(f"  {idx}. {fpath} (score={score:.3f})")
-
             call_g = getattr(result, "call_graph", None)
-            if call_g:
-                top_syms = get_top_central_symbols(call_g, top_n=5)
-                print("\n--- Top Central Function Symbols (PageRank Score) ---")
-                if not top_syms:
-                    print("  (no function call edges found)")
-                else:
-                    for idx, (cid, score) in enumerate(top_syms, start=1):
-                        print(f"  {idx}. {cid} (score={score:.3f})")
-            print(f"\n[*] [Time Consumed]: Centrality computed in {format_time_consumed(time.perf_counter() - t_top)}\n")
+            top_syms = get_top_central_symbols(call_g, top_n=5) if call_g else None
+            render_centrality_tables(top_files, top_syms)
+            print(f"[*] [Time Consumed]: Centrality computed in {format_time_consumed(time.perf_counter() - t_top)}\n")
             continue
 
         if query.lower().startswith("backend "):
@@ -443,12 +823,7 @@ def main():
         # --- repos / list-repos: show all known repos with numbered selection ---
         if query.lower() in ("repos", "list-repos", "list repos", "show repos"):
             available = get_available_repos(current_path)
-            active_abs = os.path.abspath(current_path)
-            print(f"\n--- Available Repositories ({len(available)}) ---")
-            for idx, (label, abs_p) in enumerate(available, start=1):
-                active_marker = " (active ✓)" if abs_p == active_abs else ""
-                print(f"  [{idx}] {label:<25} {abs_p}{active_marker}")
-            print("\n  Tip: type 'repo <number>' to switch, e.g. 'repo 2'\n")
+            render_repos_table(available, current_path)
             continue
 
         if (query.startswith("repo ") or query.startswith("repo:") or 
@@ -509,10 +884,7 @@ def main():
 
         if query.lower() in ("hooks:status", "hooks:check"):
             st = check_git_hooks_status(current_path)
-            print(f"\n--- Git Hook Status for '{current_path}' ---")
-            for hook, is_inst in st.items():
-                print(f"  - {hook}: {'Installed' if is_inst else 'Not Installed'}")
-            print()
+            render_hooks_table(st, current_path)
             continue
 
         if query.lower() in ("hooks:remove", "hooks:uninstall"):
@@ -641,22 +1013,7 @@ def main():
             )
             fix_time = time.perf_counter() - t_fix
 
-            sb_val = patch_rec.get("sandbox_validation", {})
-            sb_status = sb_val.get("test_status", "skipped").upper()
-            sb_turns = sb_val.get("iterations_count", 1)
-
-            print("\n=======================================================================")
-            print("                 INTELLICODEX AUTOMATED CODE PATCH")
-            print("=======================================================================")
-            print(f"Target File     : {patch_rec['target_file']}")
-            print(f"Error Type      : {patch_rec.get('error_type', 'Unknown')}")
-            print(f"Confidence      : {patch_rec['confidence_score']:.0%}")
-            print(f"Sandbox Tests   : {sb_status} (Iterations: {sb_turns})")
-            print(f"Time Consumed   : {format_time_consumed(fix_time)}")
-            print(f"Explanation     : {patch_rec['explanation']}")
-            print("\n--- Unified Git Diff ---")
-            print(patch_rec["git_diff"])
-            print("=======================================================================\n")
+            render_patch_card(patch_rec, fix_time)
 
             if patch_rec["status"] != "failed" and patch_rec["git_diff"]:
                 try:
@@ -748,7 +1105,7 @@ def main():
             else:
                 # Offline / tfidf fallback: use standard ask() without streaming
                 response = engine.ask(query)
-                print(response["answer"])
+                render_markdown_panel(response["answer"], title="Answer")
                 total_time = response.get("elapsed_seconds", time.perf_counter() - t_ask)
                 t_retrieval = response.get("retrieval_seconds", t_retrieval)
                 t_llm = response.get("llm_seconds", 0.0)

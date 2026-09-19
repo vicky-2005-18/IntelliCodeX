@@ -84,16 +84,14 @@ graph TD
 * **Dependencies**: `cli.py`.
 
 ### Tasks:
-1. **Task 4.1: Prompt Toolkit Auto-Completion**
+1. **Task 4.1: Prompt Toolkit Auto-Completion & Rich TUI** `[COMPLETED ✓]`
    - **File**: [`cli.py`](file:///c:/Users/vikas/Downloads/Major%20project%202%202026/intellicodex/cli.py)
-   - **Description**: Add auto-completion for commands (`deps:`, `callers:`, `fix:`, `persona`, `model`, `repo`) and indexed file paths.
-   - **Owner**: Unassigned
-   - **Estimated Effort**: ~1-2 days (Estimate)
-2. **Task 4.2: Standalone PyPI / pip Package Configuration**
-   - **File**: `pyproject.toml` (New)
-   - **Description**: Package IntelliCodeX with CLI entry point `intellicodex`.
-   - **Owner**: Unassigned
-   - **Estimated Effort**: ~1 day (Estimate)
+   - **Description**: Integrated `prompt_toolkit` with dynamic `IntelliCodeXCompleter` for command completion (`deps:`, `callers:`, `fix:`, `persona`, `model`, `repo`, `backend`, `hybrid`, `watch`), parameter suggestions (files, symbols, personas, error types), bottom status toolbar, and `rich` Markdown panels, syntax-highlighted git diffs, and formatted tables (`files`, `top`, `repos`, `hooks`).
+   - **Status**: Completed & verified via `tests/test_tui_and_packaging.py`.
+2. **Task 4.2: Standalone PyPI / pip Package Configuration** `[COMPLETED ✓]`
+   - **File**: `pyproject.toml`
+   - **Description**: Packaged IntelliCodeX as a PEP 621 compliant package with console script entry point `intellicodex = "cli:main"`. Verified via editable pip installation (`pip install -e .`) and execution.
+   - **Status**: Completed & verified.
 
 ---
 

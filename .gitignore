@@ -9,6 +9,8 @@ venv/
 .venv/
 ENV/
 .pytest_cache/
+*.egg-info/
+build/
 
 # Node / Frontend
 node_modules/
