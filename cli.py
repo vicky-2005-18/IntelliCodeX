@@ -49,7 +49,7 @@ except ImportError:
 
 try:
     from prompt_toolkit import PromptSession
-    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.history import InMemoryHistory, FileHistory
     from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.formatted_text import HTML
     HAS_PROMPT_TOOLKIT = True
@@ -57,6 +57,8 @@ except ImportError:
     HAS_PROMPT_TOOLKIT = False
     Completer = object
     Completion = None
+    FileHistory = None
+    InMemoryHistory = None
 
 
 def format_time_consumed(seconds: float) -> str:
@@ -396,6 +398,278 @@ def render_patch_card(patch_rec: dict, fix_time: float):
         print("=======================================================================\n")
 
 
+# ---------------------------------------------------------------------------
+# Rich TUI Helper Panels (Milestone 4 / CLI Perfection)
+# ---------------------------------------------------------------------------
+
+def render_help_panel():
+    """Renders rich color-coded help table grouped by command category."""
+    if HAS_RICH and console:
+        groups = [
+            ("Search & AI", "cyan", [
+                ("search:<query>",  "Instant retrieval without LLM (fast, no AI wait)"),
+                ("<question>",      "Ask AI a question about the repository"),
+                ("fix:<error>",     "Diagnose error & generate automated sandbox patch"),
+            ]),
+            ("Code Analysis", "magenta", [
+                ("deps:<file>",     "View reverse dependency impact for a file"),
+                ("callers:<func>",  "Find all call sites of a function across the repo"),
+                ("top / centrality","Show PageRank centrality rankings for files & symbols"),
+                ("info:<file>",     "Show file stats: size, chunk count, centrality score"),
+            ]),
+            ("Repository", "green", [
+                ("repo <path|url>", "Switch or clone a repository (local or GitHub URL)"),
+                ("repo <number>",   "Switch to a previously added repo by list number"),
+                ("repos",           "List all known repositories"),
+                ("files / ls",      "List all indexed source files"),
+            ]),
+            ("Settings", "yellow", [
+                ("backend <name>",  "Switch backend engine: ollama | tfidf"),
+                ("persona <name>",  "Switch AI persona: general, security, reviewer, refactor, fixer"),
+                ("model <name>",    "Set active Ollama LLM model (e.g. qwen2.5-coder:7b)"),
+                ("hybrid:on|off",   "Enable or disable BM25 lexical hybrid search"),
+                ("hybrid:toggle",   "Toggle hybrid search on/off"),
+            ]),
+            ("Git & Watcher", "blue", [
+                ("hooks",           "Install Git background re-indexing hooks"),
+                ("hooks:status",    "Check Git hooks installation status"),
+                ("hooks:remove",    "Uninstall Git background re-indexing hooks"),
+                ("watch",           "Check real-time filesystem watcher status"),
+                ("watch:start|stop","Start or stop the real-time file watcher"),
+            ]),
+            ("Session", "white", [
+                ("status",          "Show full system status at a glance"),
+                ("history",         "View multi-turn conversation history"),
+                ("clear-chat",      "Clear conversation history"),
+                ("export:<file>",   "Save last AI answer to a Markdown file"),
+                ("version",         "Show IntelliCodeX version"),
+                ("clear / cls",     "Clear terminal screen"),
+                ("help / ?",        "Show this help message"),
+                ("exit / quit",     "Exit IntelliCodeX CLI"),
+            ]),
+        ]
+        for group_name, color, cmds in groups:
+            table = Table(
+                title=f"[bold {color}]{group_name}[/bold {color}]",
+                border_style=color, show_header=True,
+                header_style=f"bold {color}", padding=(0, 1),
+            )
+            table.add_column("Command", style=color, min_width=24)
+            table.add_column("Description", style="white")
+            for cmd, desc in cmds:
+                table.add_row(cmd, desc)
+            console.print(table)
+        console.print("\n[dim]  ↑/↓ arrows recall command history · Tab for autocomplete[/dim]\n")
+    else:
+        print_help()
+
+
+def render_ingestion_panel(result, current_path: str, elapsed: float):
+    """Renders repository ingestion results with rich panel styling."""
+    time_str = format_time_consumed(elapsed)
+    mode = getattr(result, "indexing_mode", "fresh").lower()
+    if HAS_RICH and console:
+        mode_badge = {
+            "cached":      "[bold green]Instant Disk Cache[/bold green]",
+            "incremental": "[bold yellow]Incremental Update[/bold yellow]",
+            "fresh":       "[bold cyan]Fresh Indexing[/bold cyan]",
+        }.get(mode, "[bold cyan]Fresh Indexing[/bold cyan]")
+        speed_str = (
+            f" ({result.num_files / elapsed:.1f} files/sec)"
+            if elapsed > 0.05 and mode != "cached" else ""
+        )
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan", justify="right")
+        grid.add_column(style="white")
+        grid.add_row(
+            "[green]✓[/green] Files indexed:",
+            f"[bold]{result.num_files}[/bold] → [bold]{result.num_chunks}[/bold] chunks ([dim]{result.ast_chunks_count} AST[/dim])",
+        )
+        grid.add_row(
+            "[green]✓[/green] Dependency graph:",
+            f"{result.graph.number_of_nodes()} nodes, {result.graph.number_of_edges()} edges",
+        )
+        call_g = getattr(result, "call_graph", None)
+        if call_g:
+            grid.add_row(
+                "[green]✓[/green] Call graph:",
+                f"{call_g.number_of_nodes()} nodes, {call_g.number_of_edges()} call edges",
+            )
+        grid.add_row("[green]✓[/green] Mode:", mode_badge)
+        grid.add_row("[green]✓[/green] Time consumed:", f"[bold green]{time_str}[/bold green]{speed_str}")
+        console.print(Panel(
+            grid,
+            title=f"[bold cyan]Repository Indexed — {os.path.basename(current_path)}[/bold cyan]",
+            border_style="cyan", padding=(1, 2),
+        ))
+    else:
+        print_ingestion_summary(result, current_path, elapsed)
+
+
+def render_deps_panel(target: str, affected: list, elapsed: float):
+    """Renders dependency impact as a rich tree-style panel."""
+    if HAS_RICH and console:
+        if not affected:
+            content = Text("(no reverse dependencies found)", style="dim italic")
+        else:
+            content = Text()
+            for i, aff in enumerate(affected):
+                prefix = "└── " if i == len(affected) - 1 else "├── "
+                content.append(f"{prefix}{aff}\n", style="cyan")
+        console.print(Panel(
+            content,
+            title=f"[bold magenta]Dependency Impact — {target}[/bold magenta]",
+            subtitle=f"[dim]{len(affected)} reverse dep(s) · {format_time_consumed(elapsed)}[/dim]",
+            border_style="magenta", padding=(1, 2),
+        ))
+    else:
+        print(f"\n--- Dependency Analysis for '{target}' ---")
+        print("  Reverse Dependencies (Files affected if modified):")
+        if not affected:
+            print("    (none found)")
+        else:
+            for aff in affected:
+                print(f"    ├── {aff}")
+        print(f"\n[*] [Time Consumed]: {format_time_consumed(elapsed)}\n")
+
+
+def render_callers_panel(symbol: str, callers: list, elapsed: float):
+    """Renders function callers as a rich tree-style panel."""
+    if HAS_RICH and console:
+        if not callers:
+            content = Text("(no calling function sites found)", style="dim italic")
+        else:
+            content = Text()
+            for i, c_id in enumerate(callers):
+                prefix = "└── " if i == len(callers) - 1 else "├── "
+                content.append(f"{prefix}{c_id}\n", style="magenta")
+        console.print(Panel(
+            content,
+            title=f"[bold magenta]Callers of '{symbol}'[/bold magenta]",
+            subtitle=f"[dim]{len(callers)} call site(s) · {format_time_consumed(elapsed)}[/dim]",
+            border_style="magenta", padding=(1, 2),
+        ))
+    else:
+        print(f"\n--- Symbol Callers for '{symbol}' ---")
+        if not callers:
+            print("  (no calling function sites found)")
+        else:
+            for c_id in callers:
+                print(f"  ├── {c_id}")
+        print(f"\n[*] [Time Consumed]: {format_time_consumed(elapsed)}\n")
+
+
+def render_watch_panel(watcher, current_path: str):
+    """Renders real-time watcher status as a rich panel."""
+    is_active = bool(watcher and watcher.is_alive())
+    if HAS_RICH and console:
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan", justify="right")
+        grid.add_column(style="white")
+        grid.add_row("Status:", "[bold green]ACTIVE ✓[/bold green]" if is_active else "[bold red]INACTIVE[/bold red]")
+        grid.add_row("Target:", current_path)
+        grid.add_row("Debounce:", "500 ms")
+        grid.add_row("Auto-reindex:", "[green]Enabled[/green]" if is_active else "[dim]Disabled[/dim]")
+        console.print(Panel(
+            grid, title="[bold blue]Real-Time Filesystem Watcher[/bold blue]",
+            border_style="blue", padding=(1, 2),
+        ))
+    else:
+        if is_active:
+            print(f"\n[*] Real-Time Filesystem Watcher: ACTIVE")
+            print(f"    Target Directory: '{current_path}'")
+            print("    Debounce Window : 500ms")
+            print("    Auto-reindex    : Enabled\n")
+        else:
+            print("\n[*] Real-Time Filesystem Watcher: INACTIVE / STOPPED\n")
+
+
+def render_hybrid_panel(engine):
+    """Renders hybrid search status as a rich panel."""
+    is_on = getattr(engine, "hybrid_search", True)
+    if HAS_RICH and console:
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan", justify="right")
+        grid.add_column(style="white")
+        grid.add_row("Hybrid Search:", "[bold green]ACTIVE ✓[/bold green]" if is_on else "[bold red]INACTIVE[/bold red]")
+        grid.add_row("Algorithm:", "Reciprocal Rank Fusion (k=60)")
+        grid.add_row("Lexical:", "BM25Okapi (sub-token identifier splitting)")
+        grid.add_row("Dense:", "TF-IDF / Ollama nomic-embed-text vectors")
+        grid.add_row("Commands:", "'hybrid:on'  'hybrid:off'  'hybrid:toggle'")
+        console.print(Panel(
+            grid, title="[bold cyan]Hybrid Search — BM25 + Dense RRF[/bold cyan]",
+            border_style="cyan", padding=(1, 2),
+        ))
+    else:
+        st = "ACTIVE (Dense + BM25 RRF)" if is_on else "INACTIVE (Dense only)"
+        print(f"\n[*] Hybrid Search: {st}")
+        print("    Algorithm: Reciprocal Rank Fusion (k=60)\n")
+
+
+def render_status_panel(current_path: str, active_backend: str, engine, watcher):
+    """Renders at-a-glance master system status panel."""
+    if HAS_RICH and console:
+        watcher_st = "[bold green]ON ✓[/bold green]" if (watcher and watcher.is_alive()) else "[bold red]OFF[/bold red]"
+        hybrid_st  = "[bold green]ON ✓[/bold green]" if getattr(engine, "hybrid_search", True) else "[bold red]OFF[/bold red]"
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan", justify="right")
+        grid.add_column(style="white")
+        grid.add_row("Repository:",   f"[bold]{os.path.basename(current_path)}[/bold]  [dim]{current_path}[/dim]")
+        grid.add_row("Backend:",      f"[bold yellow]{active_backend}[/bold yellow]")
+        grid.add_row("Persona:",      f"[bold green]{engine.active_persona}[/bold green]")
+        if hasattr(engine, "active_model") and engine.active_model:
+            grid.add_row("Model:",    str(engine.active_model))
+        grid.add_row("Hybrid Search:", hybrid_st)
+        grid.add_row("File Watcher:", watcher_st)
+        grid.add_row("Version:",      f"[dim]{VERSION}[/dim]")
+        console.print(Panel(
+            grid, title="[bold cyan]IntelliCodeX — System Status[/bold cyan]",
+            border_style="cyan", padding=(1, 2),
+        ))
+    else:
+        print(f"\n[*] System Status:")
+        print(f"    Repository : {current_path}")
+        print(f"    Backend    : {active_backend}")
+        print(f"    Persona    : {engine.active_persona}")
+        print(f"    Hybrid     : {'ON' if getattr(engine, 'hybrid_search', True) else 'OFF'}")
+        print(f"    Watcher    : {'ON' if (watcher and watcher.is_alive()) else 'OFF'}")
+        print(f"    Version    : {VERSION}\n")
+
+
+def render_search_results(query: str, results: list, elapsed: float):
+    """Renders fast retrieval-only results (no LLM) in a styled rich table."""
+    if HAS_RICH and console:
+        table = Table(
+            title=(
+                f"[bold cyan]Fast Search — '{query}'[/bold cyan]  "
+                f"[dim]({format_time_consumed(elapsed)}, no LLM)[/dim]"
+            ),
+            border_style="cyan", show_lines=False,
+        )
+        table.add_column("Score",  style="bold green", justify="right", width=7)
+        table.add_column("File",   style="cyan")
+        table.add_column("Symbol", style="magenta")
+        table.add_column("Lines",  style="dim", width=12)
+        table.add_column("Reason", style="dim")
+        for item in results:
+            chunk  = item["chunk"]
+            score  = item["score"]
+            reason = item.get("reason", "")
+            lines_str = f"{chunk.start_line}–{chunk.end_line}"
+            table.add_row(
+                f"{score:.3f}", chunk.file_path, chunk.name or "—",
+                lines_str, reason or "—",
+            )
+        console.print(table)
+        console.print()
+    else:
+        print(f"\n--- Fast Search Results for '{query}' ({format_time_consumed(elapsed)}) ---")
+        for item in results:
+            chunk = item["chunk"]
+            print(f"  [{item['score']:.3f}] {chunk.file_path} :: {chunk.name} (lines {chunk.start_line}-{chunk.end_line})")
+        print()
+
+
 class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
     """Context-aware autocompleter for commands, files, symbols, and settings."""
 
@@ -435,6 +709,11 @@ class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
         ("deps:", "Inspect reverse dependency impact for a file"),
         ("callers:", "Find all function callers across repository AST"),
         ("fix:", "Diagnose error and generate automated sandbox patch"),
+        ("search:", "Fast retrieval-only search (no LLM, instant results)"),
+        ("info:", "Show indexed file details: size, chunk count, centrality"),
+        ("export:", "Save last AI answer to a Markdown file"),
+        ("status", "Show full system status at a glance"),
+        ("version", "Show IntelliCodeX version"),
     ]
 
     PERSONAS = ["general", "security", "reviewer", "refactor", "fixer"]
@@ -642,7 +921,7 @@ def main():
         print(f"[!] Error ingesting repository '{args.repo_path}': {e}")
         return 1
 
-    print_ingestion_summary(result, current_path, elapsed)
+    render_ingestion_panel(result, current_path, elapsed)
 
     engine = QueryEngine(
         result.store,
@@ -681,8 +960,19 @@ def main():
         if len(changed_paths) > 3:
             diff_desc += f" (+{len(changed_paths)-3} more)"
         t_str = format_time_consumed(elapsed_s)
-        sys.stdout.write(f"\n[*] [Watchdog] Detected changes in {diff_desc}. Auto-reindexed ({result.num_chunks} chunks in {t_str}).\n>> ")
-        sys.stdout.flush()
+        # B4 fix: use rich console so the watchdog message doesn't corrupt the TUI prompt line
+        if HAS_RICH and console:
+            console.print(
+                f"\n[bold yellow][[Watchdog]][/bold yellow] Detected changes in "
+                f"[cyan]{diff_desc}[/cyan]. Auto-reindexed "
+                f"([bold]{result.num_chunks}[/bold] chunks in [green]{t_str}[/green])."
+            )
+        else:
+            sys.stdout.write(
+                f"\n[*] [Watchdog] Detected changes in {diff_desc}. "
+                f"Auto-reindexed ({result.num_chunks} chunks in {t_str}).\n"
+            )
+            sys.stdout.flush()
 
     watcher = None
     try:
@@ -704,6 +994,7 @@ def main():
         return []
 
     def get_indexed_symbols():
+        # B5 fix: preserve file::symbol format to avoid duplicate bare names
         syms = set()
         if result:
             call_g = getattr(result, "call_graph", None)
@@ -711,10 +1002,11 @@ def main():
                 syms.update(call_g.nodes())
             if getattr(result, "store", None) and result.store.chunks:
                 for c in result.store.chunks:
-                    if c.name and "::" in c.name:
-                        syms.add(c.name.split("::")[-1])
-                    elif c.name:
-                        syms.add(c.name)
+                    if c.name:
+                        file_base = os.path.basename(c.file_path) if c.file_path else ""
+                        if file_base:
+                            syms.add(f"{file_base}::{c.name}")  # qualified for disambiguation
+                        syms.add(c.name)  # bare name for quick completion
         return sorted(list(syms))
 
     completer = IntelliCodeXCompleter(
@@ -727,12 +1019,21 @@ def main():
     session = None
     if use_tui:
         try:
-            session = PromptSession(completer=completer, history=InMemoryHistory())
+            # E1: Persistent history across sessions via FileHistory
+            _history_path = os.path.join(".storage", "cli_history")
+            os.makedirs(".storage", exist_ok=True)
+            try:
+                _hist = FileHistory(_history_path) if FileHistory else InMemoryHistory()
+            except Exception:
+                _hist = InMemoryHistory() if InMemoryHistory else None
+            session = PromptSession(completer=completer, history=_hist)
         except Exception:
             session = None
             use_tui = False
 
     print("\nIntelliCodeX ready. Type a question or 'help' for options, 'exit' to quit.\n")
+
+    _last_answer: str = ""  # tracks last AI answer for the export: command
 
     while True:
         try:
@@ -766,12 +1067,26 @@ def main():
             break
 
         if query.lower() in ("help", "?"):
-            print_help()
+            render_help_panel()
+            continue
+
+        if query.lower() == "version":
+            if HAS_RICH and console:
+                console.print(Panel(
+                    Text(f"IntelliCodeX CLI  v{VERSION}", style="bold cyan"),
+                    border_style="cyan", padding=(0, 2),
+                ))
+            else:
+                print(f"IntelliCodeX CLI v{VERSION}")
             continue
 
         if query.lower() in ("clear", "cls"):
             os.system("cls" if os.name == "nt" else "clear")
             render_banner()
+            continue
+
+        if query.lower() == "status":
+            render_status_panel(current_path, active_backend, engine, watcher)
             continue
 
         if query.lower() in ("files", "ls"):
@@ -810,7 +1125,7 @@ def main():
                     lexical_index=getattr(result, "lexical_index", None),
                     hybrid_search=getattr(engine, "hybrid_search", True),
                 )
-                print_ingestion_summary(result, current_path, elapsed_sw)
+                render_ingestion_panel(result, current_path, elapsed_sw)
                 print(f"[*] Backend updated to '{active_backend}'.\n")
                 if watcher:
                     watcher.embedder = embedder
@@ -866,8 +1181,9 @@ def main():
                     lexical_index=getattr(result, "lexical_index", None),
                     hybrid_search=getattr(engine, "hybrid_search", True),
                 )
-                print_ingestion_summary(result, current_path, elapsed_repo)
+                render_ingestion_panel(result, current_path, elapsed_repo)
                 print(f"[*] Successfully switched active repository to '{new_path}'!\n")
+
                 if watcher:
                     watcher.stop()
                 try:
@@ -898,13 +1214,7 @@ def main():
             continue
 
         if query.lower() in ("watch", "watch:status", "watcher"):
-            if watcher and watcher.is_alive():
-                print(f"\n[*] Real-Time Filesystem Watcher: ACTIVE")
-                print(f"    Target Directory: '{current_path}'")
-                print("    Debounce Window : 500ms")
-                print("    Auto-reindex    : Enabled (updates in-memory vector store on save)\n")
-            else:
-                print("\n[*] Real-Time Filesystem Watcher: INACTIVE / STOPPED\n")
+            render_watch_panel(watcher, current_path)
             continue
 
         if query.lower() in ("watch:stop", "watch:pause"):
@@ -930,11 +1240,7 @@ def main():
             continue
 
         if query.lower() in ("hybrid", "hybrid:status"):
-            st = "ACTIVE (Dense Vectors + BM25 Lexical with RRF)" if engine.hybrid_search else "INACTIVE (Dense Vectors only)"
-            print(f"\n[*] Hybrid Search: {st}")
-            print("    Algorithm  : Reciprocal Rank Fusion (k=60)")
-            print("    Lexical    : Inverted BM25Okapi (sub-token identifier splitting)")
-            print("    Commands   : 'hybrid:on', 'hybrid:off', 'hybrid:toggle'\n")
+            render_hybrid_panel(engine)
             continue
 
         if query.lower() in ("hybrid:on", "hybrid:enable"):
@@ -1017,10 +1323,21 @@ def main():
 
             if patch_rec["status"] != "failed" and patch_rec["git_diff"]:
                 try:
-                    ans = input(f"Apply this patch to '{patch_rec['target_file']}'? [y/N]: ").strip().lower()
+                    # B1 fix: use TUI session.prompt() when available for styled confirmation
+                    if session is not None and use_tui:
+                        ans = session.prompt(
+                            f"Apply this patch to '{patch_rec['target_file']}'? [y/N]: "
+                        ).strip().lower()
+                    else:
+                        ans = input(
+                            f"Apply this patch to '{patch_rec['target_file']}'? [y/N]: "
+                        ).strip().lower()
                     if ans in ("y", "yes"):
                         ok_app, msg_app = patch_engine.apply_patch(patch_rec)
-                        print(f"[*] {msg_app}\n")
+                        if HAS_RICH and console:
+                            console.print(f"[bold green][*][/bold green] {msg_app}\n")
+                        else:
+                            print(f"[*] {msg_app}\n")
                 except (EOFError, KeyboardInterrupt):
                     pass
             continue
@@ -1031,32 +1348,105 @@ def main():
             target = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
             t_deps = time.perf_counter()
             affected = files_likely_affected_by(result.graph, target)
-            print(f"\n--- Dependency Analysis for '{target}' ---")
-            print("  Reverse Dependencies (Files affected if modified):")
-            if not affected:
-                print("    (none found)")
-            else:
-                for aff in affected:
-                    print(f"    ├── {aff}")
-            print(f"\n[*] [Time Consumed]: Dependencies analyzed in {format_time_consumed(time.perf_counter() - t_deps)}\n")
+            render_deps_panel(target, affected, time.perf_counter() - t_deps)
             continue
 
         if query.startswith("callers:") or query.startswith("callers "):
             symbol_target = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
             call_g = getattr(result, "call_graph", None)
             if not call_g:
-                print("[!] Call graph is unavailable.")
+                if HAS_RICH and console:
+                    console.print("[bold red][!][/bold red] Call graph is unavailable.")
+                else:
+                    print("[!] Call graph is unavailable.")
                 continue
-
             t_callers = time.perf_counter()
             callers = find_callers_of_symbol(call_g, symbol_target)
-            print(f"\n--- Symbol Callers for '{symbol_target}' ---")
-            if not callers:
-                print("  (no calling function sites found)")
+            render_callers_panel(symbol_target, callers, time.perf_counter() - t_callers)
+            continue
+
+        # --- search:<query> : fast retrieval-only (no LLM wait) ---
+        if query.startswith("search:") or query.startswith("search "):
+            sq = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+            if not sq:
+                print("[!] Usage: search:<query>\n")
+                continue
+            t_s = time.perf_counter()
+            try:
+                s_results = engine.retrieve_expanded(sq, top_k=8)
+                render_search_results(sq, s_results, time.perf_counter() - t_s)
+            except Exception as e_s:
+                print(f"[!] Search error: {e_s}\n")
+            continue
+
+        # --- info:<file> : show file stats ---
+        if query.startswith("info:") or query.startswith("info "):
+            info_target = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+            if HAS_RICH and console:
+                # Gather stats
+                file_chunks = [
+                    c for c in result.store.chunks
+                    if info_target.lower() in c.file_path.lower()
+                ] if getattr(result, "store", None) else []
+                abs_path = None
+                for c in file_chunks:
+                    abs_path = c.file_path
+                    break
+                file_size = 0
+                line_count = 0
+                if abs_path and os.path.isfile(abs_path):
+                    file_size = os.path.getsize(abs_path)
+                    try:
+                        with open(abs_path, "r", encoding="utf-8", errors="ignore") as _f:
+                            line_count = sum(1 for _ in _f)
+                    except Exception:
+                        pass
+                # Centrality score
+                top_files = get_top_central_files(result.graph, top_n=999)
+                centrality = next(
+                    (score for fp, score in top_files if info_target.lower() in fp.lower()), None
+                )
+                grid = Table.grid(padding=(0, 2))
+                grid.add_column(style="bold cyan", justify="right")
+                grid.add_column(style="white")
+                grid.add_row("File:",       abs_path or info_target)
+                grid.add_row("Chunks:",     str(len(file_chunks)))
+                grid.add_row("Lines:",      str(line_count) if line_count else "—")
+                grid.add_row("Size:",       f"{file_size:,} bytes" if file_size else "—")
+                grid.add_row("Centrality:", f"{centrality:.4f}" if centrality is not None else "—")
+                console.print(Panel(
+                    grid, title=f"[bold cyan]File Info — {os.path.basename(info_target)}[/bold cyan]",
+                    border_style="cyan", padding=(1, 2),
+                ))
             else:
-                for c_id in callers:
-                    print(f"  ├── {c_id}")
-            print(f"\n[*] [Time Consumed]: Callers resolved in {format_time_consumed(time.perf_counter() - t_callers)}\n")
+                print(f"\n[*] Info: {info_target}")
+                file_chunks = [
+                    c for c in result.store.chunks
+                    if info_target.lower() in c.file_path.lower()
+                ] if getattr(result, "store", None) else []
+                print(f"    Chunks: {len(file_chunks)}")
+            continue
+
+        # --- export:<filename> : save last AI answer to file ---
+        if query.startswith("export:") or query.startswith("export "):
+            export_target = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+            if not export_target:
+                export_target = "intellicodex_answer.md"
+            if not _last_answer:
+                if HAS_RICH and console:
+                    console.print("[bold yellow][!][/bold yellow] No AI answer to export yet. Ask a question first.\n")
+                else:
+                    print("[!] No AI answer to export yet. Ask a question first.\n")
+            else:
+                try:
+                    with open(export_target, "w", encoding="utf-8") as _ef:
+                        _ef.write(f"# IntelliCodeX Answer Export\n\n{_last_answer}\n")
+                    if HAS_RICH and console:
+                        console.print(f"[bold green][*][/bold green] Answer saved to '[cyan]{export_target}[/cyan]'\n")
+                    else:
+                        print(f"[*] Answer saved to '{export_target}'\n")
+                except Exception as e_exp:
+                    print(f"[!] Export failed: {e_exp}\n")
             continue
 
         t_ask = time.perf_counter()
@@ -1099,12 +1489,14 @@ def main():
                 print()
 
                 full_answer = "".join(accumulated)
+                _last_answer = full_answer
                 engine.memory.add_turn(query, full_answer)
                 t_llm = time.perf_counter() - t_gen_start
                 total_time = time.perf_counter() - t_ask
             else:
                 # Offline / tfidf fallback: use standard ask() without streaming
                 response = engine.ask(query)
+                _last_answer = response.get("answer", "")
                 render_markdown_panel(response["answer"], title="Answer")
                 total_time = response.get("elapsed_seconds", time.perf_counter() - t_ask)
                 t_retrieval = response.get("retrieval_seconds", t_retrieval)

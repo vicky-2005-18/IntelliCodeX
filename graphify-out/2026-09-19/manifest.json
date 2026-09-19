@@ -234,9 +234,9 @@
     "semantic_hash": ""
   },
   "cli.py": {
-    "mtime": 1789755691.0835,
-    "seen": 1789755871.6837933,
-    "ast_hash": "e185ab487f2efb21b5768b679a3d20bb",
+    "mtime": 1789798329.4552896,
+    "seen": 1789798497.6449351,
+    "ast_hash": "fe113ec87b22865d855256bf24219bcb",
     "semantic_hash": ""
   },
   "core/__init__.py": {
@@ -612,9 +612,9 @@
     "semantic_hash": ""
   },
   "docs/PROJECT_STATUS.md": {
-    "mtime": 1789755840.5745673,
-    "seen": 1789755871.6839283,
-    "ast_hash": "ba2818be6d25b8b5e652775cf8ebdf65",
+    "mtime": 1789798485.801553,
+    "seen": 1789798497.6450965,
+    "ast_hash": "068bdb8a7fb318775a80a4793618b374",
     "semantic_hash": ""
   },
   "docs/PROJECT_STATUS_GUIDE.md": {
@@ -630,9 +630,9 @@
     "semantic_hash": ""
   },
   "docs/ROADMAP.md": {
-    "mtime": 1789755852.457019,
-    "seen": 1789755871.6839337,
-    "ast_hash": "b53be754cba5c32ab302d97a760f10ba",
+    "mtime": 1789798457.1837766,
+    "seen": 1789798497.6451027,
+    "ast_hash": "612a5a6c0fd63a5a3e8ff5e28711e2c9",
     "semantic_hash": ""
   },
   "docs/TESTING.md": {
@@ -696,9 +696,9 @@
     "semantic_hash": ""
   },
   "requirements.txt": {
-    "mtime": 1789754812.7980537,
-    "seen": 1789755021.7462487,
-    "ast_hash": "50865467201045a16042d1d0f8c4c660",
+    "mtime": 1789797942.8632982,
+    "seen": 1789798497.6451268,
+    "ast_hash": "c52e6aa1eb84115368e9aae7aa127435",
     "semantic_hash": ""
   },
   "core/lexical_index.py": {
@@ -711,6 +711,18 @@
     "mtime": 1789755703.9826427,
     "seen": 1789755871.683895,
     "ast_hash": "83b7dc0f093d4fbd5a10b3d6feb8cfdc",
+    "semantic_hash": ""
+  },
+  "pyproject.toml": {
+    "mtime": 1789797950.6455836,
+    "seen": 1789798497.6449845,
+    "ast_hash": "36b415f8bfdac2a5d35ef1c747aee8ca",
+    "semantic_hash": ""
+  },
+  "tests/test_tui_and_packaging.py": {
+    "mtime": 1789798379.6157312,
+    "seen": 1789798497.6450777,
+    "ast_hash": "2d6f742d44bed44dbfae17373c39d5fc",
     "semantic_hash": ""
   }
 }
