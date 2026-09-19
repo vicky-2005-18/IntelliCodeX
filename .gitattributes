@@ -1,0 +1,21 @@
+# GitHub Linguist — language detection overrides
+# Exclude generated/auto-built files from language stats so Python shows as primary language
+
+# graphify auto-generated knowledge graph (large HTML file — skews language stats)
+graphify-out/**           linguist-generated=true
+graphify-out/*.html       linguist-generated=true
+graphify-out/*.json       linguist-generated=true
+graphify-out/*.md         linguist-generated=true
+
+# Any HTML files in the project root are generated, not hand-written
+*.html                    linguist-generated=true
+
+# Batch files are tooling/scripts, not the primary language
+*.bat                     linguist-language=Batchfile
+
+# Markdown docs — exclude from language stats
+*.md                      linguist-documentation=true
+
+# Lock files and config — not source code
+package-lock.json         linguist-generated=true
+requirements.txt          linguist-documentation=true
