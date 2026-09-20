@@ -1,27 +1,27 @@
-# Graph Report - intellicodex  (2026-09-20)
+# Graph Report - intellicodex  (2026-09-19)
 
 ## Corpus Check
-- 119 files · ~58,208 words
+- 119 files · ~58,059 words
 - Verdict: corpus is large enough that graph structure adds value.
-- Unclassified: 9 file(s) not represented in the graph (top: (none) 4, .bat 3, .1789749828 1)
+- Unclassified: 8 file(s) not represented in the graph (top: (none) 3, .bat 3, .1789749828 1)
 
 ## Summary
-- 1263 nodes · 2761 edges · 86 communities (72 shown, 6 thin omitted)
-- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 109 edges (avg confidence: 0.94)
+- 1258 nodes · 2752 edges · 83 communities (68 shown, 7 thin omitted)
+- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 108 edges (avg confidence: 0.94)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `d13dcd76`
+- Built from commit: `dd73893f`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
 - patch_engine.py
 - test_week4_verification.py
-- main
-- FaissVectorStore
-- AdvancedBugLocalizer
+- test_cli.py
 - CodeChunk
+- AdvancedBugLocalizer
+- QueryEngine
 - 2. Current Implementation Status ("What is Done")
 - format_time_consumed
 - cli.py
@@ -30,26 +30,26 @@
 - dependency_graph.py
 - patch_generator.py
 - 3. Functional Requirements (FR)
-- User
+- api/auth.py
 - Implementation Plan: IntelliCodeX Semester Roadmap (CLI First, Web App Next)
 - Implementation Plan: IntelliCodeX Semester Roadmap (CLI First, Web App Next)
 - IntelliCodeX — Architecture, LLM Pipeline & File Modification Guide
 - api.py
 - ingest_repository
-- .ask
+- expand_retrieved_context
 - AssistantEngine
-- OllamaLLM
+- main
 - persistence.py
 - test_file_watcher.py
 - SourceFile
 - EnhancedDependencyGraph
-- review.py
+- OllamaLLM
 - pkg/auth.py
 - PatchEngine
 - PatchEngine
 - IntelliCodeX — System Architecture & Technical Design
 - IntelliCodeX — AI-Powered Software Repository Intelligence & Code Analysis Engine
-- get_repo_engine
+- User
 - 3. Verified Test Scenarios & Acceptance Criteria
 - patches.py
 - repos.py
@@ -57,8 +57,8 @@
 - parser.py
 - IntelliCodeX — Project Engineering Roadmap
 - call_graph.py
-- embedder.py
-- test_faiss_sqlite_persistence.py
+- save_vector_store
+- get_current_user
 - DocumentationGenerator
 - multi_parser.py
 - ADR-0001: Dual Embedding Strategy with Offline Fallback (Ollama + TF-IDF SVD)
@@ -72,34 +72,31 @@
 - Architecture Decision Records (ADRs)
 - service.py
 - IntelliCodeX — Project Implementation & Verification Status
-- BaseEmbedder
+- GitService
 - app.js
 - math_utils.py
 - RepositoryEventHandler
 - RepositoryWatcher
-- _format_time
+- BaseEmbedder
 - backend/__init__.py
-- backend/main.py
+- backend/config.py
 - extract_code_and_explanation
 - apply_patch_to_file
 - render_patch_card
-- IntelliCodeXCompleter
+- .__init__
 - .sync_repository
-- benchmarking.py
+- render_markdown_panel
 - render_centrality_tables
-- create_interactive_session
+- render_repos_table
 - render_status_panel
 - test_repository_event_handler_debouncing
-- _get_embedding_cache
-- .clone_repository
-- is_ignored_path
-- render_hooks_table
+- test_repo_id_generation
 
 ## God Nodes (most connected - your core abstractions)
 1. `CodeChunk` - 85 edges
 2. `SourceFile` - 76 edges
 3. `FaissVectorStore` - 69 edges
-4. `main()` - 62 edges
+4. `main()` - 61 edges
 5. `TfidfEmbedder` - 59 edges
 6. `ingest_repository()` - 41 edges
 7. `QueryEngine` - 36 edges
@@ -116,13 +113,13 @@
   backend/api/patches.py → core/patch_generator.py
 - `approve_patch()` --uses--> `PatchEngine`  [INFERRED]
   backend/api/patches.py → core/patch_generator.py
-- `legacy_ingest()` --uses--> `IngestRequest`  [INFERRED]
-  server/api.py → backend/api/repos.py
+- `ingest_repo()` --uses--> `QueryEngine`  [INFERRED]
+  backend/api/repos.py → rag/query_engine.py
 
 ## Import Cycles
 - None detected.
 
-## Communities (86 total, 6 thin omitted)
+## Communities (83 total, 7 thin omitted)
 
 ### Community 0 - "patch_engine.py"
 Cohesion: 0.13
@@ -130,35 +127,35 @@ Nodes (24): Patch Generator Package (Phase 1), merge_snippet_into_file(), Replac
 
 ### Community 1 - "test_week4_verification.py"
 Cohesion: 0.09
-Nodes (25): Advanced Bug Localization Package, BugLocalizer, calculate_ochiai_score(), calculate_ochiai_spectrum(), CoverageRecord, ParsedStackTrace, Any, DiGraph (+17 more)
+Nodes (23): Advanced Bug Localization Package, BugLocalizer, calculate_ochiai_score(), calculate_ochiai_spectrum(), CoverageRecord, ParsedStackTrace, Any, DiGraph (+15 more)
 
-### Community 2 - "main"
-Cohesion: 0.10
-Nodes (28): check_ollama_available(), create_components(), main(), Resolves local directory path or clones remote Git repository URL into .repos…, Factory helper to instantiate embedder and LLM with automatic fallback., Checks if local Ollama server is running and accessible., resolve_repo_path(), OllamaEmbedder (+20 more)
+### Community 2 - "test_cli.py"
+Cohesion: 0.13
+Nodes (22): check_ollama_available(), create_components(), Resolves local directory path or clones remote Git repository URL into .repos…, Factory helper to instantiate embedder and LLM with automatic fallback., Checks if local Ollama server is running and accessible., resolve_repo_path(), _get_embedding_cache(), OllamaEmbedder (+14 more)
 
-### Community 3 - "FaissVectorStore"
-Cohesion: 0.09
-Nodes (21): Local, dependency-light fallback. Fit once on the corpus, then transform., TfidfEmbedder, FaissVectorStore, ndarray, Promote the flat index to an IVFFlat approximate index for faster large-repo…, Saves the FAISS index to a binary file on disk., Unit Tests for Stack Trace Parser and Advanced Bug Localizer (Phase 2), test_bug_localizer_scoring() (+13 more)
+### Community 3 - "CodeChunk"
+Cohesion: 0.07
+Nodes (37): Repository AI Assistant Engine (Phase 3) Enhances RAG chat with query intent…, CodeChunk, What actually gets embedded — code + surrounding context., Local, dependency-light fallback. Fit once on the corpus, then transform., TfidfEmbedder, BM25 Lexical Indexer for Software Repositories (Milestone 3) Provides inverted…, FaissVectorStore, ndarray (+29 more)
 
 ### Community 4 - "AdvancedBugLocalizer"
 Cohesion: 0.12
 Nodes (13): AdvancedBugLocalizer, ParsedStackTrace, Any, DiGraph, Advanced Bug Localization Engine (Phase 2) Combines stack trace parsing, error…, Pinpoints bug locations by combining: - Stack trace frame matching - Semantic…, Single frame extracted from a stack trace., Collect dependency graph signals for a candidate file. (+5 more)
 
-### Community 5 - "CodeChunk"
-Cohesion: 0.06
-Nodes (43): Repository AI Assistant Engine (Phase 3) Enhances RAG chat with query intent…, CodeChunk, What actually gets embedded — code + surrounding context., BM25Index, BM25 Lexical Indexer for Software Repositories (Milestone 3) Provides inverted…, Computes Okapi IDF with smoothing to ensure non-negative values: IDF(q) = ln(1…, Searches the inverted index with BM25 Okapi scoring. Returns top-K matching…, Code-aware tokenizer: 1. Splits text into raw identifier and literal tokens. 2.… (+35 more)
+### Community 5 - "QueryEngine"
+Cohesion: 0.07
+Nodes (25): BM25Index, Computes Okapi IDF with smoothing to ensure non-negative values: IDF(q) = ln(1…, Searches the inverted index with BM25 Okapi scoring. Returns top-K matching…, Code-aware tokenizer: 1. Splits text into raw identifier and literal tokens. 2.…, Inverted index implementation using the BM25 Okapi probabilistic ranking model.…, Builds the BM25 inverted index from a list of code chunks., tokenize_code(), QueryEngine (+17 more)
 
 ### Community 6 - "2. Current Implementation Status ("What is Done")"
 Cohesion: 0.06
 Nodes (30): 1. Executive Summary, 2.1 Core Code Ingestion & AST Parsing, 2.2 Graph Dependency & Call-Graph Engine, 2.3 Vector Database & Persistence, 2.4 RAG Engine & Persona System, 2.5 Fault Localization (SBFL / Ochiai) & Patch Generator, 2.6 Enterprise Backend API (FastAPI), 2.7 Modern Web Frontend (React + Vite + Tailwind) (+22 more)
 
 ### Community 7 - "format_time_consumed"
-Cohesion: 0.13
-Nodes (16): format_time_consumed(), on_auto_reindex(), print_ingestion_summary(), Renders repository ingestion results with rich panel styling., Renders function callers as a rich tree-style panel., Formats seconds into human-readable duration with high precision., Renders fast retrieval-only results (no LLM) in a styled rich table., Prints repository ingestion results with elapsed time, throughput, and cache… (+8 more)
+Cohesion: 0.11
+Nodes (20): format_time_consumed(), on_auto_reindex(), print_ingestion_summary(), Renders repository ingestion results with rich panel styling., Renders dependency impact as a rich tree-style panel., Renders function callers as a rich tree-style panel., Renders fast retrieval-only results (no LLM) in a styled rich table., Formats seconds into human-readable duration with high precision. (+12 more)
 
 ### Community 8 - "cli.py"
-Cohesion: 0.14
-Nodes (16): get_available_repos(), print_banner(), print_help(), IntelliCodeX CLI — Ingest and query software repositories interactively. Usage:…, Returns a list of (label, abs_path) tuples for all known local repositories.…, Renders interactive banner with rich styling if available., Renders available repositories list in a formatted table., Renders rich color-coded help table grouped by command category. (+8 more)
+Cohesion: 0.16
+Nodes (14): print_banner(), print_help(), IntelliCodeX CLI — Ingest and query software repositories interactively. Usage:…, Renders interactive banner with rich styling if available., Renders indexed file list in a rich formatted table., Renders rich color-coded help table grouped by command category., render_banner(), render_files_table() (+6 more)
 
 ### Community 9 - "tree_sitter_chunker.py"
 Cohesion: 0.14
@@ -169,7 +166,7 @@ Cohesion: 0.20
 Nodes (5): DatabaseManager, LocalDiskStore, Any, Database & Persistent Storage Module (Phase 7) Provides MongoDB document…, File-backed fallback database when MongoDB is offline.
 
 ### Community 11 - "dependency_graph.py"
-Cohesion: 0.14
+Cohesion: 0.15
 Nodes (22): build_dependency_graph(), calculate_file_centrality(), extract_file_imports(), files_likely_affected_by(), get_top_central_files(), DiGraph, Multi-Language Dependency Analysis Engine - Builds a file-level import and…, Builds a directed dependency graph across all source files in the repository. (+14 more)
 
 ### Community 12 - "patch_generator.py"
@@ -180,9 +177,9 @@ Nodes (20): Multi-File Context-Aware Code Patch Generator Engine (Milestone 1) E
 Cohesion: 0.08
 Nodes (23): 1.1 Problem Statement, 1.2 Objectives, 1.3 System Scope, 1. Problem Statement & Objectives, 2. Requirements Classification, 3. Functional Requirements (FR), 4. Inferred Requirements (IR), 5. Non-Functional Requirements (NFR) (+15 more)
 
-### Community 14 - "User"
-Cohesion: 0.14
-Nodes (26): get_me(), login(), get, post, Auth API Router (Phase 11) Endpoints for user registration, authentication,…, register(), Authentication Package, create_access_token() (+18 more)
+### Community 14 - "api/auth.py"
+Cohesion: 0.19
+Nodes (17): login(), post, Auth API Router (Phase 11) Endpoints for user registration, authentication,…, register(), Authentication Package, create_access_token(), hash_password(), BaseModel (+9 more)
 
 ### Community 15 - "Implementation Plan: IntelliCodeX Semester Roadmap (CLI First, Web App Next)"
 Cohesion: 0.09
@@ -197,56 +194,56 @@ Cohesion: 0.09
 Nodes (21): 1. Multi-Language AST Parsing via Tree-Sitter, 1. Project Overview & Architecture, 2. Models & Generation Parameters, 2. Multi-turn Agentic Tool Calling & Iterative Fixes, 3. High-Quality Code Model Selection & Fine-Tuning, 3. How the LLM Generates Code & Modifies Files, 4. Codebase-wide Persistence & Incremental Re-indexing, 4. Feature Index & Code Mapping (+13 more)
 
 ### Community 18 - "api.py"
-Cohesion: 0.14
-Nodes (19): BugReportRequest, get_bug_reports(), localize_bug(), BaseModel, get, post, Bug Localization API Router (Phase 2) Submits stack traces or error logs to…, ask_assistant() (+11 more)
+Cohesion: 0.17
+Nodes (16): BugReportRequest, localize_bug(), BaseModel, post, Bug Localization API Router (Phase 2) Submits stack traces or error logs to…, ask_assistant(), BaseModel, post (+8 more)
 
 ### Community 19 - "ingest_repository"
-Cohesion: 0.10
-Nodes (39): chunk_repository(), check_git_hooks_status(), find_git_dir(), install_git_hooks(), Git Hook Generator & Installer Module Installs post-commit and post-merge hooks…, Removes IntelliCodeX hook sections from post-commit and post-merge files.…, Returns a dict mapping hook names (post-commit, post-merge) -> boolean…, Locates the .git directory inside repo_path (supports regular git repos and git… (+31 more)
+Cohesion: 0.08
+Nodes (44): BenchmarkReport, Benchmarking Engine for IntelliCodeX Repository Parsing & Ingestion Measures…, Runs performance benchmarking measuring fresh vs cached ingestion speed, query…, run_benchmark(), chunk_repository(), Embedding Generation Module Two backends: - OllamaEmbedder: calls a local…, check_git_hooks_status(), find_git_dir() (+36 more)
 
-### Community 20 - ".ask"
-Cohesion: 0.29
-Nodes (4): Retrieves top-K matches and applies graph-augmented context expansion., Performs RAG query answering with context expansion, conversation history, and…, Streams AI response tokens in real-time while updating conversation memory., Bug localization: treat error/stack trace as query and expand caller context…
+### Community 20 - "expand_retrieved_context"
+Cohesion: 0.18
+Nodes (8): expand_retrieved_context(), Any, DiGraph, Graph-Augmented Sub-Graph Expansion: Enriches top-K search results by expanding…, Retrieves top-K matches and applies graph-augmented context expansion., Performs RAG query answering with context expansion, conversation history, and…, Streams AI response tokens in real-time while updating conversation memory., Bug localization: treat error/stack trace as query and expand caller context…
 
 ### Community 21 - "AssistantEngine"
 Cohesion: 0.20
 Nodes (7): AssistantEngine, Any, DiGraph, QueryIntent, Enterprise repository assistant that combines: - Intent-aware retrieval…, Enum, str
 
-### Community 22 - "OllamaLLM"
-Cohesion: 0.14
-Nodes (6): DiGraph, Code Review Assistant & Commit Message Generator (Phases 14 & 15) Performs…, OllamaLLM, Dynamically switches active Ollama LLM model., Yields response text tokens in real-time streaming chunks., DiGraph
+### Community 22 - "main"
+Cohesion: 0.10
+Nodes (16): get_available_repos(), main(), Returns a list of (label, abs_path) tuples for all known local repositories.…, test_cli_main_files_ls(), test_cli_main_help_and_exit(), test_cli_main_keyboard_interrupt(), test_cli_main_prompt_stripping_and_query(), test_cli_main_repo_switch() (+8 more)
 
 ### Community 23 - "persistence.py"
-Cohesion: 0.12
-Nodes (29): compute_file_hash(), delete_files_from_db(), get_db_connection(), init_schema(), load_repo_metadata(), load_stored_chunks(), load_stored_file_hashes(), Any (+21 more)
+Cohesion: 0.09
+Nodes (46): compute_file_hash(), delete_files_from_db(), detect_repository_changes(), get_db_connection(), get_faiss_index_path(), init_schema(), load_faiss_index(), load_index() (+38 more)
 
 ### Community 24 - "test_file_watcher.py"
-Cohesion: 0.32
-Nodes (6): skipif, Unit & Integration Tests for Milestone 2: Real-Time Filesystem Watcher Daemon…, test_repository_watcher_lifecycle(), test_repository_watcher_live_incremental_reindex(), on_reindex(), test_repository_watcher_trigger_reindex_direct()
+Cohesion: 0.19
+Nodes (10): is_ignored_path(), Checks if a filesystem path should be ignored by the watcher. Ignores hidden…, skipif, Unit & Integration Tests for Milestone 2: Real-Time Filesystem Watcher Daemon…, test_is_ignored_path(), test_repository_event_handler_filtering(), test_repository_watcher_lifecycle(), test_repository_watcher_live_incremental_reindex() (+2 more)
 
 ### Community 25 - "SourceFile"
 Cohesion: 0.18
-Nodes (21): chunk_file(), _chunk_markdown_file(), chunk_python_file(), make_chunk(), _extract_imports(), Semantic Chunking Engine - Python: AST-based extraction of functions/classes…, Chunks markdown documents by section headings (# Heading)., Chunks non-AST or unparsable files into overlapping line windows. (+13 more)
+Nodes (22): Incremental Repository Indexing & Real-Time Filesystem Watcher Daemon…, chunk_file(), _chunk_markdown_file(), chunk_python_file(), make_chunk(), _extract_imports(), Semantic Chunking Engine - Python: AST-based extraction of functions/classes…, Chunks markdown documents by section headings (# Heading). (+14 more)
 
 ### Community 26 - "EnhancedDependencyGraph"
-Cohesion: 0.16
-Nodes (7): EnhancedDependencyGraph, Any, DiGraph, Enhanced Dependency Graph Engine (Phase 4) Supports file imports, class…, Finds circular dependency cycles in file imports., Exports graph in Cytoscape.js format for interactive UI rendering., Enhanced Dependency Graph Package
+Cohesion: 0.14
+Nodes (9): EnhancedDependencyGraph, Any, DiGraph, Enhanced Dependency Graph Engine (Phase 4) Supports file imports, class…, Finds circular dependency cycles in file imports., Exports graph in Cytoscape.js format for interactive UI rendering., Enhanced Dependency Graph Package, Unit Tests for Enhanced Dependency Graph (Phase 4) (+1 more)
 
-### Community 27 - "review.py"
-Cohesion: 0.21
-Nodes (11): analyze_code(), CommitMsgRequest, FileReviewRequest, generate_commit_message(), BaseModel, post, Code Review & Commit Message API Router (Phases 14 & 15) Performs automated…, CodeReviewAssistant (+3 more)
+### Community 27 - "OllamaLLM"
+Cohesion: 0.11
+Nodes (15): analyze_code(), CommitMsgRequest, FileReviewRequest, generate_commit_message(), BaseModel, post, Code Review & Commit Message API Router (Phases 14 & 15) Performs automated…, CodeReviewAssistant (+7 more)
 
 ### Community 28 - "pkg/auth.py"
 Cohesion: 0.13
 Nodes (13): authenticate(), hash_password(), Authentication utilities for the sample application., Check a username/password pair against stored credentials., Tracks active user sessions in memory., Returns True if token exists in active sessions., Hash a plaintext password with a salt using SHA-256., SessionManager (+5 more)
 
 ### Community 29 - "PatchEngine"
-Cohesion: 0.22
-Nodes (8): Remove accidental language tag left on the first line of extracted code., strip_language_prefix(), PatchEngine, Any, Closed-Loop Agentic Test-Driven Repair (Milestone 1)., Update approval status. When status is 'applied', writes the patch to disk., Context-aware patch generation engine with closed-loop sandbox test…, Generate a patch recommendation based on error report and repository context.
+Cohesion: 0.17
+Nodes (11): Remove accidental language tag left on the first line of extracted code., strip_language_prefix(), PatchEngine, Any, DiGraph, Closed-Loop Agentic Test-Driven Repair (Milestone 1)., Update approval status. When status is 'applied', writes the patch to disk., Context-aware patch generation engine with closed-loop sandbox test… (+3 more)
 
 ### Community 30 - "PatchEngine"
 Cohesion: 0.17
-Nodes (12): generate_git_diff(), PatchEngine, Any, Closed-Loop Agentic Test-Driven Repair (Milestone 1). Generates patch, tests…, Generates standard unified git diff format., Applies suggested patch directly to physical file on disk., Helper to merge snippet into full file or return snippet directly., Prompts LLM to self-correct patch based on failed sandbox test outputs. (+4 more)
+Nodes (11): generate_git_diff(), PatchEngine, Any, DiGraph, Closed-Loop Agentic Test-Driven Repair (Milestone 1). Generates patch, tests…, Generates standard unified git diff format., Applies suggested patch directly to physical file on disk., Helper to merge snippet into full file or return snippet directly. (+3 more)
 
 ### Community 31 - "IntelliCodeX — System Architecture & Technical Design"
 Cohesion: 0.12
@@ -256,9 +253,9 @@ Nodes (16): 1. Architectural Overview & System Decomposition, 2.1 Technology Sta
 Cohesion: 0.12
 Nodes (16): 1. Project Purpose & Target Users, 2. Current Capabilities & Important Limitations, 3. Prerequisites & Environment Configuration, 4.1 Clone Repository & Setup Virtual Environment `[TESTED]`, 4.2 Run IntelliCodeX Interactive CLI `[TESTED]`, 4.3 Start Local Backend API Server (Optional) `[TESTED]`, 4. Installation & Startup Instructions, 5. Minimal Usage Example (CLI) (+8 more)
 
-### Community 33 - "get_repo_engine"
-Cohesion: 0.14
-Nodes (16): get_analytics(), get, Repository Analytics API Router (Phase 5) Provides high-level stats, language…, DocGenRequest, generate_documentation(), BaseModel, post, Documentation Generator API Router (Phase 6) Auto-generates Markdown READMEs,… (+8 more)
+### Community 33 - "User"
+Cohesion: 0.13
+Nodes (16): get_analytics(), get, Repository Analytics API Router (Phase 5) Provides high-level stats, language…, get_me(), get, get_bug_reports(), get, get_chat_history() (+8 more)
 
 ### Community 34 - "3. Verified Test Scenarios & Acceptance Criteria"
 Cohesion: 0.13
@@ -269,12 +266,12 @@ Cohesion: 0.20
 Nodes (13): approve_patch(), generate_patch(), GeneratePatchRequest, list_patches(), PatchApprovalRequest, BaseModel, get, post (+5 more)
 
 ### Community 36 - "repos.py"
-Cohesion: 0.12
-Nodes (24): clone_repo(), GitCloneRequest, ingest_repo(), IngestRequest, list_repos(), BaseModel, get, post (+16 more)
+Cohesion: 0.21
+Nodes (16): clone_repo(), get_repo_engine(), GitCloneRequest, ingest_repo(), IngestRequest, BaseModel, post, Repositories API Router (Phases 7, 8, 9) Ingests, clones, lists, auto-reloads,… (+8 more)
 
 ### Community 37 - "test_tui_and_packaging.py"
-Cohesion: 0.08
-Nodes (30): Returns True if rich prompt_toolkit interactive session should be enabled., Renders Markdown text inside a styled terminal panel., Renders indexed file list in a rich formatted table., Renders dependency impact as a rich tree-style panel., Renders real-time watcher status as a rich panel., Renders hybrid search status as a rich panel., render_deps_panel(), render_files_table() (+22 more)
+Cohesion: 0.09
+Nodes (29): IntelliCodeXCompleter, Returns True if rich prompt_toolkit interactive session should be enabled., Renders Git hook status table., Renders real-time watcher status as a rich panel., Renders hybrid search status as a rich panel., Context-aware autocompleter for commands, files, symbols, and settings., render_hooks_table(), render_hybrid_panel() (+21 more)
 
 ### Community 38 - "parser.py"
 Cohesion: 0.22
@@ -288,13 +285,13 @@ Nodes (13): 1. Prioritized Milestones & Dependency Flow, 2. Milestone 1: Closed-
 Cohesion: 0.14
 Nodes (24): build_call_graph(), calculate_symbol_centrality(), CallSite, extract_function_calls(), _extract_python_calls(), _extract_tree_sitter_calls(), walk(), find_callees_of_chunk() (+16 more)
 
-### Community 41 - "embedder.py"
-Cohesion: 0.16
-Nodes (11): Embedding Generation Module Two backends: - OllamaEmbedder: calls a local…, IngestedRepository, Unit Tests for Incremental Re-Indexing Pipeline (core/pipeline.py - Week 3 Day…, Tests that a 100% unchanged repository loads instantly from cached disk index., Tests incremental re-indexing when files are modified, added, or removed., Tests force_reindex parameter forces clean re-ingestion., test_pipeline_force_reindex(), test_pipeline_incremental_reindex() (+3 more)
+### Community 41 - "save_vector_store"
+Cohesion: 0.27
+Nodes (8): get_index_paths(), load_vector_store(), FAISS Vector Store Persistence Module (Phase 7) Handles disk serialization and…, Serialize FAISS index and chunk metadata to disk., Load FAISS index and chunk metadata from disk if available., save_vector_store(), Unit Tests for FAISS Vector Store Disk Serialization and Database Manager…, test_faiss_persistence()
 
-### Community 42 - "test_faiss_sqlite_persistence.py"
-Cohesion: 0.18
-Nodes (12): get_faiss_index_path(), load_faiss_index(), Returns absolute file path for a repository's FAISS index…, Serializes the FAISS vector index to disk (.storage/<repo_id>.faiss)., Deserializes a FAISS vector index from disk if it exists., save_faiss_index(), Loads a FAISS index from a binary file on disk and binds provided code chunks., Unit Tests for FAISS Vector Index Disk Persistence & Unified Index Persistence… (+4 more)
+### Community 42 - "get_current_user"
+Cohesion: 0.17
+Nodes (11): DocGenRequest, generate_documentation(), BaseModel, post, Documentation Generator API Router (Phase 6) Auto-generates Markdown READMEs,…, decode_access_token(), get_current_user(), Any (+3 more)
 
 ### Community 43 - "DocumentationGenerator"
 Cohesion: 0.25
@@ -344,25 +341,25 @@ Nodes (3): connect_db(), main_run(), process_data()
 Cohesion: 0.40
 Nodes (4): 1. Status Classification Guidelines, 2. Feature-Level Verification Matrix, 3. Discrepancy & Gap Analysis, IntelliCodeX — Project Implementation & Verification Status
 
-### Community 56 - "BaseEmbedder"
-Cohesion: 0.18
-Nodes (10): ABC, GitService, Git Integration Service (Phase 9) Clones remote GitHub/GitLab repositories,…, Retrieves recent commit log history., Lists repository branches., Gets list of modified or untracked files., IncrementalIndexer, Incremental Repository Indexing & Real-Time Filesystem Watcher Daemon… (+2 more)
+### Community 56 - "GitService"
+Cohesion: 0.17
+Nodes (6): GitService, Git Integration Service (Phase 9) Clones remote GitHub/GitLab repositories,…, Clones a remote repository URL into local storage directory., Retrieves recent commit log history., Lists repository branches., Gets list of modified or untracked files.
 
 ### Community 59 - "RepositoryEventHandler"
-Cohesion: 0.21
-Nodes (5): Watchdog event handler that debounces file system events on active repository…, Cancels any pending timer and flushes state., RepositoryEventHandler, FileSystemEventHandler, test_repository_event_handler_filtering()
+Cohesion: 0.25
+Nodes (4): Watchdog event handler that debounces file system events on active repository…, Cancels any pending timer and flushes state., RepositoryEventHandler, FileSystemEventHandler
 
 ### Community 60 - "RepositoryWatcher"
-Cohesion: 0.16
-Nodes (7): Any, Real-Time Filesystem Watcher Daemon for active repository directories. Runs a…, Starts the background filesystem observer thread., Stops the background filesystem observer thread gracefully., Returns True if the background watcher thread is actively monitoring., Executes thread-safe incremental re-indexing of the repository. Updates…, RepositoryWatcher
+Cohesion: 0.24
+Nodes (5): Real-Time Filesystem Watcher Daemon for active repository directories. Runs a…, Starts the background filesystem observer thread., Stops the background filesystem observer thread gracefully., Returns True if the background watcher thread is actively monitoring., RepositoryWatcher
 
-### Community 61 - "_format_time"
-Cohesion: 0.40
-Nodes (3): _format_time(), ndarray, Formats duration in human-readable format.
+### Community 61 - "BaseEmbedder"
+Cohesion: 0.22
+Nodes (7): ABC, IncrementalIndexer, Performs batch-level incremental synchronization between an existing vector…, BaseEmbedder, _format_time(), ndarray, Formats duration in human-readable format.
 
-### Community 71 - "backend/main.py"
-Cohesion: 0.50
-Nodes (4): health(), get, IntelliCodeX Enterprise FastAPI Backend Application Entry Point, root()
+### Community 71 - "backend/config.py"
+Cohesion: 0.25
+Nodes (7): BaseModel, IntelliCodeX Enterprise Configuration Module Centralized settings management…, Settings, health(), get, IntelliCodeX Enterprise FastAPI Backend Application Entry Point, root()
 
 ### Community 72 - "extract_code_and_explanation"
 Cohesion: 0.33
@@ -376,55 +373,39 @@ Nodes (6): apply_patch_to_file(), apply_unified_diff(), Any, Patch Application M
 Cohesion: 0.33
 Nodes (6): Renders unified Git diff with syntax highlighting., Renders automated patch diagnosis and git diff., render_diff(), render_patch_card(), test_render_diff(), test_render_patch_card()
 
-### Community 75 - "IntelliCodeXCompleter"
-Cohesion: 0.18
-Nodes (9): IntelliCodeXCompleter, Context-aware autocompleter for commands, files, symbols, and settings., New commands added in CLI Perfection are suggested by the completer., test_completer_command_suggestions(), test_completer_file_suggestions(), test_completer_new_commands(), test_completer_persona_and_backend(), test_completer_subcommands() (+1 more)
-
 ### Community 76 - ".sync_repository"
 Cohesion: 0.50
 Nodes (3): compute_file_hash(), Computes MD5 hash of file content for fast equality checks., Synchronizes changed files against previous file hashes. Re-embeds only…
 
-### Community 77 - "benchmarking.py"
-Cohesion: 0.31
-Nodes (8): BenchmarkReport, Benchmarking Engine for IntelliCodeX Repository Parsing & Ingestion Measures…, Runs performance benchmarking measuring fresh vs cached ingestion speed, query…, run_benchmark(), Tests for Benchmarking Engine, test_benchmarking_sample_repo(), 6. Verifies zero-latency startup benchmarking on sample_repo., test_week3_benchmark_performance_verification()
+### Community 77 - "render_markdown_panel"
+Cohesion: 0.67
+Nodes (3): Renders Markdown text inside a styled terminal panel., render_markdown_panel(), test_render_markdown_panel()
 
 ### Community 78 - "render_centrality_tables"
 Cohesion: 0.67
 Nodes (3): Renders PageRank centrality rankings in structured tables., render_centrality_tables(), test_render_centrality_tables()
 
-### Community 79 - "create_interactive_session"
-Cohesion: 0.50
-Nodes (3): create_interactive_session(), Creates a prompt_toolkit PromptSession with Windows fallback if raw console…, test_create_interactive_session()
+### Community 79 - "render_repos_table"
+Cohesion: 0.67
+Nodes (3): Renders available repositories list in a formatted table., render_repos_table(), test_render_repos_table()
 
 ### Community 80 - "render_status_panel"
 Cohesion: 0.67
 Nodes (3): Renders at-a-glance master system status panel., render_status_panel(), test_render_status_panel()
 
-### Community 82 - "_get_embedding_cache"
-Cohesion: 0.50
-Nodes (3): _get_embedding_cache(), Connection, Retrieves or initializes the SQLite embedding cache database.
-
-### Community 84 - "is_ignored_path"
-Cohesion: 0.67
-Nodes (3): is_ignored_path(), Checks if a filesystem path should be ignored by the watcher. Ignores hidden…, test_is_ignored_path()
-
-### Community 85 - "render_hooks_table"
-Cohesion: 0.67
-Nodes (3): Renders Git hook status table., render_hooks_table(), test_render_hooks_table()
-
 ## Knowledge Gaps
 - **159 isolated node(s):** `CallSite`, `intellicodex`, `Target Users:`, `Implemented Capabilities (Tested & Verified)`, `Important Limitations` (+154 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 559 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **6 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 557 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **7 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `CodeChunk` connect `CodeChunk` to `patch_engine.py`, `test_week4_verification.py`, `FaissVectorStore`, `repos.py`, `call_graph.py`, `test_faiss_sqlite_persistence.py`, `DocumentationGenerator`, `multi_parser.py`, `patch_generator.py`, `metrics.py`, `ingest_repository`, `AssistantEngine`, `persistence.py`, `BaseEmbedder`, `SourceFile`?**
-  _High betweenness centrality (0.105) - this node is a cross-community bridge._
-- **Why does `FaissVectorStore` connect `FaissVectorStore` to `patch_engine.py`, `test_week4_verification.py`, `AdvancedBugLocalizer`, `repos.py`, `CodeChunk`, `embedder.py`, `test_faiss_sqlite_persistence.py`, `dependency_graph.py`, `.sync_repository`, `patch_generator.py`, `ingest_repository`, `AssistantEngine`, `OllamaLLM`, `persistence.py`, `BaseEmbedder`, `PatchEngine`, `PatchEngine`?**
-  _High betweenness centrality (0.053) - this node is a cross-community bridge._
-- **Why does `SourceFile` connect `SourceFile` to `FaissVectorStore`, `parser.py`, `call_graph.py`, `embedder.py`, `test_faiss_sqlite_persistence.py`, `DocumentationGenerator`, `multi_parser.py`, `dependency_graph.py`, `metrics.py`, `ingest_repository`, `persistence.py`, `BaseEmbedder`, `EnhancedDependencyGraph`?**
+- **Why does `CodeChunk` connect `CodeChunk` to `patch_engine.py`, `test_week4_verification.py`, `QueryEngine`, `call_graph.py`, `save_vector_store`, `DocumentationGenerator`, `multi_parser.py`, `patch_generator.py`, `metrics.py`, `ingest_repository`, `expand_retrieved_context`, `AssistantEngine`, `persistence.py`, `SourceFile`, `BaseEmbedder`?**
+  _High betweenness centrality (0.095) - this node is a cross-community bridge._
+- **Why does `FaissVectorStore` connect `CodeChunk` to `patch_engine.py`, `test_week4_verification.py`, `AdvancedBugLocalizer`, `QueryEngine`, `save_vector_store`, `.sync_repository`, `patch_generator.py`, `BaseEmbedder`, `ingest_repository`, `AssistantEngine`, `persistence.py`, `SourceFile`, `PatchEngine`, `PatchEngine`?**
+  _High betweenness centrality (0.051) - this node is a cross-community bridge._
+- **Why does `QueryEngine` connect `QueryEngine` to `CodeChunk`, `repos.py`, `format_time_consumed`, `cli.py`, `ingest_repository`, `expand_retrieved_context`, `main`, `SourceFile`, `BaseEmbedder`?**
   _High betweenness centrality (0.041) - this node is a cross-community bridge._
 - **Are the 16 inferred relationships involving `CodeChunk` (e.g. with `RepositoryAnalyticsEngine` and `DocumentationGenerator`) actually correct?**
   _`CodeChunk` has 16 INFERRED edges - model-reasoned connections that need verification._

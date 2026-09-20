@@ -12,6 +12,7 @@ from prompt_toolkit.document import Document
 from cli import (
     VERSION,
     should_use_tui,
+    create_interactive_session,
     render_banner,
     render_markdown_panel,
     render_diff,
@@ -377,9 +378,22 @@ def test_should_use_tui_env_disabled():
 def test_should_use_tui_non_tty():
     mock_stdin = MagicMock()
     mock_stdin.isatty.return_value = False
-    with patch.dict(os.environ, {"INTELLICODEX_NO_TUI": ""}):
+    with patch.dict(os.environ, {"INTELLICODEX_NO_TUI": "", "INTELLICODEX_FORCE_TUI": ""}):
         with patch("sys.stdin", mock_stdin):
             assert should_use_tui() is False
+
+
+def test_should_use_tui_force_env():
+    mock_stdin = MagicMock()
+    mock_stdin.isatty.return_value = False
+    with patch.dict(os.environ, {"INTELLICODEX_NO_TUI": "", "INTELLICODEX_FORCE_TUI": "1"}):
+        with patch("sys.stdin", mock_stdin):
+            assert should_use_tui() is True
+
+
+def test_create_interactive_session():
+    session = create_interactive_session()
+    assert session is not None
 
 
 # ---------------------------------------------------------------------------

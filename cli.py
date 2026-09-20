@@ -220,12 +220,38 @@ def should_use_tui() -> bool:
         return False
     if os.environ.get("INTELLICODEX_NO_TUI", "").strip() == "1":
         return False
+    if os.environ.get("INTELLICODEX_FORCE_TUI", "").strip() == "1":
+        return True
     try:
         if not sys.stdin.isatty():
             return False
     except Exception:
         return False
     return True
+
+
+def create_interactive_session(completer=None, history=None):
+    """Creates a prompt_toolkit PromptSession with Windows fallback if raw console buffer fails."""
+    if not HAS_PROMPT_TOOLKIT or PromptSession is None:
+        return None
+    try:
+        return PromptSession(completer=completer, history=history)
+    except Exception:
+        pass
+
+    # Windows fallback: when NoConsoleScreenBufferError occurs in modern terminals / ConPTY
+    try:
+        from prompt_toolkit.output.vt100 import Vt100_Output
+        import shutil
+
+        def get_size():
+            sz = shutil.get_terminal_size((80, 24))
+            return (sz.columns, sz.lines)
+
+        out = Vt100_Output(sys.stdout, get_size)
+        return PromptSession(completer=completer, history=history, output=out)
+    except Exception:
+        return None
 
 
 def render_banner():
@@ -844,6 +870,10 @@ def main():
                         help="LLM & Embedding backend (default: tfidf)")
     parser.add_argument("-q", "--query", type=str,
                         help="Execute a non-interactive query in batch mode and exit")
+    parser.add_argument("--tui", action="store_true", default=False,
+                        help="Force enable rich interactive TUI with auto-completion and toolbar")
+    parser.add_argument("--no-tui", action="store_true", default=False,
+                        help="Disable rich TUI and use standard terminal input")
     parser.add_argument("--benchmark", action="store_true",
                         help="Run performance benchmark on target repository and exit")
     parser.add_argument("--setup-hooks", action="store_true",
@@ -1015,20 +1045,23 @@ def main():
         get_repos_fn=lambda: get_available_repos(current_path),
     )
 
-    use_tui = should_use_tui()
+    if getattr(args, "no_tui", False):
+        use_tui = False
+    elif getattr(args, "tui", False):
+        use_tui = HAS_PROMPT_TOOLKIT
+    else:
+        use_tui = should_use_tui()
+
     session = None
     if use_tui:
+        _history_path = os.path.join(".storage", "cli_history")
+        os.makedirs(".storage", exist_ok=True)
         try:
-            # E1: Persistent history across sessions via FileHistory
-            _history_path = os.path.join(".storage", "cli_history")
-            os.makedirs(".storage", exist_ok=True)
-            try:
-                _hist = FileHistory(_history_path) if FileHistory else InMemoryHistory()
-            except Exception:
-                _hist = InMemoryHistory() if InMemoryHistory else None
-            session = PromptSession(completer=completer, history=_hist)
+            _hist = FileHistory(_history_path) if FileHistory else InMemoryHistory()
         except Exception:
-            session = None
+            _hist = InMemoryHistory() if InMemoryHistory else None
+        session = create_interactive_session(completer=completer, history=_hist)
+        if session is None:
             use_tui = False
 
     print("\nIntelliCodeX ready. Type a question or 'help' for options, 'exit' to quit.\n")
@@ -1049,7 +1082,11 @@ def main():
                         f"<b>Hybrid:</b> {hybrid_st} | "
                         f"<b>Watcher:</b> {watcher_st} "
                     )
-                query = session.prompt(">> ", bottom_toolbar=get_toolbar).strip()
+                try:
+                    query = session.prompt(">> ", bottom_toolbar=get_toolbar).strip()
+                except Exception:
+                    use_tui = False
+                    query = input(">> ").strip()
             else:
                 query = input(">> ").strip()
         except (EOFError, KeyboardInterrupt):

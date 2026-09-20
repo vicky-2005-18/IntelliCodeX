@@ -234,9 +234,9 @@
     "semantic_hash": ""
   },
   "cli.py": {
-    "mtime": 1789885410.057288,
-    "seen": 1789885511.0954447,
-    "ast_hash": "b68a2cfd8348a653895c824fc43edf92",
+    "mtime": 1789800399.446032,
+    "seen": 1789802597.9179661,
+    "ast_hash": "ffb45502e9aed35bf7628ae6bf7b9e9b",
     "semantic_hash": ""
   },
   "core/__init__.py": {
@@ -720,9 +720,9 @@
     "semantic_hash": ""
   },
   "tests/test_tui_and_packaging.py": {
-    "mtime": 1789885471.506997,
-    "seen": 1789885511.0955412,
-    "ast_hash": "a400cd3d01663d7859850d9f5761ea00",
+    "mtime": 1789800441.8987548,
+    "seen": 1789802597.9180825,
+    "ast_hash": "9949808f108a0a1a50f8d86da681d2b6",
     "semantic_hash": ""
   }
 }
