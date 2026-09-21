@@ -28,3 +28,4 @@
 [2026-09-19T18:15:00+05:30] feat: core AST parsing logic update (2026-09-19 part 2)
 [2026-09-20T14:15:00+05:30] docs: clarify API specification and endpoints (2026-09-20 part 1)
 [2026-09-20T18:15:00+05:30] fix: handle edge cases in file path resolver (2026-09-20 part 2)
+[2026-09-21T14:15:00+05:30] test: add unit tests for query engine (2026-09-21 part 1)
