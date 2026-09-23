@@ -33,3 +33,4 @@
 [2026-09-22T14:15:00+05:30] docs: clarify API specification and endpoints (2026-09-22 part 1)
 [2026-09-22T18:15:00+05:30] docs: update architecture design notes (2026-09-22 part 2)
 [2026-09-23T14:15:00+05:30] refactor: optimize lexical chunker memory usage (2026-09-23 part 1)
+[2026-09-23T18:15:00+05:30] test: add unit tests for query engine (2026-09-23 part 2)
