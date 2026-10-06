@@ -3,7 +3,7 @@
 > **Inspection Date**: 2026-10-06
 > **Inspected Git Commit**: `956cfd8`
 > **Working Tree Status**: Clean
-> **Automated Test Run**: 254 passed, 4 skipped in ~14s (`pytest` under Python 3.14), zero failures.
+> **Automated Test Run**: 256 passed, 4 skipped in ~14s (`pytest` under Python 3.14), zero failures.
 
 ---
 

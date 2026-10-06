@@ -2,6 +2,7 @@
 Documentation Generator API Router (Phase 6)
 Auto-generates Markdown READMEs, API docs, folder structures, and HTML/PDF formatted content.
 """
+from typing import Optional
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel
 from backend.api.repos import get_repo_for_user
@@ -14,6 +15,7 @@ router = APIRouter(prefix="/docs", tags=["Documentation Generator"], dependencie
 class DocGenRequest(BaseModel):
     repo_id: str
     format: str = "markdown"  # "markdown" | "html" | "pdf"
+    target: Optional[str] = None  # optional specific file or symbol to document
 
 
 @router.post("/generate")
@@ -21,11 +23,26 @@ def generate_documentation(req: DocGenRequest, current_user: User = Depends(get_
     repo_data = get_repo_for_user(req.repo_id, current_user)
     source_files = repo_data["source_files"]
     chunks = repo_data["store"].chunks
+    call_graph = repo_data.get("graph")
+    llm = repo_data.get("engine", None)
+    llm_instance = getattr(llm, "llm", None) if llm else None
 
     generator = DocumentationGenerator()
+
+    if req.target:
+        symbol_md = generator.generate_symbol_doc(req.target, chunks, call_graph=call_graph, llm=llm_instance)
+        if req.format.lower() in ("html", "pdf"):
+            html_doc = generator.export_to_pdf_html(symbol_md, title=f"{req.target} Documentation")
+            return Response(content=html_doc, media_type="text/html")
+        return {
+            "repo_id": req.repo_id,
+            "target": req.target,
+            "format": "markdown",
+            "documentation": symbol_md,
+        }
+
     readme_md = generator.generate_readme(req.repo_id, source_files, chunks)
     api_md = generator.generate_api_docs(chunks)
-
     full_md = f"{readme_md}\n\n---\n\n{api_md}"
 
     if req.format.lower() in ("html", "pdf"):
@@ -39,3 +56,4 @@ def generate_documentation(req: DocGenRequest, current_user: User = Depends(get_
         "api_docs": api_md,
         "combined_markdown": full_md,
     }
+

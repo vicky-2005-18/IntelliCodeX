@@ -803,6 +803,10 @@ class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
         ("deps:", "Inspect reverse dependency impact for a file"),
         ("callers:", "Find all function callers across repository AST"),
         ("fix:", "Diagnose error and generate automated sandbox patch"),
+        ("review", "List pending patch proposals awaiting developer review"),
+        ("approve ", "Approve and apply a pending patch proposal (e.g. 'approve <id>')"),
+        ("reject ", "Reject and discard a pending patch proposal (e.g. 'reject <id>')"),
+        ("doc:", "Generate documentation for symbol or file using call graph (e.g. 'doc:login')"),
         ("search:", "Fast retrieval-only search (no LLM, instant results)"),
         ("info:", "Show indexed file details: size, chunk count, centrality"),
         ("export:", "Save last AI answer to a Markdown file"),
@@ -1439,6 +1443,85 @@ def main():
         if query.lower() in ("clear-chat", "clear:history", "clear-memory", "reset"):
             engine.clear_memory()
             print("\n[*] Conversation history cleared.\n")
+            continue
+
+        # Developer Review Gate: review / proposals
+        if query.lower() in ("review", "proposals", "patches:pending"):
+            from backend.database.mongo import db_manager
+            proposals = db_manager.find("generated_patches", {"status": "pending"})
+            if not proposals:
+                print("\n[*] No pending patch proposals awaiting review.\n")
+            else:
+                print("\n=======================================================================")
+                print(f"       PENDING PATCH PROPOSALS ({len(proposals)} awaiting review)")
+                print("=======================================================================")
+                for idx, p in enumerate(proposals, 1):
+                    p_id = p.get("patch_id", "unknown")
+                    tgt = p.get("target_file", "unknown")
+                    conf = f"{p.get('confidence_score', 0):.0%}"
+                    sb = p.get("sandbox_validation", {}).get("test_status", "skipped").upper()
+                    print(f"[{idx}] ID: {p_id[:8]}... ({p_id})")
+                    print(f"    Target File   : {tgt}")
+                    print(f"    Confidence    : {conf} | Sandbox Tests: {sb}")
+                    print(f"    Explanation   : {p.get('explanation', '')[:100]}...")
+                    print(f"    Diff Preview  :\n{p.get('git_diff', '')[:300]}\n")
+                print("Commands: approve <id>, reject <id>, review <id>\n")
+            continue
+
+        if query.lower().startswith("review "):
+            p_arg = query.split(maxsplit=1)[1].strip()
+            from backend.database.mongo import db_manager
+            # Find by prefix or exact
+            candidates = db_manager.find("generated_patches", {})
+            matched = [p for p in candidates if p.get("patch_id", "").startswith(p_arg)]
+            if not matched:
+                print(f"[!] Proposal '{p_arg}' not found.\n")
+            else:
+                p = matched[0]
+                render_patch_card(p, fix_time=0.0)
+            continue
+
+        if query.lower().startswith("approve "):
+            p_arg = query.split(maxsplit=1)[1].strip()
+            from backend.database.mongo import db_manager
+            candidates = db_manager.find("generated_patches", {})
+            matched = [p for p in candidates if p.get("patch_id", "").startswith(p_arg)]
+            if not matched:
+                print(f"[!] Proposal '{p_arg}' not found.\n")
+            else:
+                p = matched[0]
+                updated = patch_engine.update_patch_status(p["patch_id"], status="applied", user="cli_developer")
+                res = updated.get("apply_result", {}) if updated else {}
+                if res.get("success"):
+                    print(f"[+] Approved and applied patch {p['patch_id']} to '{p.get('target_file')}'.\n")
+                else:
+                    print(f"[!] Failed to apply patch: {res.get('message', 'unknown error')}\n")
+            continue
+
+        if query.lower().startswith("reject "):
+            p_arg = query.split(maxsplit=1)[1].strip()
+            from backend.database.mongo import db_manager
+            candidates = db_manager.find("generated_patches", {})
+            matched = [p for p in candidates if p.get("patch_id", "").startswith(p_arg)]
+            if not matched:
+                print(f"[!] Proposal '{p_arg}' not found.\n")
+            else:
+                p = matched[0]
+                patch_engine.update_patch_status(p["patch_id"], status="rejected", user="cli_developer")
+                print(f"[-] Rejected proposal {p['patch_id']}.\n")
+            continue
+
+        # Documentation Generator: doc:<target>
+        if query.lower().startswith("doc:") or query.lower().startswith("doc "):
+            doc_target = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+            from backend.documentation import DocumentationGenerator
+            doc_gen = DocumentationGenerator()
+            chunks = getattr(store, "chunks", [])
+            doc_md = doc_gen.generate_symbol_doc(doc_target, chunks, call_graph=ingested.call_graph, llm=engine.llm)
+            if HAS_RICH and console:
+                console.print(Panel(doc_md, title=f"[bold cyan]Documentation: {doc_target}[/bold cyan]", border_style="cyan"))
+            else:
+                print(f"\n{doc_md}\n")
             continue
 
 

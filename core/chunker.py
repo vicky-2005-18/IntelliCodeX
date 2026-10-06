@@ -35,12 +35,17 @@ class CodeChunk:
     imports: List[str] = field(default_factory=list)
 
     def as_embedding_text(self) -> str:
-        """What actually gets embedded — code + surrounding context."""
-        parts = [f"# File: {self.file_path}", f"# {self.kind}: {self.name}"]
+        """Enriched text representation for embeddings:
+        File path, signature/name, docstring, imports, and implementation code.
+        """
+        parts = [
+            f"# File: {self.file_path}",
+            f"# Signature: {self.kind} {self.name}",
+        ]
         if self.docstring:
-            parts.append(f'"""{self.docstring}"""')
+            parts.append(f'"""\n{self.docstring}\n"""')
         if self.imports:
-            parts.append("# imports: " + ", ".join(self.imports))
+            parts.append("# Imports: " + ", ".join(self.imports))
         parts.append(self.code)
         return "\n".join(parts)
 

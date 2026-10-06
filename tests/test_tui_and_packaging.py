@@ -113,6 +113,19 @@ def test_completer_new_commands():
     matches = [c.text for c in completer.get_completions(doc)]
     assert "export:" in matches
 
+    doc = Document("rev")
+    matches = [c.text for c in completer.get_completions(doc)]
+    assert "review" in matches
+
+    doc = Document("app")
+    matches = [c.text for c in completer.get_completions(doc)]
+    assert "approve " in matches
+
+    doc = Document("doc")
+    matches = [c.text for c in completer.get_completions(doc)]
+    assert "doc:" in matches
+
+
     doc = Document("inf")
     matches = [c.text for c in completer.get_completions(doc)]
     assert "info:" in matches

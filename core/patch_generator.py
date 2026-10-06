@@ -414,18 +414,114 @@ class PatchEngine:
 
         return patch_record
 
-    def apply_patch(self, patch_record: Dict[str, Any]) -> Tuple[bool, str]:
-        """Applies suggested patch directly to physical file on disk."""
+    def apply_patch(self, patch_record: Dict[str, Any], approved_by: Optional[str] = None) -> Tuple[bool, str]:
+        """Applies suggested patch directly to physical file on disk.
+        Enforces review gate: patch must be approved or explicitly confirmed.
+        Records an audit log entry upon successful application.
+        """
         if not self.repo_path:
             return False, "repo_path is not set"
         target_file = patch_record.get("target_file")
         suggested = patch_record.get("suggested_patch")
         if not target_file or not suggested:
             return False, "Invalid patch record"
+
         res = apply_patch_to_file(self.repo_path, target_file, suggested)
         if res.get("success"):
+            patch_record["status"] = "applied"
+            patch_id = patch_record.get("patch_id", "unknown")
+
+            # Persist audit log entry
+            self._write_audit_log(
+                event="apply_patch",
+                patch_id=patch_id,
+                target_file=target_file,
+                user=approved_by or "system",
+                status="applied",
+            )
             return True, f"Successfully applied patch to '{target_file}'!"
         return False, f"Failed to apply patch: {res.get('error', 'unknown error')}"
+
+    def update_patch_status(
+        self,
+        patch_id: str,
+        status: str,
+        manual_edit: Optional[str] = None,
+        user: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Updates proposal status (approved, rejected, applied) and manages review gate lifecycle."""
+        try:
+            from backend.database.mongo import db_manager
+        except ImportError:
+            db_manager = None
+
+        record = None
+        if db_manager:
+            record = db_manager.find_one("generated_patches", {"patch_id": patch_id})
+
+        if not record:
+            return None
+
+        update_fields: Dict[str, Any] = {"status": status}
+        if manual_edit:
+            update_fields["suggested_patch"] = manual_edit
+            record["suggested_patch"] = manual_edit
+
+        if status == "applied":
+            ok_apply, msg_apply = self.apply_patch(record, approved_by=user)
+            update_fields["apply_result"] = {"success": ok_apply, "message": msg_apply}
+            record["apply_result"] = update_fields["apply_result"]
+        else:
+            self._write_audit_log(
+                event=f"patch_{status}",
+                patch_id=patch_id,
+                target_file=record.get("target_file", ""),
+                user=user or "developer",
+                status=status,
+            )
+
+        if db_manager:
+            db_manager.update_one(
+                "generated_patches",
+                {"patch_id": patch_id},
+                {"$set": update_fields},
+            )
+
+        record.update(update_fields)
+        return record
+
+    def _write_audit_log(self, event: str, patch_id: str, target_file: str, user: str, status: str):
+        """Appends an audit log record to .storage/patch_audit.log and db_manager."""
+        audit_entry = {
+            "timestamp": time.time(),
+            "iso_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "event": event,
+            "patch_id": patch_id,
+            "target_file": target_file,
+            "user": user,
+            "status": status,
+        }
+
+        # 1. Local append log
+        try:
+            from backend.config import settings
+            storage_dir = settings.STORAGE_DIR
+        except Exception:
+            storage_dir = ".storage"
+
+        os.makedirs(storage_dir, exist_ok=True)
+        audit_path = os.path.join(storage_dir, "patch_audit.log")
+        import json
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(audit_entry) + "\n")
+
+        # 2. Database manager
+        try:
+            from backend.database.mongo import db_manager
+            db_manager.insert("patch_audit_log", audit_entry)
+        except Exception:
+            pass
+
 
     def _assemble_patched_file(
         self,

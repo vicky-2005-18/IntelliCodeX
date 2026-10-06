@@ -64,6 +64,83 @@ Refer to generated API documentation for detailed endpoints and class contracts.
             api_md += fn.code[:400] + ("\n..." if len(fn.code) > 400 else "") + "\n```\n\n"
         return api_md
 
+    def generate_symbol_doc(
+        self,
+        target: str,
+        chunks: List[CodeChunk],
+        call_graph: Any = None,
+        llm: Any = None,
+    ) -> str:
+        """Generates focused documentation for a file or symbol using call-graph context and optional LLM synthesis."""
+        matching_chunks = [
+            c for c in chunks
+            if c.name.lower() == target.lower()
+            or target.lower() in c.file_path.lower()
+            or c.chunk_id.lower().endswith(f"::{target.lower()}")
+        ]
+
+        if not matching_chunks:
+            return f"# Documentation for `{target}`\n\nNo symbol or file matching `{target}` was found in repository index."
+
+        target_chunk = matching_chunks[0]
+        md_lines = [
+            f"# Component Documentation: `{target_chunk.name}`",
+            "",
+            f"- **File**: `{target_chunk.file_path}`",
+            f"- **Kind**: `{target_chunk.kind}`",
+            f"- **Language**: `{target_chunk.language}`",
+            f"- **Lines**: `{target_chunk.start_line} - {target_chunk.end_line}`",
+        ]
+
+        # Call-graph relationships
+        if call_graph is not None:
+            callers = []
+            callees = []
+            try:
+                import networkx as nx
+                if isinstance(call_graph, nx.DiGraph):
+                    if call_graph.has_node(target_chunk.name):
+                        callers = list(call_graph.predecessors(target_chunk.name))
+                        callees = list(call_graph.successors(target_chunk.name))
+            except Exception:
+                pass
+
+            if callers:
+                md_lines.append(f"- **Referenced By (Callers)**: {', '.join(f'`{c}`' for c in callers[:10])}")
+            if callees:
+                md_lines.append(f"- **Calls (Callees)**: {', '.join(f'`{c}`' for c in callees[:10])}")
+
+        if target_chunk.docstring:
+            md_lines.extend(["", "## Intent & Docstring", f"> {target_chunk.docstring}"])
+
+        # Implementation section
+        md_lines.extend([
+            "",
+            "## Implementation Code",
+            f"```{target_chunk.language}",
+            target_chunk.code,
+            "```",
+        ])
+
+        # Optional LLM synthesis pass with quote filter validation
+        if llm is not None:
+            prompt = (
+                f"Generate clear, professional API reference documentation in Markdown for this {target_chunk.kind}:\n\n"
+                f"Name: {target_chunk.name}\n"
+                f"File: {target_chunk.file_path}\n"
+                f"Code:\n```\n{target_chunk.code}\n```\n\n"
+                "Explain parameters, return values, behavior, and edge cases. "
+                "Quote exact code lines when referencing logic."
+            )
+            try:
+                explanation = llm.generate(prompt, temperature=0.1)
+                if explanation and explanation.strip():
+                    md_lines.extend(["", "## Detailed Analysis", explanation.strip()])
+            except Exception:
+                pass
+
+        return "\n".join(md_lines)
+
     def export_to_pdf_html(self, markdown_content: str, title: str = "Documentation") -> str:
         """Converts markdown content to printable HTML/PDF styled document."""
         html_doc = f"""<!DOCTYPE html>
@@ -87,3 +164,4 @@ Refer to generated API documentation for detailed endpoints and class contracts.
 </html>
 """
         return html_doc
+

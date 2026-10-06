@@ -207,3 +207,42 @@ def test_cli_hybrid_commands(capsys):
     assert "Reciprocal Rank Fusion" in captured.out
     assert "ENABLED" in captured.out
     assert "DISABLED" in captured.out
+
+
+def test_docstring_only_semantic_search():
+    """Verify that enriched chunk text enables finding a function when query matches only its docstring."""
+    chunk_a = CodeChunk(
+        chunk_id="math_utils.py::compute_hypotenuse",
+        file_path="math_utils.py",
+        language="python",
+        kind="function",
+        name="compute_hypotenuse",
+        start_line=1,
+        end_line=5,
+        code="def compute_hypotenuse(a, b):\n    return (a**2 + b**2) ** 0.5",
+        docstring="Calculates Pythagorean distance between orthogonal Cartesian coordinates.",
+    )
+    chunk_b = CodeChunk(
+        chunk_id="data_utils.py::normalize_list",
+        file_path="data_utils.py",
+        language="python",
+        kind="function",
+        name="normalize_list",
+        start_line=1,
+        end_line=5,
+        code="def normalize_list(lst):\n    return [x / sum(lst) for x in lst]",
+        docstring="Transforms series into proportional unit distribution weights.",
+    )
+
+    embedder = TfidfEmbedder(dim=16)
+    embedder.fit([chunk_a.as_embedding_text(), chunk_b.as_embedding_text()])
+    store = FaissVectorStore(dim=16)
+    store.add([chunk_a, chunk_b], embedder.embed([chunk_a.as_embedding_text(), chunk_b.as_embedding_text()]))
+
+    engine = QueryEngine(store=store, embedder=embedder, llm=None)
+    # Search with terms that exist strictly in chunk_a docstring and nowhere else in the name or code
+    results = engine.retrieve("Pythagorean distance orthogonal Cartesian", top_k=2)
+    assert len(results) > 0
+    top_chunk, score = results[0]
+    assert top_chunk.name == "compute_hypotenuse"
+

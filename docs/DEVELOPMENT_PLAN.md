@@ -84,21 +84,21 @@
   - Create test fixture `tests/fixtures/obvious_bugs.py` containing syntax error, undefined variable, missing import, and type mismatch. Assert exact line reporting even when LLM is mocked or offline.
 
 ### Phase 2: Closing the Paper Gaps (3 to 4 Working Days)
-- [ ] **2.1 Consolidate PatchEngine**:
+- [x] **2.1 Consolidate PatchEngine**:
   - Standardize `core/patch_generator.py` as canonical engine.
   - Refactor `backend/patch_generator/patch_engine.py` to import directly from `core.patch_generator` or act as a lightweight facade.
   - Verify all 16+ existing patch generator tests continue to pass.
-- [ ] **2.2 Enriched Chunk Embeddings**:
+- [x] **2.2 Enriched Chunk Embeddings**:
   - Construct chunk embedding payload: `File: {path} | Signature: {sig} | Docstring: {doc} | Comments: {comments}\n{code}`.
   - Verify `core/embedder.py` and `core/pipeline.py` serialization.
   - Add integration test proving docstring-only semantic search retrieves the correct function.
-- [ ] **2.3 Developer Review & Proposal Gate**:
+- [x] **2.3 Developer Review & Proposal Gate**:
   - Staging workflow: `fix:` synthesizes a pending proposal with sandbox validation without writing to source files.
   - Proposal management commands: `review` (list and show diff), `approve <id>` (atomic overwrite with `.bak` backup), `reject <id>` (discard).
   - Persistent JSON/SQLite audit log recording timestamp, user, file, and patch ID.
   - Expose matching FastAPI endpoints with RBAC enforcement (`/api/patches/pending`, `/approve`, `/reject`).
   - Add unit tests verifying direct unapproved file modifications are rejected.
-- [ ] **2.4 Documentation Generation Engine**:
+- [x] **2.4 Documentation Generation Engine**:
   - Implement `doc:<file/symbol>` command utilizing AST call-graph hierarchy, inbound callers, and quote validation.
   - Output structured Markdown documentation. Test against mocked LLM.
 

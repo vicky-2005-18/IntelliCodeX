@@ -156,6 +156,10 @@ class DatabaseManager:
         else:
             self.fallback_store.update_one(collection, query, {"$set": update_data})
 
+    def update_one(self, collection: str, query: Dict[str, Any], update: Dict[str, Any]):
+        update_data = update.get("$set", update)
+        self.update(collection, query, update_data)
+
     def delete(self, collection: str, query: Dict[str, Any]) -> bool:
         if self.use_mongo:
             res = self.db[collection].delete_one(query)
