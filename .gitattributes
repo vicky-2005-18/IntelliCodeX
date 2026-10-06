@@ -1,0 +1,17 @@
+# Auto-detect text files, normalize line endings to LF
+* text=auto eol=lf
+
+# Batch files need CRLF on Windows
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.faiss binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary

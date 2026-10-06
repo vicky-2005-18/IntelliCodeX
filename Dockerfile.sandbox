@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+# Install minimal dependencies for sandbox test execution
+# NOTE: Project-specific dependencies (numpy, scikit-learn, tree-sitter parsers, etc.)
+# must be added by the user based on the repository being tested.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir pytest
+
+# Set working directory
+WORKDIR /work
+
+# Run as non-root user for security
+RUN useradd -m -u 1000 sandbox && chown -R sandbox:sandbox /work
+USER 1000:1000
+
+# Default command (will be overridden by sandbox runner)
+CMD ["python", "-m", "pytest", "-v", "-p", "no:cacheprovider"]

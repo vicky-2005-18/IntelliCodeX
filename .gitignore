@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+.pytest_cache/
+*.egg-info/
+build/
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+
+# Application storage & temp repos
+.storage/
+.repos/
+storage_data/
+repos_data/
+
+# Tool folders
+.agent/
+.agents/
+.kilo/
+
+# Graphify output
+graphify-out/
+
+# Backup files
+*.bak.*
+
+# Environment & Config
+.env
+.env.local
+.env.*.local
+
+# Submission archives
+intellicodex_submission_*.zip
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

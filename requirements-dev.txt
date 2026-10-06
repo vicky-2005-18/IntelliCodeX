@@ -1,0 +1,8 @@
+# Development dependencies for IntelliCodeX
+# Install with: pip install -r requirements-dev.txt
+
+# Testing framework
+pytest>=8.0
+
+# HTTP client for FastAPI TestClient
+httpx>=0.24
