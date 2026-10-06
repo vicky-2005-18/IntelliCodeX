@@ -288,3 +288,27 @@ sequenceDiagram
 | **Sync Mechanism** | On-demand CLI/API sync + Git commit hooks (`core/git_hooks.py`) | Background in-memory filesystem watcher daemon (`watchdog`) |
 | **Vector Storage** | Local FAISS CPU index binary (`.faiss`) | Optional connectors for remote Qdrant / Milvus / ChromaDB clusters |
 | **Analytics UI** | Re-renders `DashboardPage` in `AnalyticsPage.tsx` | Dedicated charts for cyclomatic complexity, Halstead, and risk index |
+
+---
+
+## 7. Operational Limits & Production Deployment
+
+### 7.1 Single-Process Concurrency & Inference Serialization
+- **Single-Process Model**: IntelliCodeX FastAPI runs on Uvicorn in a single-process event loop architecture. Global in-memory locks (`_GLOBAL_OLLAMA_THREAD_LOCK`) serialize access to the local Ollama LLM (`11434`), protecting VRAM from concurrency crashes or timeouts while queuing parallel incoming client requests safely.
+- **In-Memory Rate Limiting**: The authentication router applies an in-memory sliding window rate limiter (maximum 5 failed attempts per 5 minutes per user/IP). Because rate-limiting state is in-process, deploying multiple Uvicorn worker processes without a distributed Redis backend is not recommended.
+
+### 7.2 Reverse-Proxy & TLS/HTTPS Recommendation
+- The FastAPI application binds by default to `127.0.0.1:8000` without TLS encryption.
+- **Production Architecture**: When deploying IntelliCodeX across internal networks or teams, it MUST be fronted by an NGINX or Caddy reverse proxy providing:
+  1. **TLS Termination**: HTTPS certificates (Let's Encrypt or corporate CA).
+  2. **Security Headers**: HSTS, Content-Security-Policy, and X-Content-Type-Options.
+  3. **Client IP Forwarding**: Pass `X-Forwarded-For` and `X-Real-IP` to enable accurate client IP tracking (configured via `settings.TRUSTED_PROXIES`).
+  4. **Timeout Configuration**: Ensure proxy upstream timeouts are set to at least `300s` (`proxy_read_timeout 300;`) to accommodate serialized local LLM inference over large codebases.
+
+### 7.3 Remote CLI Client-Server Protocol
+- Developers can interact with a centralized team server from the terminal using the CLI remote bridge:
+  ```bash
+  python cli.py repo_name --server https://intellicodex.internal --token <JWT_TOKEN>
+  ```
+- All AST graph navigation, embedding lookups, and bug localization execute on the central server and stream results back to the remote CLI client over `/api` REST endpoints.
+

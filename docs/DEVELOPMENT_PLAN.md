@@ -103,13 +103,13 @@
   - Output structured Markdown documentation. Test against mocked LLM.
 
 ### Phase 3: Central Server & Concurrency Hardening (2 to 3 Working Days)
-- [ ] **Serialized LLM Ingestion Queue**:
+- [x] **Serialized LLM Ingestion Queue**:
   - Introduce an asynchronous `asyncio.Semaphore` or queue around Ollama inference to prevent connection timeouts under concurrent requests.
-- [ ] **Concurrency Benchmark**:
+- [x] **Concurrency Benchmark**:
   - Implement load test with 5 concurrent clients executing hybrid queries; record p50 and p95 latency.
-- [ ] **Remote Server CLI Bridge**:
+- [x] **Remote Server CLI Bridge**:
   - Add `--server <url>` and `--token <jwt>` flags to `cli.py` to allow querying remote IntelliCodeX instances over the REST API.
-- [ ] **Operational Documentation**:
+- [x] **Operational Documentation**:
   - Document system limits: single-process server model, in-memory rate limiting, and reverse proxy recommendation (e.g. NGINX) for TLS/HTTPS.
 
 ### Phase 4: Quantitative Evaluation & Security Hardening (2 to 3 Working Days)

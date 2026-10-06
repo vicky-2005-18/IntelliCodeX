@@ -952,6 +952,45 @@ def create_components(backend_choice: str):
 
 from core.benchmarking import run_benchmark
 
+class RemoteClient:
+    """Client for querying a remote IntelliCodeX FastAPI server over REST endpoints."""
+
+    def __init__(self, base_url: str, token: Optional[str] = None):
+        self.base_url = base_url.rstrip("/")
+        self.token = token
+        self.headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    def ask(self, repo_id: str, question: str, top_k: int = 5, file_filter: Optional[str] = None) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/chat/ask"
+        payload = {"repo_id": repo_id, "question": question, "top_k": top_k}
+        if file_filter:
+            payload["file_filter"] = file_filter
+        resp = requests.post(url, json=payload, headers=self.headers, timeout=120)
+        resp.raise_for_status()
+        return resp.json()
+
+    def localize_bug(self, repo_id: str, error_report: str, top_k: int = 5) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/bugs/localize"
+        resp = requests.post(url, json={"repo_id": repo_id, "error_report": error_report, "top_k": top_k}, headers=self.headers, timeout=120)
+        resp.raise_for_status()
+        return resp.json()
+
+    def generate_patch(self, repo_id: str, file_path: str, bug_description: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/patches/generate"
+        resp = requests.post(url, json={"repo_id": repo_id, "file_path": file_path, "bug_description": bug_description}, headers=self.headers, timeout=120)
+        resp.raise_for_status()
+        return resp.json()
+
+    def generate_docs(self, repo_id: str, target: Optional[str] = None) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/docs/generate"
+        params = {"repo_id": repo_id}
+        if target:
+            params["target"] = target
+        resp = requests.post(url, params=params, headers=self.headers, timeout=120)
+        resp.raise_for_status()
+        return resp.json()
+
+
 VERSION = "1.0.0"
 
 
@@ -959,6 +998,10 @@ def main():
     parser = argparse.ArgumentParser(description="IntelliCodeX CLI — AI Repository Intelligence")
     parser.add_argument("repo_path", nargs="?", default="sample_repo",
                         help="Local directory path or Git URL (default: sample_repo)")
+    parser.add_argument("--server", type=str, default=None,
+                        help="Remote IntelliCodeX server URL (e.g., http://localhost:8000)")
+    parser.add_argument("--token", type=str, default=None,
+                        help="JWT Bearer authentication token for remote server access")
     parser.add_argument("--backend", choices=["ollama", "tfidf"], default="tfidf",
                         help="LLM & Embedding backend (default: tfidf)")
     parser.add_argument("-q", "--query", type=str,
@@ -1017,6 +1060,47 @@ def main():
         return 0 if ok else 1
 
     render_banner()
+
+    # Remote Server CLI Bridge Mode
+    if args.server:
+        client = RemoteClient(args.server, token=args.token)
+        repo_id = os.path.basename(args.repo_path.rstrip("/\\")) or args.repo_path
+        print(f"[*] Connected to Remote Server: {args.server}")
+        print(f"[*] Remote Repository Target: {repo_id}")
+        if args.query:
+            cleaned_query, mention_file = parse_mention(args.query)
+            t_batch = time.perf_counter()
+            try:
+                res = client.ask(repo_id, cleaned_query, file_filter=mention_file)
+                total_batch = time.perf_counter() - t_batch
+                render_markdown_panel(res.get("answer", ""), title=f"Remote Answer ({repo_id})")
+                print(f"[*] [Time Consumed]: {format_time_consumed(total_batch)} (Confidence: {res.get('confidence_score', 0.0)})\n")
+                return 0
+            except Exception as e:
+                print(f"[!] Remote query failed: {e}")
+                return 1
+
+        # Interactive loop for remote server
+        print("\nRemote IntelliCodeX session ready. Type a question or 'exit' to quit.\n")
+        while True:
+            try:
+                q = input("remote>> ").strip()
+                if not q:
+                    continue
+                if q.lower() in ("exit", "quit", "q"):
+                    print("[*] Exiting Remote Session.")
+                    return 0
+                cleaned_q, mention = parse_mention(q)
+                t0 = time.perf_counter()
+                res = client.ask(repo_id, cleaned_q, file_filter=mention)
+                elapsed = time.perf_counter() - t0
+                render_markdown_panel(res.get("answer", ""), title=f"Remote Answer ({repo_id})")
+                print(f"[*] [Time Consumed]: {format_time_consumed(elapsed)} (Confidence: {res.get('confidence_score', 0.0)})\n")
+            except (KeyboardInterrupt, EOFError):
+                print("\n[*] Exiting Remote Session.")
+                return 0
+            except Exception as e:
+                print(f"[!] Error: {e}\n")
 
     embedder, llm, active_backend = create_components(args.backend)
 

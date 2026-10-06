@@ -202,3 +202,43 @@ def test_cli_main_watch_commands(capsys):
     assert "Real-Time Filesystem Watcher" in captured.out
     assert "stopped" in captured.out.lower()
     assert "started" in captured.out.lower()
+
+
+def test_cli_remote_server_batch(capsys):
+    """Test non-interactive batch query forwarded to remote server over REST API."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"answer": "Remote answered successfully.", "confidence_score": 0.95}
+
+    with patch("requests.post", return_value=mock_resp) as mock_post:
+        with patch("sys.argv", ["cli.py", "my_remote_repo", "--server", "http://127.0.0.1:8000", "--token", "test-token", "-q", "how does auth work?"]):
+            ret = main()
+            assert ret == 0
+            mock_post.assert_called_once()
+            url = mock_post.call_args[0][0]
+            assert "http://127.0.0.1:8000/api/chat/ask" in url
+            assert mock_post.call_args[1]["headers"]["Authorization"] == "Bearer test-token"
+            assert mock_post.call_args[1]["json"]["repo_id"] == "my_remote_repo"
+
+    captured = capsys.readouterr()
+    assert "Connected to Remote Server" in captured.out
+    assert "Remote answered successfully." in captured.out
+
+
+def test_cli_remote_server_interactive(capsys):
+    """Test interactive remote session commands."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"answer": "Interactive remote answer.", "confidence_score": 0.88}
+
+    with patch("requests.post", return_value=mock_resp):
+        with patch("builtins.input", side_effect=["where is login?", "exit"]):
+            with patch("sys.argv", ["cli.py", "my_remote_repo", "--server", "http://127.0.0.1:8000"]):
+                ret = main()
+                assert ret == 0
+
+    captured = capsys.readouterr()
+    assert "Remote IntelliCodeX session ready" in captured.out
+    assert "Interactive remote answer." in captured.out
+    assert "Exiting Remote Session." in captured.out
+

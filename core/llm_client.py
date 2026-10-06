@@ -1,7 +1,23 @@
+import asyncio
 import json
 import os
+import threading
+from typing import Generator, Optional
 import requests
-from typing import Generator
+
+
+# Global class-level inference lock to serialize access across OllamaLLM instances
+# (Local Ollama instances on standard machines cannot safely process concurrent VRAM-heavy requests)
+_GLOBAL_OLLAMA_THREAD_LOCK = threading.Lock()
+_GLOBAL_OLLAMA_ASYNC_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+
+def get_ollama_semaphore() -> asyncio.Semaphore:
+    """Lazily initialize and return the global async semaphore in the running event loop."""
+    global _GLOBAL_OLLAMA_ASYNC_SEMAPHORE
+    if _GLOBAL_OLLAMA_ASYNC_SEMAPHORE is None:
+        _GLOBAL_OLLAMA_ASYNC_SEMAPHORE = asyncio.Semaphore(1)
+    return _GLOBAL_OLLAMA_ASYNC_SEMAPHORE
 
 
 class OllamaLLM:
@@ -9,6 +25,7 @@ class OllamaLLM:
         self.model = model
         self.host = host.rstrip("/")
         self.num_ctx = num_ctx
+        self._lock = _GLOBAL_OLLAMA_THREAD_LOCK
 
     def set_model(self, model: str):
         """Dynamically switches active Ollama LLM model."""
@@ -19,7 +36,7 @@ class OllamaLLM:
         return int(len(text) / 3.5)
 
     def generate(self, prompt: str, system: str = "", temperature: float = 0.2, num_ctx: int = None) -> str:
-        """Generate response with configurable context window and temperature."""
+        """Generate response with configurable context window and temperature with thread-safe serialization."""
         ctx = num_ctx or self.num_ctx
         total_text = system + prompt
         estimated_tokens = self._estimate_tokens(total_text)
@@ -29,27 +46,28 @@ class OllamaLLM:
         
         options = {"temperature": temperature, "num_ctx": ctx}
         
-        try:
-            resp = requests.post(
-                f"{self.host}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "system": system,
-                    "stream": False,
-                    "options": options,
-                },
-                timeout=300,
-            )
-            resp.raise_for_status()
-            return resp.json().get("response", "")
-        except requests.exceptions.Timeout:
-            return "Local Ollama AI generation timed out (exceeded 300s). Try asking a more targeted question."
-        except Exception as e:
-            return f"Error communicating with local Ollama AI model: {e}"
+        with self._lock:
+            try:
+                resp = requests.post(
+                    f"{self.host}/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "system": system,
+                        "stream": False,
+                        "options": options,
+                    },
+                    timeout=300,
+                )
+                resp.raise_for_status()
+                return resp.json().get("response", "")
+            except requests.exceptions.Timeout:
+                return "Local Ollama AI generation timed out (exceeded 300s). Try asking a more targeted question."
+            except Exception as e:
+                return f"Error communicating with local Ollama AI model: {e}"
 
     def stream_generate(self, prompt: str, system: str = "", temperature: float = 0.2, num_ctx: int = None) -> Generator[str, None, None]:
-        """Yields response text tokens in real-time streaming chunks."""
+        """Yields response text tokens in real-time streaming chunks with lock held during active streaming."""
         ctx = num_ctx or self.num_ctx
         total_text = system + prompt
         estimated_tokens = self._estimate_tokens(total_text)
@@ -59,26 +77,28 @@ class OllamaLLM:
         
         options = {"temperature": temperature, "num_ctx": ctx}
         
-        try:
-            resp = requests.post(
-                f"{self.host}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "system": system,
-                    "stream": True,
-                    "options": options,
-                },
-                stream=True,
-                timeout=300,
-            )
-            resp.raise_for_status()
-            for line in resp.iter_lines():
-                if line:
-                    chunk = json.loads(line.decode("utf-8"))
-                    token = chunk.get("response", "")
-                    if token:
-                        yield token
-        except Exception as e:
-            yield f"\n[Error streaming from Ollama AI model: {e}]"
+        with self._lock:
+            try:
+                resp = requests.post(
+                    f"{self.host}/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "system": system,
+                        "stream": True,
+                        "options": options,
+                    },
+                    stream=True,
+                    timeout=300,
+                )
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if line:
+                        chunk = json.loads(line.decode("utf-8"))
+                        token = chunk.get("response", "")
+                        if token:
+                            yield token
+            except Exception as e:
+                yield f"\n[Error streaming from Ollama AI model: {e}]"
+
 
