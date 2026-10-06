@@ -1,6 +1,6 @@
 # IntelliCodeX — AI-Powered Software Repository Intelligence & Code Analysis Engine
 
-[![Tests: 251 Passed](https://img.shields.io/badge/Tests-251%20Passed-brightgreen)](docs/TESTING.md)
+[![Tests: 254 Passed](https://img.shields.io/badge/Tests-254%20Passed-brightgreen)](docs/TESTING.md)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![CLI: Interactive Terminal Assistant](https://img.shields.io/badge/Interface-CLI%20First-orange)](cli.py)
 [![Backend: FastAPI Bridge](https://img.shields.io/badge/Backend-FastAPI-009688)](backend/main.py)

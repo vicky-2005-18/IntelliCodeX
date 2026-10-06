@@ -11,6 +11,7 @@ from core.vectorstore import FaissVectorStore
 from core.embedder import BaseEmbedder
 from core.chunker import CodeChunk
 from core.lexical_index import BM25Index
+from core.static_checks import run_static_checks
 
 # Debug flag for prompt inspection
 DEBUG_PROMPT = os.getenv("INTELLICODEX_DEBUG_PROMPT", "0") == "1"
@@ -457,23 +458,38 @@ class QueryEngine:
         t_retrieval = time.perf_counter() - t_start
         context = format_context(expanded_results, max_token_budget=max_token_budget)
 
+        retrieved_chunks = []
+        for item in expanded_results:
+            if isinstance(item, dict):
+                c = item["chunk"]
+                retrieved_chunks.append({
+                    "file": c.file_path,
+                    "name": c.name,
+                    "lines": f"{c.start_line}-{c.end_line}",
+                    "score": item.get("score", 0.0),
+                    "reason": item.get("reason", "retrieved")
+                })
+            elif isinstance(item, tuple):
+                c, score = item[0], item[1]
+                retrieved_chunks.append({
+                    "file": c.file_path,
+                    "name": c.name,
+                    "lines": f"{c.start_line}-{c.end_line}",
+                    "score": score,
+                    "reason": "direct_match"
+                })
+
         response = {
             "question": question,
             "persona": self.active_persona,
-            "retrieved_chunks": [
-                {
-                    "file": item["chunk"].file_path,
-                    "name": item["chunk"].name,
-                    "lines": f"{item['chunk'].start_line}-{item['chunk'].end_line}",
-                    "score": item["score"],
-                    "reason": item["reason"]
-                }
-                for item in expanded_results
-            ],
+            "retrieved_chunks": retrieved_chunks,
         }
 
         if self.llm is None:
-            relevant_items = [item for item in expanded_results if item["score"] > 0.001]
+            relevant_items = [
+                item for item in expanded_results
+                if (item.get("score", 0) if isinstance(item, dict) else item[1]) > 0.001
+            ]
             if not relevant_items:
                 ans = (
                     f"[Offline Mode] TF-IDF search found no direct code symbol matches for '{question}'.\n"
@@ -522,7 +538,39 @@ class QueryEngine:
         is_bug_query = any(keyword in question.lower() for keyword in bug_keywords) or bool(file_filter)
         
         if is_bug_query:
-            # First pass: Runtime errors (syntax, undefined names, missing imports, type errors)
+            # Deterministic Static Analysis Pass (syntax, undefined variables, missing imports)
+            static_findings = []
+            files_seen = set()
+            for item in expanded_results:
+                chunk = item[0] if isinstance(item, tuple) else (item.get("chunk") if isinstance(item, dict) else None)
+                if chunk and chunk.file_path and chunk.file_path not in files_seen:
+                    files_seen.add(chunk.file_path)
+                    try:
+                        # Extract full file content or chunk code
+                        file_code = chunk.code
+                        if os.path.isfile(chunk.file_path):
+                            with open(chunk.file_path, "r", encoding="utf-8", errors="replace") as f:
+                                file_code = f.read()
+                        checks = run_static_checks(file_code, chunk.file_path, chunk.language)
+                        static_findings.extend(checks)
+                    except Exception as e:
+                        if DEBUG_PROMPT:
+                            print(f"[DEBUG_PROMPT] Static check exception on {chunk.file_path}: {e}")
+
+            # If static syntax error exists, report immediately and bypass expensive logic pass
+            has_syntax_error = any(f.get("type") == "SyntaxError" for f in static_findings)
+            if has_syntax_error:
+                answer = self._format_merged_findings(static_findings)
+                t_total = time.perf_counter() - t_start
+                response["answer"] = answer
+                response["elapsed_seconds"] = round(t_total, 3)
+                response["retrieval_seconds"] = round(t_retrieval, 3)
+                response["llm_seconds"] = 0.0
+                if use_memory:
+                    self.memory.add_turn(question, answer)
+                return response
+
+            # First LLM pass: Runtime errors on whole line-numbered file at temperature 0.0
             runtime_errors_prompt = (
                 "This file is supposed to run. List every error that would stop it from running "
                 "(syntax errors, undefined names, missing imports, type errors). "
@@ -553,7 +601,7 @@ class QueryEngine:
             # Parse runtime errors from LLM response
             runtime_findings = self._parse_runtime_errors(runtime_answer, expanded_results)
             
-            # Second pass: Per-function analysis for semantic bugs
+            # Second pass: Per-function analysis for semantic bugs and logic flaws
             anti_hallucination = (
                 "You are analyzing code for bugs, syntax errors, and logic flaws.\n"
                 "IMPORTANT: You MUST analyze and output a separate section for EVERY function, method, and block in the context (including main!). Do NOT stop after the first function.\n\n"
@@ -561,14 +609,13 @@ class QueryEngine:
                 "1. Name: [function/method name]\n"
                 "2. Docstring/intent: [what the code should do based on name/docstring]\n"
                 "3. Code: [the implementation]\n"
-                "4. Analysis: Look closely for:\n"
-                "   - Syntax & compile errors (e.g., missing semicolons ';' in Java/C/C++, missing colons ':' in Python, unbalanced braces)\n"
-                "   - Type mismatch errors (e.g., assigning a String to an int like 'int total = \"sum\";')\n"
+                "4. Analysis: Check both docstring/name contract and potential runtime failures:\n"
+                "   - Syntax & compile errors (missing colons, missing brackets, unbalanced quotes)\n"
+                "   - Type mismatch errors (e.g. str + int operations, NoneType operations)\n"
                 "   - Logic mistakes & operand order (e.g., 'return b - a' instead of 'a - b')\n"
-                "   - Operator bugs & precision loss (e.g., using integer division '//' instead of float division '/' in a general calculator)\n"
-                "   - Quantifier / Boolean logic mistakes (e.g., using 'any()' instead of 'all()' when all conditions/subjects must be satisfied to pass)\n"
-                "   - Off-by-one errors or wrong formulas (e.g., dividing by 'len(items) + 1' instead of 'len(items)')\n"
-                "5. Answer MATCH or MISMATCH\n"
+                "   - Operator bugs & precision loss (e.g., '//' instead of '/')\n"
+                "   - Boolean logic and quantifier errors (e.g. 'any()' vs 'all()')\n"
+                "5. Answer MATCH or MISMATCH (do NOT assume MATCH if docstring is missing; evaluate function name and arguments)\n"
                 "6. If MISMATCH, quote the exact line with the bug\n"
                 "7. Explain in one sentence why it is a bug and provide the fix\n\n"
                 "CRITICAL: Only report bugs that exist in the code. Quote the exact line from the code.\n\n"
@@ -603,10 +650,10 @@ class QueryEngine:
         if is_bug_query:
             answer = self._filter_hallucinated_claims(answer, expanded_results)
             
-            # Merge runtime findings with semantic findings
-            if runtime_findings:
-                semantic_findings = self._parse_semantic_findings(answer)
-                merged = self._merge_findings(runtime_findings, semantic_findings)
+            # Merge deterministic static findings, LLM runtime findings, and semantic findings
+            semantic_findings = self._parse_semantic_findings(answer)
+            merged = self._merge_findings(static_findings + runtime_findings, semantic_findings)
+            if merged:
                 answer = self._format_merged_findings(merged)
 
         t_total = time.perf_counter() - t_start
@@ -656,6 +703,32 @@ class QueryEngine:
         runtime_findings = []
         
         if is_bug_query:
+            # Deterministic static analysis pass first
+            static_findings = []
+            files_seen = set()
+            for item in expanded_results:
+                chunk = item[0] if isinstance(item, tuple) else (item.get("chunk") if isinstance(item, dict) else None)
+                if chunk and chunk.file_path and chunk.file_path not in files_seen:
+                    files_seen.add(chunk.file_path)
+                    try:
+                        file_code = chunk.code
+                        if os.path.isfile(chunk.file_path):
+                            with open(chunk.file_path, "r", encoding="utf-8", errors="replace") as f:
+                                file_code = f.read()
+                        checks = run_static_checks(file_code, chunk.file_path, chunk.language)
+                        static_findings.extend(checks)
+                    except Exception as e:
+                        if DEBUG_PROMPT:
+                            print(f"[DEBUG_PROMPT] Static check exception in stream_ask on {chunk.file_path}: {e}")
+
+            # If syntax error exists, return static findings directly
+            has_syntax_error = any(f.get("type") == "SyntaxError" for f in static_findings)
+            if has_syntax_error:
+                formatted = self._format_merged_findings(static_findings)
+                if use_memory:
+                    self.memory.add_turn(question, formatted)
+                yield formatted
+                return
             # First pass: Runtime errors (syntax, undefined names, missing imports, type errors)
             runtime_errors_prompt = (
                 "This file is supposed to run. List every error that would stop it from running "
@@ -734,7 +807,9 @@ class QueryEngine:
             
             # Normalize whitespace and add lines
             for line in chunk.code.splitlines():
-                normalized = ' '.join(line.split())
+                # Strip potential line number prefixes like "  1 | " if present
+                clean_line = re.sub(r'^\s*\d+\s*\|\s*', '', line)
+                normalized = ' '.join(clean_line.split())
                 if normalized:
                     actual_lines.add(normalized)
         
@@ -743,10 +818,15 @@ class QueryEngine:
         filtered_answer = answer
         
         for quote in quoted_patterns:
-            normalized_quote = ' '.join(quote.split())
-            if normalized_quote not in actual_lines:
+            # Strip line number prefixes, code fences, and whitespace
+            clean_quote = re.sub(r'^\s*\d+\s*\|\s*', '', quote)
+            clean_quote = clean_quote.strip('`').strip()
+            normalized_quote = ' '.join(clean_quote.split())
+            if not normalized_quote or normalized_quote not in actual_lines:
                 # Remove this claim or mark it
                 removed_count += 1
+                if DEBUG_PROMPT:
+                    print(f"[DEBUG_PROMPT] Removed hallucinated quote: {quote!r} (normalized: {normalized_quote!r})")
                 # Replace the quoted part with a marker
                 filtered_answer = filtered_answer.replace(f'"{quote}"', '[QUOTED CODE NOT FOUND IN FILE]')
                 filtered_answer = filtered_answer.replace(f"'{quote}'", '[QUOTED CODE NOT FOUND IN FILE]')
@@ -809,7 +889,7 @@ class QueryEngine:
             if quoted_match:
                 findings.append({
                     'code': quoted_match.group(1),
-                    'source': 'static',
+                    'source': 'semantic',
                     'type': 'semantic'
                 })
         
@@ -839,13 +919,28 @@ class QueryEngine:
         
         output = []
         
-        # Runtime findings first
+        # 1. Deterministic Static findings first (labelled [STATIC])
+        static_errs = [f for f in findings if f.get('source') == 'static']
+        if static_errs:
+            output.append("**Static Analysis Findings:**")
+            for f in static_errs:
+                loc = f"Line {f.get('line')}" if f.get('line') else ""
+                col = f", Col {f.get('column')}" if f.get('column') else ""
+                coord = f" ({loc}{col})" if loc else ""
+                err_type = f" [{f.get('type')}]" if f.get('type') else ""
+                code_snippet = f": `{f['code']}`" if f.get('code') else ""
+                output.append(f"- [STATIC]{err_type}{coord} {f.get('message', '')}{code_snippet}")
+
+        # 2. Runtime findings second
         runtime = [f for f in findings if f.get('source') == 'llm']
-        for f in runtime:
-            output.append(f"**Runtime Error (Line {f['line']}):** {f['code']}")
+        if runtime:
+            if static_errs:
+                output.append("\n**Runtime Errors:**")
+            for f in runtime:
+                output.append(f"**Runtime Error (Line {f['line']}):** {f['code']}")
         
-        # Semantic findings second
-        semantic = [f for f in findings if f.get('source') == 'static']
+        # 3. Semantic findings third
+        semantic = [f for f in findings if f.get('source') not in ('static', 'llm')]
         if semantic:
             output.append("\n**Semantic Analysis Findings:**")
             for f in semantic:

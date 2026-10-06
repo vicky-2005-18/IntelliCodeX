@@ -275,5 +275,99 @@ def test_quote_filter_strips_line_number_prefix():
     assert engine._verify_quote_exists("return a + b", expanded_results, 2) is True
 
 
+def test_static_checks_obvious_bugs_fixture():
+    """Test that static checks catch syntax errors, undefined variables, and missing imports without LLM."""
+    from core.static_checks import run_static_checks
+    
+    code = (
+        "def calculate_sum(a, b):\n"
+        "    return a + b + math.sqrt(a)\n"
+        "def process_data(items):\n"
+        "    result = []\n"
+        "    for item in items:\n"
+        "        result.append(item * multiplier)\n"
+        "    return result\n"
+    )
+    
+    findings = run_static_checks(code, "obvious_bugs.py", "python")
+    
+    # Must find missing math and undefined multiplier
+    assert len(findings) >= 2
+    types = [f["type"] for f in findings]
+    assert "UndefinedName" in types
+    
+    # Verify lines and details
+    names = [f["code"] for f in findings]
+    assert any("math.sqrt" in c for c in names)
+    assert any("multiplier" in c for c in names)
+
+
+def test_static_findings_appear_even_when_llm_reports_no_bugs():
+    """Test that deterministic static findings appear even when LLM says 'no bugs'."""
+    fake_llm = FakeLLM()
+    fake_llm.response = "No bugs found in this code."
+    
+    engine = QueryEngine(
+        store=Mock(spec=FaissVectorStore),
+        embedder=FakeEmbedder(),
+        llm=fake_llm,
+    )
+    
+    chunks = [
+        CodeChunk(
+            chunk_id="test.py::broken",
+            file_path="test.py",
+            language="python",
+            kind="function",
+            name="broken",
+            start_line=1,
+            end_line=3,
+            code="def broken():\n    return undefined_var_123",
+        )
+    ]
+    
+    expanded = [(chunks[0], 1.0)]
+    engine.retrieve_expanded = Mock(return_value=expanded)
+    
+    resp = engine.ask("find bugs in @test.py", file_filter="test.py")
+    
+    assert "[STATIC]" in resp["answer"]
+    assert "undefined_var_123" in resp["answer"]
+
+
+def test_syntax_error_skips_llm():
+    """Test that a file with syntax error reports immediately without calling LLM generation."""
+    fake_llm = FakeLLM()
+    fake_llm.generate = Mock(return_value="Should not be called")
+    
+    engine = QueryEngine(
+        store=Mock(spec=FaissVectorStore),
+        embedder=FakeEmbedder(),
+        llm=fake_llm,
+    )
+    
+    chunks = [
+        CodeChunk(
+            chunk_id="test.py::syntax_err",
+            file_path="test.py",
+            language="python",
+            kind="function",
+            name="syntax_err",
+            start_line=1,
+            end_line=2,
+            code="def broken(\n",
+        )
+    ]
+    
+    expanded = [(chunks[0], 1.0)]
+    engine.retrieve_expanded = Mock(return_value=expanded)
+    
+    resp = engine.ask("check bugs in test.py", file_filter="test.py")
+    
+    assert "[STATIC]" in resp["answer"]
+    assert "SyntaxError" in resp["answer"]
+    assert fake_llm.generate.call_count == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
