@@ -60,27 +60,27 @@
 ## 3. Phased Execution Roadmap
 
 ### Phase 0: Synchronization, Cleanup & Hygiene (~0.5 Working Day)
-- [ ] Align test count badges and documentation across `README.md`, `docs/PROJECT_STATUS.md`, and `docs/TESTING.md` to reflect the active passing suite (251 passed, 4 skipped).
-- [ ] Correct status contradictions regarding background file watcher and multi-turn sandbox repair.
-- [ ] Strip out "Enterprise" terminology from `backend/main.py`, `backend/config.py`, `backend/services/assistant_engine.py`, and `backend/services/llm_factory.py`.
-- [ ] Update Graphify ignore configuration (`.gitignore`, `.graphifyignore`) to exclude `.agent`, `.agents`, `.kilo`, `.repos`, and `graphify-out`.
-- [ ] Ensure git working tree is clean and synchronized.
+- [x] Align test count badges and documentation across `README.md`, `docs/PROJECT_STATUS.md`, and `docs/TESTING.md` to reflect the active passing suite (254 passed, 4 skipped).
+- [x] Correct status contradictions regarding background file watcher and multi-turn sandbox repair.
+- [x] Strip out "Enterprise" terminology from `backend/main.py`, `backend/config.py`, `backend/services/assistant_engine.py`, and `backend/services/llm_factory.py`.
+- [x] Update Graphify ignore configuration (`.gitignore`, `.graphifyignore`) to exclude `.agent`, `.agents`, `.kilo`, `.repos`, `gsd-core`, `get-shit-done`, and `graphify-out`.
+- [x] Ensure git working tree is clean and synchronized.
 
 ### Phase 1: Bug-Finding Reliability & Deterministic Checks (1 to 2 Working Days)
-- [ ] **`core/static_checks.py`**:
+- [x] **`core/static_checks.py`**:
   - Python AST syntax checking via `ast.parse`.
   - Undefined variable and unused/missing import detection using `pyflakes.api.checkPath` / AST visitor.
   - Multi-language AST ERROR node extraction via Tree-Sitter grammars.
   - Strict isolation: zero code execution during static analysis.
-- [ ] **Deterministic-First Bug Pipeline**:
+- [x] **Deterministic-First Bug Pipeline**:
   - Run static checks before sending prompts to the LLM. Label static issues explicitly (`[STATIC]`).
   - If syntax errors exist, abort function-level logic decomposition and report syntax error directly.
   - Add dedicated runtime-errors LLM pass over full line-numbered file at temperature `0.0`.
   - Refine prompt to check name/docstring contracts and runtime exceptions without default "MATCH".
-- [ ] **Anti-Hallucination Quote Normalization**:
+- [x] **Anti-Hallucination Quote Normalization**:
   - Strip line-number prefixes (`N |`), code fences, and whitespace deltas before verifying quotes against ground-truth source.
   - Log quote rejections under `INTELLICODEX_DEBUG_PROMPT`.
-- [ ] **Automated Test Fixtures**:
+- [x] **Automated Test Fixtures**:
   - Create test fixture `tests/fixtures/obvious_bugs.py` containing syntax error, undefined variable, missing import, and type mismatch. Assert exact line reporting even when LLM is mocked or offline.
 
 ### Phase 2: Closing the Paper Gaps (3 to 4 Working Days)
