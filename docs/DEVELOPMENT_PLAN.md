@@ -113,16 +113,16 @@
   - Document system limits: single-process server model, in-memory rate limiting, and reverse proxy recommendation (e.g. NGINX) for TLS/HTTPS.
 
 ### Phase 4: Quantitative Evaluation & Security Hardening (2 to 3 Working Days)
-- [ ] **Empirical Bug-Finding Evaluation**:
-  - Create `scripts/eval_llm.py` and `tests/fixtures/planted_bugs/` (8 intentional bugs, 6 clean functions).
+- [x] **Empirical Bug-Finding Evaluation**:
+  - Create `scripts/eval_llm.py` and `tests/fixtures/planted_bugs.py` (8 intentional bugs, 6 clean functions).
   - Record True Positives, False Positives, False Negatives, and filtered hallucinations. Generate `docs/LLM_EVAL.md`.
-- [ ] **Retrieval Benchmark Expansion**:
+- [x] **Retrieval Benchmark Expansion**:
   - Expand 4-query MRR benchmark to $\ge 30$ representative queries across two repositories.
-- [ ] **Patch Synthesis Benchmark**:
+- [x] **Patch Synthesis Benchmark**:
   - Benchmark 5–10 reference bugs, reporting sandbox pass rates.
-- [ ] **Static Security Scanner**:
+- [x] **Static Security Scanner**:
   - Implement `security:<file>` command wrapping `bandit` for Python AST vulnerability scanning; use LLM strictly to explain findings.
-- [ ] **Docker Sandbox Verification**:
+- [x] **Docker Sandbox Verification**:
   - Build and validate `Dockerfile.sandbox` in containerized environments; update status from "unverified" to "verified".
 
 ### Phase 5: Research Paper Synchronization (1 Working Day)

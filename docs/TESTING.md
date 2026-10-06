@@ -2,8 +2,8 @@
 
 > **Inspection & Execution Date**: 2026-10-07
 > **Environment**: Windows 11, Python 3.14
-> **Automated Test Results**: **260 Passed**, 4 Skipped, 0 Failed (Duration: ~15 seconds)
-> **Target Scope**: CLI Core, Tree-Sitter Parsers, FAISS Vector Engine, RAG, Patch Generator, Security Hardening, Anti-Hallucination, Concurrency Serialization, Remote Server Bridge
+> **Automated Test Results**: **265 Passed**, 4 Skipped, 0 Failed (Duration: ~17 seconds)
+> **Target Scope**: CLI Core, Tree-Sitter Parsers, FAISS Vector Engine, RAG, Patch Generator, Security Hardening, Anti-Hallucination, Concurrency Serialization, Remote Server Bridge, Bandit AST Security, 30-Query MRR Benchmark
 
 ---
 

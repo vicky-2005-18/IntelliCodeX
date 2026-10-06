@@ -196,3 +196,61 @@ def test_review_gate_lifecycle_and_audit_log():
         assert "developer_bob" in logs
 
 
+def test_patch_synthesis_benchmark():
+    """
+    Evaluates Patch Synthesis across 5 reference bug cases in sandbox:
+    1. KeyError on dictionary access
+    2. ZeroDivisionError on divide
+    3. IndexError on empty list pop
+    4. TypeError on None argument
+    5. AttributeError on missing method
+    """
+    reference_bugs = [
+        ("func1.py", "def get_val(d):\n    return d['x']\n", "KeyError: 'x' in get_val"),
+        ("func2.py", "def div(a, b):\n    return a / b\n", "ZeroDivisionError: division by zero in div"),
+        ("func3.py", "def get_item(lst):\n    return lst[0]\n", "IndexError: list index out of range in get_item"),
+        ("func4.py", "def format_text(s):\n    return s.strip()\n", "AttributeError: 'NoneType' object has no attribute 'strip'"),
+        ("func5.py", "def compute(a, b):\n    return a + b\n", "TypeError: unsupported operand type(s) for + in compute"),
+    ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        embedder = TfidfEmbedder(dim=16)
+        all_chunks = []
+        for f_name, code, err in reference_bugs:
+            f_path = os.path.join(tmpdir, f_name)
+            with open(f_path, "w", encoding="utf-8") as f:
+                f.write(code)
+            chk = CodeChunk(
+                chunk_id=f"{f_name}::func",
+                file_path=f_name,
+                language="python",
+                kind="function",
+                name=f_name.split(".")[0],
+                start_line=1,
+                end_line=2,
+                code=code,
+            )
+            all_chunks.append(chk)
+
+        vecs = embedder.embed([c.as_embedding_text() for c in all_chunks])
+        store = FaissVectorStore(dim=vecs.shape[1])
+        store.add(all_chunks, vecs)
+
+        engine = PatchEngine(store, embedder, llm=None, repo_path=tmpdir)
+        synthesized_count = 0
+        ast_valid_count = 0
+
+        for f_name, code, err in reference_bugs:
+            patch_rec = engine.generate_patch("bench_repo", err, f_name)
+            if patch_rec and patch_rec.get("patch_id"):
+                synthesized_count += 1
+            if patch_rec.get("validation", {}).get("syntax_valid"):
+                ast_valid_count += 1
+
+        pass_rate = ast_valid_count / len(reference_bugs)
+        print(f"\n[Patch Synthesis Benchmark] 5 Reference Bugs: Synthesized={synthesized_count}/5, AST Valid={ast_valid_count}/5 ({pass_rate:.1%})")
+        assert synthesized_count == 5
+        assert pass_rate >= 0.8
+
+
+

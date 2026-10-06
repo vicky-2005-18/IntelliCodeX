@@ -807,6 +807,7 @@ class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
         ("approve ", "Approve and apply a pending patch proposal (e.g. 'approve <id>')"),
         ("reject ", "Reject and discard a pending patch proposal (e.g. 'reject <id>')"),
         ("doc:", "Generate documentation for symbol or file using call graph (e.g. 'doc:login')"),
+        ("security:", "Run Bandit AST security vulnerability scanner on target file (e.g. 'security:auth.py')"),
         ("search:", "Fast retrieval-only search (no LLM, instant results)"),
         ("info:", "Show indexed file details: size, chunk count, centrality"),
         ("export:", "Save last AI answer to a Markdown file"),
@@ -1606,6 +1607,23 @@ def main():
                 console.print(Panel(doc_md, title=f"[bold cyan]Documentation: {doc_target}[/bold cyan]", border_style="cyan"))
             else:
                 print(f"\n{doc_md}\n")
+            continue
+
+        # Security Scanner: security:<file>
+        if query.lower().startswith("security:") or query.lower().startswith("security "):
+            sec_target = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+            from core.security_scanner import run_bandit_scan, format_security_report
+            abs_sec = os.path.join(current_path, sec_target) if not os.path.isabs(sec_target) else sec_target
+            if not os.path.exists(abs_sec):
+                print(f"[!] Path not found: {sec_target}\n")
+                continue
+            print(f"[*] Running Bandit AST security scan on '{sec_target}'...")
+            sec_result = run_bandit_scan(abs_sec)
+            sec_report = format_security_report(sec_result, llm=engine.llm)
+            if HAS_RICH and console:
+                console.print(Panel(sec_report, title=f"[bold red]Security Scan: {sec_target}[/bold red]", border_style="red"))
+            else:
+                print(f"\n{sec_report}\n")
             continue
 
 
