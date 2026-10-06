@@ -28,6 +28,9 @@ repos_data/
 .agent/
 .agents/
 .kilo/
+gsd-core/
+get-shit-done/
+.planning/
 
 # Graphify output
 graphify-out/
@@ -48,3 +51,7 @@ intellicodex_submission_*.zip
 Thumbs.db
 .vscode/
 .idea/
+
+# Workspace scripts & temp clones
+fix_workspace_readme.py
+intellicodex/

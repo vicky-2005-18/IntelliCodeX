@@ -1,6 +1,6 @@
 # IntelliCodeX — AI-Powered Software Repository Intelligence & Code Analysis Engine
 
-[![Tests: 246 Passed](https://img.shields.io/badge/Tests-246%20Passed-brightgreen)](docs/TESTING.md)
+[![Tests: 251 Passed](https://img.shields.io/badge/Tests-251%20Passed-brightgreen)](docs/TESTING.md)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![CLI: Interactive Terminal Assistant](https://img.shields.io/badge/Interface-CLI%20First-orange)](cli.py)
 [![Backend: FastAPI Bridge](https://img.shields.io/badge/Backend-FastAPI-009688)](backend/main.py)
@@ -32,13 +32,14 @@ IntelliCodeX is built for software engineers, security auditors, and system arch
 * **Graph-Augmented RAG Querying**: Context retrieval expanded with upstream callers, downstream callees, and imported modules; dynamic token budgeting and multi-turn conversation memory.
 * **Spectrum-Based Fault Localization (SBFL)**: Ochiai suspiciousness ranking combined with multi-language stack trace parsing (Python, JS, Java, Go, Rust).
 * **Safe Patch Generation & Application**: Deterministic low-temperature code synthesis, unified Git diff generation, AST syntax validation, and atomic file overwrites with timestamped `.bak` backups.
+* **Live File Watcher**: Real-time filesystem observer using `watchdog` with debounced delta indexing and CLI controls (`watch:status`, `watch:start`, `watch:stop`).
 * **Zero-Latency SQLite Cache**: SHA-256 content hashing enabling $<5\text{ms}$ index reloading for unmodified repositories.
 * **Interactive CLI Tooling**: Standalone terminal interface with command loops (`fix:`, `deps:`, `callers:`, `top`, `persona`, `model`, `repo`, `hooks`).
 
 ### Important Limitations
 * **Multi-Turn Patching**: Patch generation supports multi-turn refinement with sandbox test runs (up to 3 iterations) when a repository path is provided. Tests are run after each iteration; if tests pass or are skipped, refinement stops. If no repository path is provided, patch generation is single-shot without test validation.
 * **Web UI Scope**: The React web UI has been detached to prioritize the CLI and core engine this semester; Web UI workspace features are scheduled for the Semester 2 roadmap.
-* **Manual / Hook Sync**: Real-time incremental synchronization is triggered via Git commit hooks, CLI startup, or API endpoints; continuous filesystem background monitoring (`watchdog`) is in active development.
+* **Local Process Sandbox**: Local sandbox executes within OS process isolation and environment constraints; Docker sandbox mode is recommended for untrusted repositories.
 
 ---
 

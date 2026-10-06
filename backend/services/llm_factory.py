@@ -1,6 +1,6 @@
 """
 LLM & Embedder Factory
-Centralizes creation of Ollama clients using enterprise configuration settings.
+Centralizes creation of Ollama clients using application configuration settings.
 """
 from typing import Optional
 from core.embedder import BaseEmbedder, OllamaEmbedder, TfidfEmbedder

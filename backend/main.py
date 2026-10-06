@@ -1,5 +1,5 @@
 """
-IntelliCodeX Enterprise FastAPI Backend Application Entry Point
+IntelliCodeX FastAPI Backend Application Entry Point
 """
 import logging
 from fastapi import FastAPI, Depends
@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    description="IntelliCodeX Enterprise AI Repository Analysis and Automated Software Maintenance Framework",
+    description="IntelliCodeX AI Repository Analysis and Automated Software Maintenance Framework",
 )
 
 # Enable CORS for local React development & cross-origin access
@@ -35,7 +35,7 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-# Include Enterprise Modular Routers under /api
+# Include Modular Routers under /api
 # auth_router handles /register and /login without token, and /me, /promote with token
 app.include_router(auth_router, prefix=settings.API_PREFIX)
 

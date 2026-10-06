@@ -37,7 +37,7 @@ INTENT_KEYWORDS: Dict[QueryIntent, List[str]] = {
 
 class AssistantEngine:
     """
-    Enterprise repository assistant that combines:
+    Repository assistant that combines:
     - Intent-aware retrieval boosting
     - RAG context assembly with citations
     - Dependency graph relationship extraction

@@ -17,7 +17,7 @@ class DocumentationGenerator:
 
         readme_md = f"""# {repo_name}
 
-AI-Generated Repository Documentation by **IntelliCodeX Enterprise**.
+AI-Generated Repository Documentation by **IntelliCodeX**.
 
 ## 📌 Repository Overview
 - **Repository Name**: `{repo_name}`

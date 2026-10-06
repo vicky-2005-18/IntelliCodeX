@@ -1,5 +1,5 @@
 """
-IntelliCodeX Enterprise Configuration Module
+IntelliCodeX Configuration Module
 Centralized settings management using Pydantic BaseSettings / Settings models.
 """
 import os
@@ -77,7 +77,7 @@ def get_jwt_secret(storage_dir: str) -> str:
 
 
 class Settings(BaseModel):
-    PROJECT_NAME: str = "IntelliCodeX Enterprise"
+    PROJECT_NAME: str = "IntelliCodeX"
     VERSION: str = "1.0.0"
     API_PREFIX: str = "/api"
 
