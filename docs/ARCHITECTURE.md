@@ -93,7 +93,7 @@ graph TD
 1. **Standalone CLI (Primary Interface)**:
    - [`cli.py`](../cli.py)
    - Invocation: `python cli.py [repo_path] [--backend ollama|tfidf]` or Windows launcher [`run_cli.bat`](../run_cli.bat).
-2. **FastAPI Enterprise Backend (Local API Server)**:
+2. **FastAPI Backend Server (Local API Server)**:
    - [`backend/main.py`](../backend/main.py)
    - Invocation: `python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload` or Windows launcher [`run.bat`](../run.bat) (Option 3).
 3. **Interactive Launcher**:
@@ -312,3 +312,66 @@ sequenceDiagram
   ```
 - All AST graph navigation, embedding lookups, and bug localization execute on the central server and stream results back to the remote CLI client over `/api` REST endpoints.
 
+---
+
+## 8. Hybrid Deterministic Static Analysis + LLM Inference Architecture
+
+IntelliCodeX implements a **deterministic-first, LLM-second** inference pipeline. Static analyzers run synchronously before any LLM token is generated. This design guarantees reproducibility for syntax-class defects, eliminates a class of hallucinations, and keeps LLM costs proportional to query complexity.
+
+### 8.1 Two-Stage Pipeline
+
+```mermaid
+flowchart TD
+    Input(["Developer Query / @file target"])
+
+    subgraph Stage1 ["Stage 1 — Deterministic Static Pre-Pass (Synchronous, ~0.1ms)"]
+        S1A["ast.parse — Python Syntax Check"]
+        S1B["pyflakes.api.checkPath — Undefined Variables & Missing Imports"]
+        S1C["Tree-Sitter ERROR node scan — Multi-Language Syntax Errors"]
+        S1D["bandit AST pass — Security Vulnerability Patterns (security: command)"]
+    end
+
+    subgraph Stage2 ["Stage 2 — Grounded LLM Inference (Async, Ollama)"]
+        S2A["Hybrid RAG Context Assembly (BM25 + Dense RRF + Graph Expansion)"]
+        S2B["Anti-Hallucination Quote Normalization"]
+        S2C["Grounded Prompt Assembly (temp=0.0–0.2)"]
+        S2D["LLM Response with STATIC prefixed findings merged"]
+    end
+
+    Input --> Stage1
+    S1A & S1B & S1C & S1D --> Decision{"Syntax errors found?"}
+    Decision -- "Yes" --> EarlyReturn(["Return [STATIC] errors immediately. Abort LLM decomposition."])
+    Decision -- "No" --> Stage2
+    S2A --> S2B --> S2C --> S2D
+    S2D --> Output(["Developer Response: Static findings + Grounded LLM analysis"])
+```
+
+### 8.2 Stage 1 — Static Analysis Pre-Pass
+
+| Analyzer | Scope | Defects Caught | Latency |
+| :--- | :--- | :--- | :---: |
+| `ast.parse` | Python | Syntax errors (SyntaxError, IndentationError) | ~0.05ms |
+| `pyflakes.api.checkPath` | Python | Undefined variables, unused imports, missing imports | ~0.1ms |
+| Tree-Sitter `ERROR` node scan | 9 languages | Language-agnostic syntax tree corruption markers | ~0.5ms |
+| `bandit` AST pass | Python (`security:` cmd) | OWASP Top-10 Python patterns (hardcoded secrets, SQL injection, shell injection) | ~50ms |
+
+**Key property**: Stage 1 runs with **zero code execution** — only AST traversal and static pattern matching. No subprocess is spawned.
+
+### 8.3 Stage 2 — Grounded LLM Inference
+
+LLM inference is invoked **only when Stage 1 finds no syntax-blocking errors**. All prompts are assembled with:
+
+1. **RAG Context**: Top-K code chunks retrieved via Hybrid BM25 + Dense RRF, expanded with call-graph callers (score ×0.8) and import dependencies (score ×0.7), bounded by a 3000-token budget.
+2. **Quote Normalization**: Before any LLM claim is accepted, cited code snippets are normalized (stripped of `N |` line-number prefixes, code fences, and leading/trailing whitespace) and matched against the ground-truth source file. Unmatched quotes are rejected and logged under `INTELLICODEX_DEBUG_PROMPT`.
+3. **Temperature Control**: Bug analysis uses `temperature=0.0` for maximum determinism; general Q&A and documentation generation use `temperature=0.2`.
+4. **Label Merging**: Static findings (`[STATIC]`) are prepended to LLM output to present a unified, prioritized report.
+
+### 8.4 Design Rationale
+
+| Design Decision | Reason |
+| :--- | :--- |
+| Static before LLM | Syntax errors make LLM-level reasoning unreliable; abort early saves tokens and is always correct |
+| Quote filter before acceptance | Prevents LLM from fabricating line numbers or code that does not exist in the actual file |
+| Single whole-file context prompt | Avoids repetitive per-function round-trips which multiply inference latency on CPU/7B models |
+| Strict `temperature=0.0` for bug analysis | Reproducible outputs allow benchmark comparisons across runs |
+| `[STATIC]` label prefix | Communicates to developers which findings are deterministic vs. probabilistic |

@@ -34,7 +34,8 @@ IntelliCodeX is built for software engineers, security auditors, and system arch
 * **Safe Patch Generation & Application**: Deterministic low-temperature code synthesis, unified Git diff generation, AST syntax validation, and atomic file overwrites with timestamped `.bak` backups.
 * **Live File Watcher**: Real-time filesystem observer using `watchdog` with debounced delta indexing and CLI controls (`watch:status`, `watch:start`, `watch:stop`).
 * **Zero-Latency SQLite Cache**: SHA-256 content hashing enabling $<5\text{ms}$ index reloading for unmodified repositories.
-* **Interactive CLI Tooling**: Standalone terminal interface with command loops (`fix:`, `deps:`, `callers:`, `top`, `persona`, `model`, `repo`, `hooks`).
+* **Retrieval View & Provenance Trace**: Full RAG pipeline inspection via `explain: <question>` and `POST /api/query/explain` revealing BM25 vs Dense hits, RRF fusion ranks, call/dep graph additions with causality, and token budgeting.
+* **Interactive CLI Tooling**: Standalone terminal interface with command loops (`explain:`, `search:`, `fix:`, `deps:`, `callers:`, `top`, `persona`, `model`, `repo`, `hooks`).
 
 ### Important Limitations
 * **Multi-Turn Patching**: Patch generation supports multi-turn refinement with sandbox test runs (up to 3 iterations) when a repository path is provided. Tests are run after each iteration; if tests pass or are skipped, refinement stops. If no repository path is provided, patch generation is single-shot without test validation.
@@ -238,10 +239,40 @@ python cli.py sample_repo --backend tfidf
 # 3. Localize a bug and generate an automated patch:
 >> fix:KeyError in auth.py
 
-# 4. View module dependencies:
+# 4. Inspect RAG retrieval provenance (BM25 vs Dense, RRF ranks, graph expansion, tokens):
+>> explain: authenticate --no-answer
+
+--- Retrieval Pipeline Provenance ---
+Question: authenticate
+Query Terms (BM25 tokenized): ['authenticate']
+Timings (ms): embed=0.1 | bm25=0.2 | dense=0.3 | fuse=0.1 | expand=0.1 | llm=0.0
+
+BM25 Lexical Hits:
+  [Rank 1] pkg\auth.py::authenticate (Lines 11–20) - Score: 0.3541
+
+Dense Vector Hits:
+  [Rank 1] pkg\auth.py::authenticate (Lines 11–20) - Score: 0.8124
+  [Rank 2] pkg\auth.py::SessionManager (Lines 23–36) - Score: 0.7410
+  [Rank 3] pkg\__init__.py::— (Lines 1–1) - Score: 0.6980
+  [Rank 4] pkg\db.py::get_user_by_username (Lines 8–10) - Score: 0.6540
+  [Rank 5] pkg\auth.py::hash_password (Lines 6–8) - Score: 0.6210
+
+Merged RRF Ranking:
+  [Rank 1] pkg\auth.py::authenticate (Lines 11–20) - BM25: 1 | Dense: 1 | RRF: 0.03279
+  [Rank 2] pkg\auth.py::SessionManager (Lines 23–36) - BM25: - | Dense: 2 | RRF: 0.01613
+  [Rank 3] pkg\__init__.py::— (Lines 1–1) - BM25: - | Dense: 3 | RRF: 0.01587
+  [Rank 4] pkg\db.py::get_user_by_username (Lines 8–10) - BM25: - | Dense: 4 | RRF: 0.01562
+  [Rank 5] pkg\auth.py::hash_password (Lines 6–8) - BM25: - | Dense: 5 | RRF: 0.01538
+
+Graph Context Additions:
+  [# 1] pkg\db.py::add_user (Reason: import, Caused By: pkg\auth.py::authenticate)
+
+Budget: 5 chunks, 427 / 3,000 tokens (Dropped: pkg\__init__.py::empty)
+
+# 5. View module dependencies:
 >> deps:sample_repo/auth.py
 
-# 5. Check top central files:
+# 6. Check top central files:
 >> top
 ```
 
@@ -253,7 +284,7 @@ python cli.py sample_repo --backend tfidf
 * 🏛️ [System Architecture & Design (docs/ARCHITECTURE.md)](docs/ARCHITECTURE.md) — Component decomposition, technology stack, sequence diagrams, and security boundaries.
 * 📊 [Project Implementation Status (docs/PROJECT_STATUS.md)](docs/PROJECT_STATUS.md) — Evidence-based status matrix grounded in passing test suites and Git commit state.
 * 🗺️ [Engineering Roadmap (docs/ROADMAP.md)](docs/ROADMAP.md) — Prioritized milestones, concrete next tasks, and effort estimates.
-* 🧪 [Testing & Verification Guide (docs/TESTING.md)](docs/TESTING.md) — Test suite layout, execution commands, and empirical test results (238/242 passed).
+* 🧪 [Testing & Verification Guide (docs/TESTING.md)](docs/TESTING.md) — Test suite layout, execution commands, and empirical test results (272/276 passed).
 * 📝 [Architecture Decision Records (docs/decisions/README.md)](docs/decisions/README.md) — Formal ADR log, guidelines, and rationale records.
 
 ---

@@ -109,6 +109,7 @@ def reciprocal_rank_fusion(
     top_k: int = 5,
     list_names: Optional[List[str]] = None,
     include_reason: bool = False,
+    trace: Optional[Any] = None,
 ) -> List[Any]:
     """
     Combines multiple ranked search results using Reciprocal Rank Fusion (RRF):
@@ -128,6 +129,7 @@ def reciprocal_rank_fusion(
     chunk_map: Dict[str, CodeChunk] = {}
     scores: Dict[str, float] = defaultdict(float)
     matched_sources: Dict[str, Set[str]] = defaultdict(set)
+    rank_by_source: Dict[str, Dict[str, int]] = defaultdict(dict)
 
     for rank_idx, r_list in enumerate(ranked_lists):
         w = weights[rank_idx] if rank_idx < len(weights) else 1.0
@@ -138,9 +140,31 @@ def reciprocal_rank_fusion(
             chunk_map[cid] = chunk
             scores[cid] += w / (k + rank)
             matched_sources[cid].add(name)
+            rank_by_source[name][cid] = rank
 
     # Sort descending by fused RRF score
     sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+
+    if trace is not None:
+        from core.retrieval_trace import FusedHit
+        for cid, score in sorted_items:
+            chunk = chunk_map[cid]
+            bm25_r = rank_by_source.get("BM25", {}).get(cid)
+            dense_r = rank_by_source.get("Dense", {}).get(cid)
+            trace.fused_hits.append(
+                FusedHit(
+                    chunk.chunk_id,
+                    chunk.file_path,
+                    chunk.name or "",
+                    chunk.start_line,
+                    chunk.end_line,
+                    round(score, 5),
+                    bm25_r,
+                    dense_r,
+                    round(score, 5),
+                )
+            )
+            trace.chunk_codes[chunk.chunk_id] = chunk.code
 
     fused_results = []
     for cid, score in sorted_items:
@@ -167,13 +191,15 @@ def expand_retrieved_context(
     results: List[Any],
     dep_graph: Optional[nx.DiGraph] = None,
     call_graph: Optional[nx.DiGraph] = None,
-    store_chunks: Optional[List[CodeChunk]] = None
+    store_chunks: Optional[List[CodeChunk]] = None,
+    trace: Optional[Any] = None,
 ) -> List[Dict]:
     """
     Graph-Augmented Sub-Graph Expansion:
     Enriches top-K search results by expanding caller/callee relations from the Call Graph
     and file import links from the Dependency Graph.
     """
+    t_exp_start = time.perf_counter()
     seen_chunk_ids: Set[str] = {item[0].chunk_id for item in results}
     expanded_list: List[Dict] = []
 
@@ -217,6 +243,10 @@ def expand_retrieved_context(
                         "reason": f"Caller of {chunk.name}",
                         "is_expanded": True
                     })
+                    if trace is not None:
+                        from core.retrieval_trace import GraphAddition
+                        trace.graph_additions.append(GraphAddition(caller_id, "caller", chunk.chunk_id))
+                        trace.chunk_codes[caller_id] = chunk_map[caller_id].code
 
             # Add callee target chunks
             successors = list(call_graph.successors(chunk.chunk_id))
@@ -229,6 +259,10 @@ def expand_retrieved_context(
                         "reason": f"Called by {chunk.name}",
                         "is_expanded": True
                     })
+                    if trace is not None:
+                        from core.retrieval_trace import GraphAddition
+                        trace.graph_additions.append(GraphAddition(callee_id, "callee", chunk.chunk_id))
+                        trace.chunk_codes[callee_id] = chunk_map[callee_id].code
 
     # 3. Expand Dependency Graph relations — O(1) per imported file via pre-built index
     if dep_graph is not None:
@@ -250,15 +284,33 @@ def expand_retrieved_context(
                                 "reason": f"Imported by {chunk.file_path}",
                                 "is_expanded": True
                             })
+                            if trace is not None:
+                                from core.retrieval_trace import GraphAddition
+                                trace.graph_additions.append(GraphAddition(c.chunk_id, "import", chunk.chunk_id))
+                                trace.chunk_codes[c.chunk_id] = c.code
                             break
+
+    if trace is not None:
+        trace.timings_ms["expand"] = round((time.perf_counter() - t_exp_start) * 1000, 2)
 
     return expanded_list
 
 
-def format_context(expanded_results: List[Any], max_token_budget: int = 3000) -> str:
+def format_context(expanded_results: List[Any], max_token_budget: int = 3000, trace: Optional[Any] = None) -> str:
     """Formats expanded code chunks into contiguous line-numbered blocks per file."""
     from collections import defaultdict
     
+    # Candidate chunk list for budget accounting
+    all_candidates: List[CodeChunk] = []
+    seen_cand_ids: Set[str] = set()
+    for item in expanded_results:
+        chunk_obj = item[0] if isinstance(item, tuple) else (item.get("chunk") if isinstance(item, dict) else None)
+        if chunk_obj and chunk_obj.chunk_id not in seen_cand_ids:
+            seen_cand_ids.add(chunk_obj.chunk_id)
+            all_candidates.append(chunk_obj)
+            if trace is not None:
+                trace.chunk_codes[chunk_obj.chunk_id] = chunk_obj.code
+
     # Group chunks by file
     file_chunks = defaultdict(list)
     for item in expanded_results:
@@ -274,6 +326,7 @@ def format_context(expanded_results: List[Any], max_token_budget: int = 3000) ->
     blocks = []
     char_budget = max_token_budget * 4
     current_chars = 0
+    included_chunk_ids: List[str] = []
     
     for file_path in sorted(file_chunks.keys()):
         chunks = file_chunks[file_path]
@@ -307,10 +360,24 @@ def format_context(expanded_results: List[Any], max_token_budget: int = 3000) ->
             blocks.append(truncated)
             break
         
+        for c in chunks:
+            if c.chunk_id not in included_chunk_ids:
+                included_chunk_ids.append(c.chunk_id)
         blocks.append(block_text)
         current_chars += len(block_text)
     
-    return "\n\n".join(blocks)
+    final_context = "\n\n".join(blocks)
+
+    if trace is not None:
+        dropped_chunk_ids = [c.chunk_id for c in all_candidates if c.chunk_id not in included_chunk_ids]
+        used_tokens = min(max_token_budget, max(0, len(final_context) // 4))
+        trace.budget.max_tokens = max_token_budget
+        trace.budget.used_tokens = used_tokens
+        trace.budget.included_chunk_ids = list(included_chunk_ids)
+        trace.budget.dropped_chunk_ids = list(dropped_chunk_ids)
+
+    return final_context
+
 
 
 class QueryEngine:
@@ -375,7 +442,7 @@ class QueryEngine:
         """Clears current conversation history."""
         self.memory.clear()
 
-    def retrieve(self, query: str, top_k: int = 5, file_filter: Optional[str] = None) -> List[Tuple[CodeChunk, float]]:
+    def retrieve(self, query: str, top_k: int = 5, file_filter: Optional[str] = None, trace: Optional[Any] = None) -> List[Tuple[CodeChunk, float]]:
         """Retrieves top-K matches using Hybrid Search (RRF) or pure Dense Vector Search."""
         # When file_filter is specified, retrieve ALL chunks from that file
         if file_filter:
@@ -386,23 +453,74 @@ class QueryEngine:
 
         if self.hybrid_search and self.lexical_index is not None and len(self.lexical_index) > 0:
             candidate_k = max(top_k * 4, 20)
+            t0 = time.perf_counter()
             query_vec = self.embedder.embed([query])[0]
+            t_embed = (time.perf_counter() - t0) * 1000
+
+            t0 = time.perf_counter()
             dense_results = self.store.search(query_vec, top_k=candidate_k)
+            t_dense = (time.perf_counter() - t0) * 1000
+
+            t0 = time.perf_counter()
             bm25_results = self.lexical_index.search(query, top_k=candidate_k)
+            t_bm25 = (time.perf_counter() - t0) * 1000
+
+            t0 = time.perf_counter()
             results = reciprocal_rank_fusion(
                 [dense_results, bm25_results],
                 list_names=["Dense", "BM25"],
                 k=self.rrf_k,
                 top_k=top_k,
                 include_reason=False,
+                trace=trace,
             )
+            t_fuse = (time.perf_counter() - t0) * 1000
+
+            if trace is not None:
+                from core.retrieval_trace import RetrievalHit
+                trace.timings_ms["embed"] = round(t_embed, 2)
+                trace.timings_ms["dense"] = round(t_dense, 2)
+                trace.timings_ms["bm25"] = round(t_bm25, 2)
+                trace.timings_ms["fuse"] = round(t_fuse, 2)
+                trace.bm25_hits = [
+                    RetrievalHit(c.chunk_id, c.file_path, c.name or "", c.start_line, c.end_line, float(s))
+                    for c, s in bm25_results[:top_k]
+                ]
+                trace.dense_hits = [
+                    RetrievalHit(c.chunk_id, c.file_path, c.name or "", c.start_line, c.end_line, float(s))
+                    for c, s in dense_results[:top_k]
+                ]
+                for c, _ in bm25_results[:top_k]:
+                    trace.chunk_codes[c.chunk_id] = c.code
+                for c, _ in dense_results[:top_k]:
+                    trace.chunk_codes[c.chunk_id] = c.code
         else:
+            t0 = time.perf_counter()
             query_vec = self.embedder.embed([query])[0]
+            t_embed = (time.perf_counter() - t0) * 1000
+
+            t0 = time.perf_counter()
             results = self.store.search(query_vec, top_k=top_k)
+            t_dense = (time.perf_counter() - t0) * 1000
+
+            if trace is not None:
+                from core.retrieval_trace import RetrievalHit, FusedHit
+                trace.timings_ms["embed"] = round(t_embed, 2)
+                trace.timings_ms["dense"] = round(t_dense, 2)
+                trace.dense_hits = [
+                    RetrievalHit(c.chunk_id, c.file_path, c.name or "", c.start_line, c.end_line, float(s))
+                    for c, s in results[:top_k]
+                ]
+                trace.fused_hits = [
+                    FusedHit(c.chunk_id, c.file_path, c.name or "", c.start_line, c.end_line, float(s), None, idx, float(s))
+                    for idx, (c, s) in enumerate(results[:top_k], start=1)
+                ]
+                for c, _ in results[:top_k]:
+                    trace.chunk_codes[c.chunk_id] = c.code
 
         return results
 
-    def retrieve_with_reasons(self, query: str, top_k: int = 5, file_filter: Optional[str] = None) -> List[Tuple[CodeChunk, float, str]]:
+    def retrieve_with_reasons(self, query: str, top_k: int = 5, file_filter: Optional[str] = None, trace: Optional[Any] = None) -> List[Tuple[CodeChunk, float, str]]:
         """Retrieves top-K matches with reason annotations for context expansion."""
         # When file_filter is specified, retrieve ALL chunks from that file
         if file_filter:
@@ -413,26 +531,78 @@ class QueryEngine:
 
         if self.hybrid_search and self.lexical_index is not None and len(self.lexical_index) > 0:
             candidate_k = max(top_k * 4, 20)
+            t0 = time.perf_counter()
             query_vec = self.embedder.embed([query])[0]
+            t_embed = (time.perf_counter() - t0) * 1000
+
+            t0 = time.perf_counter()
             dense_results = self.store.search(query_vec, top_k=candidate_k)
+            t_dense = (time.perf_counter() - t0) * 1000
+
+            t0 = time.perf_counter()
             bm25_results = self.lexical_index.search(query, top_k=candidate_k)
+            t_bm25 = (time.perf_counter() - t0) * 1000
+
+            t0 = time.perf_counter()
             results = reciprocal_rank_fusion(
                 [dense_results, bm25_results],
                 list_names=["Dense", "BM25"],
                 k=self.rrf_k,
                 top_k=top_k,
                 include_reason=True,
+                trace=trace,
             )
+            t_fuse = (time.perf_counter() - t0) * 1000
+
+            if trace is not None:
+                from core.retrieval_trace import RetrievalHit
+                trace.timings_ms["embed"] = round(t_embed, 2)
+                trace.timings_ms["dense"] = round(t_dense, 2)
+                trace.timings_ms["bm25"] = round(t_bm25, 2)
+                trace.timings_ms["fuse"] = round(t_fuse, 2)
+                trace.bm25_hits = [
+                    RetrievalHit(c.chunk_id, c.file_path, c.name or "", c.start_line, c.end_line, float(s))
+                    for c, s in bm25_results[:top_k]
+                ]
+                trace.dense_hits = [
+                    RetrievalHit(c.chunk_id, c.file_path, c.name or "", c.start_line, c.end_line, float(s))
+                    for c, s in dense_results[:top_k]
+                ]
+                for c, _ in bm25_results[:top_k]:
+                    trace.chunk_codes[c.chunk_id] = c.code
+                for c, _ in dense_results[:top_k]:
+                    trace.chunk_codes[c.chunk_id] = c.code
         else:
+            t0 = time.perf_counter()
             query_vec = self.embedder.embed([query])[0]
+            t_embed = (time.perf_counter() - t0) * 1000
+
+            t0 = time.perf_counter()
             dense_results = self.store.search(query_vec, top_k=top_k)
+            t_dense = (time.perf_counter() - t0) * 1000
+
             results = [(c, s, "Direct Vector Match") for c, s in dense_results]
+
+            if trace is not None:
+                from core.retrieval_trace import RetrievalHit, FusedHit
+                trace.timings_ms["embed"] = round(t_embed, 2)
+                trace.timings_ms["dense"] = round(t_dense, 2)
+                trace.dense_hits = [
+                    RetrievalHit(c.chunk_id, c.file_path, c.name or "", c.start_line, c.end_line, float(s))
+                    for c, s in dense_results[:top_k]
+                ]
+                trace.fused_hits = [
+                    FusedHit(c.chunk_id, c.file_path, c.name or "", c.start_line, c.end_line, float(s), None, idx, float(s))
+                    for idx, (c, s) in enumerate(dense_results[:top_k], start=1)
+                ]
+                for c, _ in dense_results[:top_k]:
+                    trace.chunk_codes[c.chunk_id] = c.code
 
         return results
 
-    def retrieve_expanded(self, query: str, top_k: int = 5, file_filter: Optional[str] = None) -> List[Dict]:
+    def retrieve_expanded(self, query: str, top_k: int = 5, file_filter: Optional[str] = None, trace: Optional[Any] = None) -> List[Dict]:
         """Retrieves top-K matches and applies graph-augmented context expansion."""
-        detailed_results = self.retrieve_with_reasons(query, top_k=top_k, file_filter=file_filter)
+        detailed_results = self.retrieve_with_reasons(query, top_k=top_k, file_filter=file_filter, trace=trace)
         store_chunks = getattr(self.store, "chunks", [])
         if file_filter:
             f = file_filter.replace("\\", "/").lower()
@@ -441,7 +611,8 @@ class QueryEngine:
             detailed_results,
             dep_graph=self.dep_graph,
             call_graph=self.call_graph,
-            store_chunks=store_chunks
+            store_chunks=store_chunks,
+            trace=trace,
         )
 
     def ask(
@@ -451,12 +622,34 @@ class QueryEngine:
         use_memory: bool = True,
         max_token_budget: int = 3000,
         file_filter: Optional[str] = None,
+        trace: Optional[Any] = None,
+        no_answer: bool = False,
     ) -> dict:
         """Performs RAG query answering with context expansion, conversation history, and persona reasoning."""
         t_start = time.perf_counter()
-        expanded_results = self.retrieve_expanded(question, top_k=top_k, file_filter=file_filter)
+
+        if trace is not None:
+            from core.lexical_index import tokenize_code
+            from core.embedder import TfidfEmbedder
+            trace.question = question
+            trace.query_terms = tokenize_code(question)
+            trace.embedder = "tfidf" if isinstance(self.embedder, TfidfEmbedder) else "ollama"
+
+        expanded_results = self.retrieve_expanded(question, top_k=top_k, file_filter=file_filter, trace=trace)
         t_retrieval = time.perf_counter() - t_start
-        context = format_context(expanded_results, max_token_budget=max_token_budget)
+        context = format_context(expanded_results, max_token_budget=max_token_budget, trace=trace)
+
+        # Sources
+        inc_cids = set(trace.budget.included_chunk_ids) if (trace and trace.budget.included_chunk_ids) else set()
+        sources = []
+        for item in expanded_results:
+            c = item[0] if isinstance(item, tuple) else (item.get("chunk") if isinstance(item, dict) else None)
+            if c and (not inc_cids or c.chunk_id in inc_cids):
+                src = f"{c.file_path}:{c.start_line}-{c.end_line}"
+                if src not in sources:
+                    sources.append(src)
+        if trace is not None:
+            trace.sources = sources
 
         retrieved_chunks = []
         for item in expanded_results:
@@ -483,7 +676,20 @@ class QueryEngine:
             "question": question,
             "persona": self.active_persona,
             "retrieved_chunks": retrieved_chunks,
+            "sources": sources,
         }
+
+        if no_answer:
+            if trace is not None:
+                trace.answer = None
+                trace.timings_ms["llm"] = 0.0
+            response["answer"] = None
+            response["elapsed_seconds"] = round(time.perf_counter() - t_start, 3)
+            response["retrieval_seconds"] = round(t_retrieval, 3)
+            response["llm_seconds"] = 0.0
+            if trace is not None:
+                response["trace"] = trace
+            return response
 
         if self.llm is None:
             relevant_items = [
@@ -515,6 +721,10 @@ class QueryEngine:
             response["elapsed_seconds"] = round(t_total, 3)
             response["retrieval_seconds"] = round(t_retrieval, 3)
             response["llm_seconds"] = round(max(0.0, t_total - t_retrieval), 3)
+            if trace is not None:
+                trace.answer = ans
+                trace.timings_ms["llm"] = 0.0
+                response["trace"] = trace
             if use_memory:
                 self.memory.add_turn(question, ans)
             return response
@@ -566,6 +776,10 @@ class QueryEngine:
                 response["elapsed_seconds"] = round(t_total, 3)
                 response["retrieval_seconds"] = round(t_retrieval, 3)
                 response["llm_seconds"] = 0.0
+                if trace is not None:
+                    trace.answer = answer
+                    trace.timings_ms["llm"] = 0.0
+                    response["trace"] = trace
                 if use_memory:
                     self.memory.add_turn(question, answer)
                 return response
@@ -590,6 +804,7 @@ class QueryEngine:
                     f.write(debug_content)
                 print(f"[DEBUG] Runtime prompt written to {debug_path} (estimated {estimated_tokens} tokens)")
             
+            t_llm0 = time.perf_counter()
             runtime_answer = self.llm.generate(runtime_prompt, system=self.system_prompt, temperature=0.0)
             
             if DEBUG_PROMPT:
@@ -625,6 +840,8 @@ class QueryEngine:
                 "IMPORTANT: When reporting bugs or issues, only report those that exist in the files shown in context below. "
                 "Do NOT attribute a bug from one file to another file. For general questions, use the provided context accurately.\n\n"
             )
+            t_llm0 = time.perf_counter()
+
         prompt_parts = []
         if history_str:
             prompt_parts.append(history_str)
@@ -657,12 +874,16 @@ class QueryEngine:
                 answer = self._format_merged_findings(merged)
 
         t_total = time.perf_counter() - t_start
-        t_llm = max(0.0, t_total - t_retrieval)
+        t_llm = max(0.0, time.perf_counter() - t_llm0)
 
         response["answer"] = answer
         response["elapsed_seconds"] = round(t_total, 3)
         response["retrieval_seconds"] = round(t_retrieval, 3)
         response["llm_seconds"] = round(t_llm, 3)
+        if trace is not None:
+            trace.answer = answer
+            trace.timings_ms["llm"] = round(t_llm * 1000, 2)
+            response["trace"] = trace
         if use_memory:
             self.memory.add_turn(question, answer)
         return response

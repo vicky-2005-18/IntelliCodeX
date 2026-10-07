@@ -126,11 +126,11 @@
   - Build and validate `Dockerfile.sandbox` in containerized environments; update status from "unverified" to "verified".
 
 ### Phase 5: Research Paper Synchronization (1 Working Day)
-- [ ] Add formal Implementation vs Paper status matrix (Verified, Partial, Future Work).
-- [ ] Document hybrid deterministic static analysis + LLM inference architecture.
-- [ ] Insert empirical benchmark numbers into evaluation section from `docs/LLM_EVAL.md`.
-- [ ] Realign terminology: change "distributed architecture" to "client-server architecture".
-- [ ] Shift unverified claims (e.g., Web UI, autonomous CI/CD agents, multi-repo distributed indexing) to Future Work.
+- [x] Add formal Implementation vs Paper status matrix (Verified, Partial, Future Work).
+- [x] Document hybrid deterministic static analysis + LLM inference architecture.
+- [x] Insert empirical benchmark numbers into evaluation section from `docs/LLM_EVAL.md`.
+- [x] Realign terminology: change "distributed architecture" to "client-server architecture".
+- [x] Shift unverified claims (e.g., Web UI, autonomous CI/CD agents, multi-repo distributed indexing) to Future Work.
 
 ---
 

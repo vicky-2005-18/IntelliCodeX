@@ -2,8 +2,8 @@
 
 > **Inspection & Execution Date**: 2026-10-07
 > **Environment**: Windows 11, Python 3.14
-> **Automated Test Results**: **265 Passed**, 4 Skipped, 0 Failed (Duration: ~17 seconds)
-> **Target Scope**: CLI Core, Tree-Sitter Parsers, FAISS Vector Engine, RAG, Patch Generator, Security Hardening, Anti-Hallucination, Concurrency Serialization, Remote Server Bridge, Bandit AST Security, 30-Query MRR Benchmark
+> **Automated Test Results**: **272 Passed**, 4 Skipped, 0 Failed (Duration: ~16 seconds)
+> **Target Scope**: CLI Core, Tree-Sitter Parsers, FAISS Vector Engine, RAG, Patch Generator, Security Hardening, Anti-Hallucination, Concurrency Serialization, Remote Server Bridge, Bandit AST Security, 30-Query MRR Benchmark, Retrieval View Provenance Trace
 
 ---
 
@@ -44,7 +44,8 @@ tests/
 ├── test_cors_security.py                   # CORS origin/method/header validation (6 tests)
 ├── test_path_safety.py                     # Path traversal prevention for diffs and user inputs (9 tests)
 ├── test_sandbox_runner.py                  # Sandbox test execution (4 tests)
-└── test_sandbox_hardening.py               # Sandbox security hardening (18 tests)
+├── test_sandbox_hardening.py               # Sandbox security hardening (18 tests)
+└── test_retrieval_trace.py                 # Retrieval view provenance trace & CLI explain (7 tests)
 ```
 
 ---
@@ -151,23 +152,27 @@ python cli.py sample_repo --benchmark
   - *Files*: `tests/test_anti_hallucination.py`
   - *Expectation*: Context formatting renders contiguous line-numbered blocks per file; conversation memory excludes assistant answers for analysis questions; LLM receives num_ctx and temperature settings; anti-hallucination filter removes claims with nonexistent quotes; file scope can clear history.
   - *Result*: **PASSED** (6 tests passed).
+* **Scenario**: Retrieval View & Provenance Trace.
+  - *Files*: `tests/test_retrieval_trace.py`
+  - *Expectation*: Trace records BM25 & dense hits, consistent fused RRF ranks, graph expansion with caller/callee/import reasons and causing hits, budgeting partitioning (included + dropped), no-answer mode skips LLM, CLI explain command formatting, and RBAC-protected API endpoint.
+  - *Result*: **PASSED** (7 tests passed).
 
 ---
 
 ## 4. Empirical Test Execution Record
 
-* **Execution Timestamp**: 2026-10-04
-* **Execution Command**: `pytest -q` (verified from clean venv using extracted submission zip)
+* **Execution Timestamp**: 2026-10-07
+* **Execution Command**: `pytest -q`
 * **Test Summary**:
-  - Total Tests: 250
-  - Passed: 246 (98.4%)
+  - Total Tests: 276
+  - Passed: 272 (98.6%)
   - Failed: 0
-  - Skipped: 4 (1.6%)
-  - Execution Time: ~15-16 seconds
+  - Skipped: 4 (1.4%)
+  - Execution Time: ~16 seconds
 * **Skipped Tests**:
   - 4 symlink-related tests require Linux or elevated Windows privileges (test_symlink_safe_directory resolution in `test_path_safety.py` and `test_incremental_pipeline.py`)
 * **Warnings Summary**:
-  - 17 `RuntimeWarning: invalid value encountered in divide` in `sklearn/decomposition/_truncated_svd.py` when TruncatedSVD operates on uniform dummy test matrices where variance is zero. This is a non-fatal warning during offline fallback testing.
+  - 19 `RuntimeWarning: invalid value encountered in divide` in `sklearn/decomposition/_truncated_svd.py` when TruncatedSVD operates on uniform dummy test matrices where variance is zero. This is a non-fatal warning during offline fallback testing.
 
 ---
 

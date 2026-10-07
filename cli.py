@@ -47,11 +47,13 @@ try:
     from rich.table import Table
     from rich.syntax import Syntax
     from rich.text import Text
+    from rich.columns import Columns
     console = Console()
     HAS_RICH = True
 except ImportError:
     console = None
     HAS_RICH = False
+    Columns = None
 
 try:
     from prompt_toolkit import PromptSession
@@ -201,7 +203,8 @@ Available Commands:
   watch:stop / watch:start - Stop or restart real-time file watching
   hybrid / hybrid:status - Check hybrid search status (BM25 + Dense RRF)
   hybrid:on / hybrid:off - Enable or disable BM25 hybrid ranking
-  files / ls             - List all indexed source files in the active repository
+  search:<query>         - Instant lexical & semantic search without LLM wait
+  explain:<query>        - Inspect RAG retrieval & fusion provenance (BM25, dense, RRF, graph, tokens)
   clear / cls            - Clear terminal screen
   help / ?               - Show this help message
   exit / quit            - Exit IntelliCodeX CLI
@@ -498,6 +501,7 @@ def render_help_panel():
         groups = [
             ("Search & AI", "cyan", [
                 ("search:<query>",  "Instant retrieval without LLM (fast, no AI wait)"),
+                ("explain:<query>", "Inspect RAG pipeline (BM25/Dense hits, RRF, graph, tokens)"),
                 ("<question>",      "Ask AI a question about the repository"),
                 ("@filename",       "Scope query to a specific file (one-shot)"),
                 ("fix:<error>",     "Diagnose error & generate automated sandbox patch"),
@@ -763,10 +767,135 @@ def render_search_results(query: str, results: list, elapsed: float):
         print()
 
 
+def render_retrieval_trace(trace, full_code: bool = False, no_answer: bool = False):
+    """
+    Renders RAG retrieval provenance trace in rich tables:
+    1. Question and query terms
+    2. Two side-by-side tables (BM25 | Dense)
+    3. Merged ranking table with bm25_rank, dense_rank, rrf_score
+    4. Graph additions with reasons
+    5. Budget line
+    6. Answer with sources (if not no_answer)
+    """
+    if HAS_RICH and console:
+        console.print()
+        console.print(Panel(
+            f"[bold cyan]Question:[/bold cyan] {trace.question}\n"
+            f"[bold yellow]Query Terms (BM25 tokenized):[/bold yellow] {trace.query_terms}\n"
+            f"[dim]Timings (ms): embed={trace.timings_ms.get('embed', 0):.1f} | "
+            f"bm25={trace.timings_ms.get('bm25', 0):.1f} | dense={trace.timings_ms.get('dense', 0):.1f} | "
+            f"fuse={trace.timings_ms.get('fuse', 0):.1f} | expand={trace.timings_ms.get('expand', 0):.1f} | "
+            f"llm={trace.timings_ms.get('llm', 0):.1f}[/dim]",
+            title="[bold bright_blue]Retrieval Pipeline Provenance[/bold bright_blue]",
+            border_style="bright_blue",
+        ))
+
+        t_bm25 = Table(title="BM25 Lexical Hits", border_style="yellow", padding=(0, 1))
+        t_bm25.add_column("Rank", style="dim", width=5)
+        t_bm25.add_column("File::Symbol", style="yellow")
+        t_bm25.add_column("Lines", style="dim", width=10)
+        t_bm25.add_column("Score", style="bold green", justify="right")
+        if not trace.bm25_hits:
+            t_bm25.add_row("-", "(no BM25 hits)", "-", "-")
+        else:
+            for idx, h in enumerate(trace.bm25_hits, start=1):
+                sym = h[2] or "—"
+                t_bm25.add_row(str(idx), f"{h[1]}::{sym}", f"{h[3]}–{h[4]}", f"{h[5]:.4f}")
+
+        t_dense = Table(title="Dense Vector Hits", border_style="cyan", padding=(0, 1))
+        t_dense.add_column("Rank", style="dim", width=5)
+        t_dense.add_column("File::Symbol", style="cyan")
+        t_dense.add_column("Lines", style="dim", width=10)
+        t_dense.add_column("Score", style="bold green", justify="right")
+        if not trace.dense_hits:
+            t_dense.add_row("-", "(no dense hits)", "-", "-")
+        else:
+            for idx, h in enumerate(trace.dense_hits, start=1):
+                sym = h[2] or "—"
+                t_dense.add_row(str(idx), f"{h[1]}::{sym}", f"{h[3]}–{h[4]}", f"{h[5]:.4f}")
+
+        if Columns:
+            console.print(Columns([t_bm25, t_dense]))
+        else:
+            console.print(t_bm25)
+            console.print(t_dense)
+
+        t_fused = Table(title="Merged RRF Ranking", border_style="bright_blue", padding=(0, 1))
+        t_fused.add_column("Rank", style="dim", width=5)
+        t_fused.add_column("File::Symbol", style="bold cyan")
+        t_fused.add_column("Lines", style="dim", width=10)
+        t_fused.add_column("BM25 Rank", style="yellow", justify="right")
+        t_fused.add_column("Dense Rank", style="cyan", justify="right")
+        t_fused.add_column("RRF Score", style="bold green", justify="right")
+        t_fused.add_column("Code Preview", style="white")
+
+        if not trace.fused_hits:
+            t_fused.add_row("-", "(no fused hits)", "-", "-", "-", "-", "-")
+        else:
+            for idx, h in enumerate(trace.fused_hits, start=1):
+                bm25_r = str(h[6]) if h[6] is not None else "-"
+                dense_r = str(h[7]) if h[7] is not None else "-"
+                rrf_s = f"{h[8]:.5f}"
+                code_raw = trace.chunk_codes.get(h[0], "")
+                if full_code:
+                    preview = code_raw.strip()
+                else:
+                    lines = code_raw.strip().splitlines()
+                    preview = "\n".join(lines[:3]) + ("\n..." if len(lines) > 3 else "")
+                sym = h[2] or "—"
+                t_fused.add_row(str(idx), f"{h[1]}::{sym}", f"{h[3]}–{h[4]}", bm25_r, dense_r, rrf_s, preview)
+        console.print(t_fused)
+
+        t_graph = Table(title="Graph Context Additions", border_style="magenta", padding=(0, 1))
+        t_graph.add_column("#", style="dim", width=4)
+        t_graph.add_column("Target (Chunk / File)", style="magenta")
+        t_graph.add_column("Reason", style="bold yellow")
+        t_graph.add_column("Caused By (Fused Hit)", style="dim")
+        if not trace.graph_additions:
+            t_graph.add_row("-", "(no graph additions)", "-", "-")
+        else:
+            for idx, g in enumerate(trace.graph_additions, start=1):
+                t_graph.add_row(str(idx), str(g[0]), str(g[1]), str(g[2] or "-"))
+        console.print(t_graph)
+
+        b = trace.budget
+        inc_count = len(b.included_chunk_ids)
+        drop_detail = f" (Dropped: {', '.join(b.dropped_chunk_ids)})" if b.dropped_chunk_ids else " (0 dropped)"
+        console.print(f"[bold green]Budget:[/bold green] {inc_count} chunks, {b.used_tokens:,} / {b.max_tokens:,} tokens{drop_detail}")
+        console.print()
+
+        if not no_answer and trace.answer:
+            src_str = ", ".join(trace.sources) if trace.sources else "None"
+            ans_box = f"{trace.answer}\n\n[dim]Sources: {src_str}[/dim]"
+            console.print(Panel(ans_box, title="[bold cyan]AI Answer & Sources[/bold cyan]", border_style="cyan"))
+            console.print()
+    else:
+        print(f"\n--- Question: {trace.question} ---")
+        print(f"Query terms: {trace.query_terms}")
+        print("\n--- BM25 Hits ---")
+        for idx, h in enumerate(trace.bm25_hits, start=1):
+            print(f"  [{idx}] {h[1]}::{h[2]} (lines {h[3]}-{h[4]}, score={h[5]:.4f})")
+        print("\n--- Dense Hits ---")
+        for idx, h in enumerate(trace.dense_hits, start=1):
+            print(f"  [{idx}] {h[1]}::{h[2]} (lines {h[3]}-{h[4]}, score={h[5]:.4f})")
+        print("\n--- Merged RRF Ranking ---")
+        for idx, h in enumerate(trace.fused_hits, start=1):
+            print(f"  [{idx}] {h[1]}::{h[2]} (lines {h[3]}-{h[4]}, bm25_rank={h[6]}, dense_rank={h[7]}, rrf_score={h[8]:.5f})")
+        print("\n--- Graph Additions ---")
+        for idx, g in enumerate(trace.graph_additions, start=1):
+            print(f"  [{idx}] {g[0]} reason={g[1]} caused_by={g[2]}")
+        b = trace.budget
+        print(f"\nBudget: {len(b.included_chunk_ids)} chunks, {b.used_tokens} / {b.max_tokens} tokens (Dropped: {len(b.dropped_chunk_ids)})")
+        if not no_answer and trace.answer:
+            print(f"\nAnswer:\n{trace.answer}\nSources: {trace.sources}")
+        print()
+
+
 class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
     """Context-aware autocompleter for commands, files, symbols, and settings."""
 
     COMMANDS = [
+        ("explain:", "Inspect RAG retrieval & fusion provenance for a query"),
         ("help", "Show available CLI commands"),
         ("?", "Show available CLI commands"),
         ("exit", "Exit IntelliCodeX CLI"),
@@ -1624,6 +1753,69 @@ def main():
                 console.print(Panel(sec_report, title=f"[bold red]Security Scan: {sec_target}[/bold red]", border_style="red"))
             else:
                 print(f"\n{sec_report}\n")
+            continue
+
+        # Retrieval View: explain: <question> [--no-answer] [--json] [--full] [--top-k N]
+        if query.lower().startswith("explain:") or query.lower().startswith("explain "):
+            raw = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+            parts = raw.split()
+            no_answer = False
+            as_json = False
+            full_code = False
+            top_k = 5
+            clean_parts = []
+            i = 0
+            while i < len(parts):
+                p = parts[i]
+                if p == "--no-answer":
+                    no_answer = True
+                elif p == "--json":
+                    as_json = True
+                elif p == "--full":
+                    full_code = True
+                elif p.startswith("--top-k="):
+                    try:
+                        top_k = int(p.split("=", 1)[1])
+                    except ValueError:
+                        pass
+                elif p == "--top-k" and i + 1 < len(parts):
+                    try:
+                        top_k = int(parts[i + 1])
+                        i += 1
+                    except ValueError:
+                        pass
+                else:
+                    clean_parts.append(p)
+                i += 1
+
+            explain_q = " ".join(clean_parts).strip()
+            if not explain_q:
+                print("[!] Usage: explain: <question> [--no-answer] [--json] [--full] [--top-k N]\n")
+                continue
+
+            if not getattr(result, "store", None) or not getattr(result.store, "chunks", []):
+                print("[!] Repository index is empty (0 chunks). Ingest files first.\n")
+                continue
+
+            from core.retrieval_trace import RetrievalTrace
+            trace = RetrievalTrace()
+            cleaned_explain_q, mention_file = parse_mention(explain_q)
+            effective_filter = mention_file if mention_file else active_file_filter
+            search_query = cleaned_explain_q if cleaned_explain_q else (mention_file or explain_q)
+            engine.ask(
+                search_query,
+                top_k=top_k,
+                file_filter=effective_filter,
+                trace=trace,
+                no_answer=no_answer,
+            )
+
+            if as_json:
+                import json
+                print(json.dumps(trace.to_dict(), indent=2))
+                print()
+            else:
+                render_retrieval_trace(trace, full_code=full_code, no_answer=no_answer)
             continue
 
 

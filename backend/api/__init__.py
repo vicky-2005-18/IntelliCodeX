@@ -10,3 +10,4 @@ from backend.api.graph import router as graph_router
 from backend.api.analytics import router as analytics_router
 from backend.api.docs import router as docs_router
 from backend.api.review import router as review_router
+from backend.api.query import router as query_router
