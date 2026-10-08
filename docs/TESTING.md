@@ -1,9 +1,9 @@
 # IntelliCodeX — Test Suite, Verification Guide & Quality Assurance
 
-> **Inspection & Execution Date**: 2026-10-07
+> **Inspection & Execution Date**: 2026-10-08
 > **Environment**: Windows 11, Python 3.14
-> **Automated Test Results**: **272 Passed**, 4 Skipped, 0 Failed (Duration: ~16 seconds)
-> **Target Scope**: CLI Core, Tree-Sitter Parsers, FAISS Vector Engine, RAG, Patch Generator, Security Hardening, Anti-Hallucination, Concurrency Serialization, Remote Server Bridge, Bandit AST Security, 30-Query MRR Benchmark, Retrieval View Provenance Trace
+> **Automated Test Results**: **281 Passed**, 4 Skipped, 0 Failed (Duration: ~18 seconds)
+> **Target Scope**: CLI Core, Tree-Sitter Parsers, FAISS Vector Engine, RAG, Patch Generator, Security Hardening, Anti-Hallucination, Concurrency Serialization, Remote Server Bridge, Bandit AST Security, 30-Query MRR Benchmark, Retrieval View Provenance Trace, Whole RAG Pipeline View
 
 ---
 
@@ -45,7 +45,7 @@ tests/
 ├── test_path_safety.py                     # Path traversal prevention for diffs and user inputs (9 tests)
 ├── test_sandbox_runner.py                  # Sandbox test execution (4 tests)
 ├── test_sandbox_hardening.py               # Sandbox security hardening (18 tests)
-└── test_retrieval_trace.py                 # Retrieval view provenance trace & CLI explain (7 tests)
+└── test_retrieval_trace.py                 # Whole RAG pipeline inspection, compare mode, file filtering (16 tests)
 ```
 
 ---
@@ -152,23 +152,23 @@ python cli.py sample_repo --benchmark
   - *Files*: `tests/test_anti_hallucination.py`
   - *Expectation*: Context formatting renders contiguous line-numbered blocks per file; conversation memory excludes assistant answers for analysis questions; LLM receives num_ctx and temperature settings; anti-hallucination filter removes claims with nonexistent quotes; file scope can clear history.
   - *Result*: **PASSED** (6 tests passed).
-* **Scenario**: Retrieval View & Provenance Trace.
+* **Scenario**: Whole RAG Pipeline View, Index Inspection & Provenance.
   - *Files*: `tests/test_retrieval_trace.py`
-  - *Expectation*: Trace records BM25 & dense hits, consistent fused RRF ranks, graph expansion with caller/callee/import reasons and causing hits, budgeting partitioning (included + dropped), no-answer mode skips LLM, CLI explain command formatting, and RBAC-protected API endpoint.
-  - *Result*: **PASSED** (7 tests passed).
+  - *Expectation*: Trace records BM25 & dense hits, consistent fused RRF ranks, graph expansion with caller/callee/import reasons and causing hits, budgeting partitioning (included + dropped), no-answer mode skips LLM, exact augmented prompt equality (`augmented_prompt == fake_llm.last_prompt`), prompt sections capture (`instructions`, `context_chunks`, `question`, `memory`), zero disk writes for prompt/code, single-file chunk inspection (`chunks: <file>`), vector previews, side-by-side `--compare` mode calling LLM twice with clean no-context baseline, strict `@file` filtering without other-file leakage, and BM25 stopword/deduplication handling.
+  - *Result*: **PASSED** (16 tests passed).
 
 ---
 
 ## 4. Empirical Test Execution Record
 
-* **Execution Timestamp**: 2026-10-07
+* **Execution Timestamp**: 2026-10-08
 * **Execution Command**: `pytest -q`
 * **Test Summary**:
-  - Total Tests: 276
-  - Passed: 272 (98.6%)
+  - Total Tests: 285
+  - Passed: 281 (98.6%)
   - Failed: 0
   - Skipped: 4 (1.4%)
-  - Execution Time: ~16 seconds
+  - Execution Time: ~18 seconds
 * **Skipped Tests**:
   - 4 symlink-related tests require Linux or elevated Windows privileges (test_symlink_safe_directory resolution in `test_path_safety.py` and `test_incremental_pipeline.py`)
 * **Warnings Summary**:

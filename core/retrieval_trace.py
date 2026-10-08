@@ -227,7 +227,10 @@ class RetrievalTrace:
         }
     )
     embedder: Optional[str] = None
+    embedder_name: Optional[str] = None
     chunk_codes: Dict[str, str] = field(default_factory=dict)
+    augmented_prompt: Optional[str] = None
+    prompt_sections: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes trace to standard JSON-compatible dictionary."""
@@ -282,6 +285,9 @@ class RetrievalTrace:
             "answer": self.answer,
             "sources": list(self.sources) if self.sources is not None else None,
             "timings_ms": {k: float(v) for k, v in self.timings_ms.items()},
-            "embedder": self.embedder,
+            "embedder": self.embedder or self.embedder_name,
+            "embedder_name": self.embedder_name or self.embedder,
             "chunk_codes": dict(self.chunk_codes),
+            "augmented_prompt": self.augmented_prompt,
+            "prompt_sections": dict(self.prompt_sections),
         }

@@ -1,6 +1,6 @@
 # IntelliCodeX — AI-Powered Software Repository Intelligence & Code Analysis Engine
 
-[![Tests: 265 Passed](https://img.shields.io/badge/Tests-265%20Passed-brightgreen)](docs/TESTING.md)
+[![Tests: 281 Passed](https://img.shields.io/badge/Tests-281%20Passed-brightgreen)](docs/TESTING.md)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![CLI: Interactive Terminal Assistant](https://img.shields.io/badge/Interface-CLI%20First-orange)](cli.py)
 [![Backend: FastAPI Bridge](https://img.shields.io/badge/Backend-FastAPI-009688)](backend/main.py)
@@ -34,8 +34,8 @@ IntelliCodeX is built for software engineers, security auditors, and system arch
 * **Safe Patch Generation & Application**: Deterministic low-temperature code synthesis, unified Git diff generation, AST syntax validation, and atomic file overwrites with timestamped `.bak` backups.
 * **Live File Watcher**: Real-time filesystem observer using `watchdog` with debounced delta indexing and CLI controls (`watch:status`, `watch:start`, `watch:stop`).
 * **Zero-Latency SQLite Cache**: SHA-256 content hashing enabling $<5\text{ms}$ index reloading for unmodified repositories.
-* **Retrieval View & Provenance Trace**: Full RAG pipeline inspection via `explain: <question>` and `POST /api/query/explain` revealing BM25 vs Dense hits, RRF fusion ranks, call/dep graph additions with causality, and token budgeting.
-* **Interactive CLI Tooling**: Standalone terminal interface with command loops (`explain:`, `search:`, `fix:`, `deps:`, `callers:`, `top`, `persona`, `model`, `repo`, `hooks`).
+* **Whole RAG Pipeline & Retrieval View**: Transparent inspection across all RAG stages: indexing (`chunks: <file>`, `index-stats`), retrieval (BM25 vs Dense hits, RRF ranks, graph expansion), augmentation (exact augmented prompt panel with instruction block, numbered chunks, line ranges, and question), comparative generation (`--compare` side-by-side without vs with RAG), and explain mode (`--no-answer`, `--width`).
+* **Interactive CLI Tooling**: Standalone terminal interface with command loops (`explain:`, `chunks:`, `index-stats`, `search:`, `fix:`, `deps:`, `callers:`, `top`, `persona`, `model`, `repo`, `hooks`).
 
 ### Important Limitations
 * **Multi-Turn Patching**: Patch generation supports multi-turn refinement with sandbox test runs (up to 3 iterations) when a repository path is provided. Tests are run after each iteration; if tests pass or are skipped, refinement stops. If no repository path is provided, patch generation is single-shot without test validation.
@@ -239,12 +239,32 @@ python cli.py sample_repo --backend tfidf
 # 3. Localize a bug and generate an automated patch:
 >> fix:KeyError in auth.py
 
-# 4. Inspect RAG retrieval provenance (BM25 vs Dense, RRF ranks, graph expansion, tokens):
->> explain: authenticate --no-answer
+# 4. Inspect Chunk Index & Vectors for an indexed file:
+>> chunks: auth.py
+
+=== Chunk & Vector Index Inspection: pkg\auth.py ===
+Total Lines: 36 | Indexed Chunks: 6 | Embedding Dim: 512
+[1] hash_password (Lines 6–8) | Tokens: ~56 | Dim: 512 | Vector: [0.2861, 0.3299, 0.1557, 0.8477, -0.1939, 0.1097, ...]
+[2] authenticate  (Lines 11–20) | Tokens: ~120 | Dim: 512 | Vector: [0.4233, 0.6510, 0.0386, 0.0805, 0.3258, -0.4721, ...]
+[3] SessionManager (Lines 23–36) | Tokens: ~128 | Dim: 512 | Vector: [0.8825, -0.2862, -0.3544, -0.0062, 0.0520, -0.0379, ...]
+
+# 5. Display overall repository index statistics:
+>> index-stats
+
+Index & Pipeline Statistics:
+  Indexed Files           : 3
+  Code Chunks             : 9
+  Dependency Graph Nodes  : 4
+  Embedder Used           : TF-IDF (offline)
+  BM25 Vocabulary Size    : 73 terms
+  FAISS Vector Count      : 9 vectors
+
+# 6. Inspect RAG retrieval provenance & exact Augmented Prompt sent to the LLM:
+>> explain: how does authenticate work? --no-answer
 
 --- Retrieval Pipeline Provenance ---
-Question: authenticate
-Query Terms (BM25 tokenized): ['authenticate']
+Question: how does authenticate work?
+Query Terms (BM25 tokenized): ['authenticate', 'work']
 Timings (ms): embed=0.1 | bm25=0.2 | dense=0.3 | fuse=0.1 | expand=0.1 | llm=0.0
 
 BM25 Lexical Hits:
@@ -253,26 +273,40 @@ BM25 Lexical Hits:
 Dense Vector Hits:
   [Rank 1] pkg\auth.py::authenticate (Lines 11–20) - Score: 0.8124
   [Rank 2] pkg\auth.py::SessionManager (Lines 23–36) - Score: 0.7410
-  [Rank 3] pkg\__init__.py::— (Lines 1–1) - Score: 0.6980
-  [Rank 4] pkg\db.py::get_user_by_username (Lines 8–10) - Score: 0.6540
-  [Rank 5] pkg\auth.py::hash_password (Lines 6–8) - Score: 0.6210
+  [Rank 3] pkg\db.py::get_user_by_username (Lines 8–10) - Score: 0.6540
+  [Rank 4] pkg\auth.py::hash_password (Lines 6–8) - Score: 0.6210
 
 Merged RRF Ranking:
   [Rank 1] pkg\auth.py::authenticate (Lines 11–20) - BM25: 1 | Dense: 1 | RRF: 0.03279
   [Rank 2] pkg\auth.py::SessionManager (Lines 23–36) - BM25: - | Dense: 2 | RRF: 0.01613
-  [Rank 3] pkg\__init__.py::— (Lines 1–1) - BM25: - | Dense: 3 | RRF: 0.01587
-  [Rank 4] pkg\db.py::get_user_by_username (Lines 8–10) - BM25: - | Dense: 4 | RRF: 0.01562
-  [Rank 5] pkg\auth.py::hash_password (Lines 6–8) - BM25: - | Dense: 5 | RRF: 0.01538
-
-Graph Context Additions:
-  [# 1] pkg\db.py::add_user (Reason: import, Caused By: pkg\auth.py::authenticate)
+  [Rank 3] pkg\db.py::get_user_by_username (Lines 8–10) - BM25: - | Dense: 3 | RRF: 0.01587
 
 Budget: 5 chunks, 427 / 3,000 tokens (Dropped: pkg\__init__.py::empty)
 
-# 5. View module dependencies:
->> deps:sample_repo/auth.py
+=== Augmented prompt (what the model actually reads) ===
+── Instruction Block (Instructions) ──
+You are IntelliCodeX, an AI code assistant with access to a specific software repository via
+retrieved code context and dependency graphs. Answer using ONLY the provided context...
 
-# 6. Check top central files:
+── Context Chunks ──
+[1] pkg\auth.py:11-20 (authenticate)
+```python
+def authenticate(username: str, password: str) -> bool:
+    """Check a username/password pair against stored credentials."""
+    user = get_user_by_username(username)
+    ...
+```
+[2] pkg\auth.py:23-36 (SessionManager)
+...
+
+── User Question ──
+how does authenticate work?
+
+# 7. Compare with vs. without RAG side-by-side:
+>> explain: how does authenticate work? --compare
+
+# 8. View module dependencies & centrality:
+>> deps:sample_repo/auth.py
 >> top
 ```
 
@@ -284,7 +318,7 @@ Budget: 5 chunks, 427 / 3,000 tokens (Dropped: pkg\__init__.py::empty)
 * 🏛️ [System Architecture & Design (docs/ARCHITECTURE.md)](docs/ARCHITECTURE.md) — Component decomposition, technology stack, sequence diagrams, and security boundaries.
 * 📊 [Project Implementation Status (docs/PROJECT_STATUS.md)](docs/PROJECT_STATUS.md) — Evidence-based status matrix grounded in passing test suites and Git commit state.
 * 🗺️ [Engineering Roadmap (docs/ROADMAP.md)](docs/ROADMAP.md) — Prioritized milestones, concrete next tasks, and effort estimates.
-* 🧪 [Testing & Verification Guide (docs/TESTING.md)](docs/TESTING.md) — Test suite layout, execution commands, and empirical test results (272/276 passed).
+* 🧪 [Testing & Verification Guide (docs/TESTING.md)](docs/TESTING.md) — Test suite layout, execution commands, and empirical test results (281/285 passed).
 * 📝 [Architecture Decision Records (docs/decisions/README.md)](docs/decisions/README.md) — Formal ADR log, guidelines, and rationale records.
 
 ---

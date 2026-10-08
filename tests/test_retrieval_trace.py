@@ -31,10 +31,14 @@ class FakeLLM:
         self.response = response
         self.call_count = 0
         self.last_prompt = None
+        self.prompts_received = []
+        self.systems_received = []
 
     def generate(self, prompt: str, system: str = "", temperature: float = 0.0) -> str:
         self.call_count += 1
         self.last_prompt = prompt
+        self.prompts_received.append(prompt)
+        self.systems_received.append(system)
         return self.response
 
 
@@ -392,3 +396,186 @@ def test_api_explain_auth_and_rbac(tiny_fixture):
     )
     assert resp_forbidden.status_code == 403
     assert "Access denied" in resp_forbidden.json()["detail"]
+
+
+def test_augmented_prompt_equals_fake_llm_prompt(tiny_fixture):
+    """Part A & Tests: augmented_prompt in the trace equals exact string passed to fake LLM."""
+    engine, chunks, fake_llm = tiny_fixture
+    trace = RetrievalTrace()
+
+    engine.ask("How does calculate_total work?", trace=trace)
+
+    assert trace.augmented_prompt is not None
+    assert fake_llm.last_prompt is not None
+    assert trace.augmented_prompt == fake_llm.last_prompt, "trace.augmented_prompt must strictly equal LLM input"
+
+    assert "instructions" in trace.prompt_sections
+    assert len(trace.prompt_sections["instructions"]) > 0
+    assert "context_chunks" in trace.prompt_sections
+    assert len(trace.prompt_sections["context_chunks"]) > 0
+    assert trace.prompt_sections["question"] == "How does calculate_total work?"
+    assert trace.embedder_name == "tfidf"
+
+
+def test_explain_output_contains_prompt_sections(tiny_fixture, capsys):
+    """Part A & Tests: explain output contains instruction block, labelled chunks, and question."""
+    from cli import render_retrieval_trace
+    engine, chunks, fake_llm = tiny_fixture
+    trace = RetrievalTrace()
+
+    engine.ask("calculate_total", trace=trace, no_answer=True)
+    render_retrieval_trace(trace, no_answer=True)
+
+    captured = capsys.readouterr().out
+    assert "Augmented prompt (what the model actually reads)" in captured
+    assert "Instructions" in captured or "── Instructions ──" in captured
+    assert "[1]" in captured
+    assert "sample/calculator.py" in captured
+    assert "calculate_total" in captured
+
+
+def test_no_prompt_or_code_written_to_disk(tiny_fixture, monkeypatch):
+    """Part A & Tests: no prompt or code is written to disk during retrieval and explain."""
+    from backend.config import settings
+    monkeypatch.delenv("INTELLICODEX_DEBUG_PROMPT", raising=False)
+
+    storage_dir = settings.STORAGE_DIR
+    before_files = set()
+    if os.path.exists(storage_dir):
+        before_files = set(os.listdir(storage_dir))
+
+    engine, chunks, fake_llm = tiny_fixture
+    trace = RetrievalTrace()
+    engine.ask("calculate_total", trace=trace, no_answer=False)
+
+    after_files = set()
+    if os.path.exists(storage_dir):
+        after_files = set(os.listdir(storage_dir))
+
+    # Ensure no debug prompt file was dropped
+    assert "last_prompt.txt" not in (after_files - before_files)
+
+
+def test_chunks_command_view(tiny_fixture, capsys):
+    """Part B & Tests: chunks: <file> lists chunk counts, line ranges, and vector preview."""
+    from cli import render_chunks_view
+    engine, chunks, fake_llm = tiny_fixture
+
+    class FakeResult:
+        store = engine.store
+        graph = engine.dep_graph
+        call_graph = engine.call_graph
+        lexical_index = engine.lexical_index
+        files = ["sample/calculator.py", "sample/formatter.py", "sample/main.py"]
+
+    render_chunks_view(FakeResult(), "sample/calculator.py", current_path="")
+    captured = capsys.readouterr().out
+
+    assert "Indexed Chunks: 2" in captured or "Number of chunks: 2" in captured
+    assert "calculate_add" in captured
+    assert "calculate_total" in captured
+    assert "1–5" in captured or "1-5" in captured
+    assert "6–15" in captured or "6-15" in captured
+    assert "Embedding Dim: 64" in captured or "dim: 64" in captured
+    assert "..." in captured  # Vector preview truncation
+
+
+def test_compare_calls_fake_llm_twice_and_no_code_in_first(tiny_fixture):
+    """Part C & Tests: --compare calls fake LLM twice; the first call's prompt contains no repo code."""
+    from cli import execute_explain_command
+    engine, chunks, fake_llm = tiny_fixture
+
+    class FakeResult:
+        store = engine.store
+        graph = engine.dep_graph
+        call_graph = engine.call_graph
+        lexical_index = engine.lexical_index
+
+    execute_explain_command(engine, FakeResult(), "explain: calculate_total --compare")
+
+    assert fake_llm.call_count == 2
+    prompt_no_rag = fake_llm.prompts_received[0]
+    prompt_rag = fake_llm.prompts_received[1]
+
+    # Verify no repository code or file paths leaked into the first no-context call
+    assert "def calculate_add" not in prompt_no_rag
+    assert "def calculate_total" not in prompt_no_rag
+    assert "sample/calculator.py" not in prompt_no_rag
+    assert "Answer from your own knowledge, say if you cannot see the code" in fake_llm.systems_received[0]
+
+    # Second call contains RAG context
+    assert "def calculate_total" in prompt_rag or "calculate_total" in prompt_rag
+
+
+def test_compare_ignored_with_no_answer(tiny_fixture, capsys):
+    """Part C & Tests: --compare with --no-answer is ignored with a clear message."""
+    from cli import execute_explain_command
+    engine, chunks, fake_llm = tiny_fixture
+
+    class FakeResult:
+        store = engine.store
+        graph = engine.dep_graph
+        call_graph = engine.call_graph
+        lexical_index = engine.lexical_index
+
+    fake_llm.call_count = 0
+    execute_explain_command(engine, FakeResult(), "explain: calculate_total --compare --no-answer")
+
+    assert fake_llm.call_count == 0
+    captured = capsys.readouterr().out
+    assert "ignored because --no-answer was specified" in captured
+
+
+def test_file_filter_strict_isolation_similar_symbols():
+    """Part D.1 & Tests: @file filter with 2 files sharing similar function names never returns chunks from the other file."""
+    c_a = make_chunk("c_calc_a", "compute_metrics", "def compute_metrics():\n    return 42", "calc_a.py", 1, 5)
+    c_b = make_chunk("c_calc_b", "compute_metrics", "def compute_metrics():\n    return 99", "calc_b.py", 1, 5)
+    chunks = [c_a, c_b]
+
+    embedder = TfidfEmbedder(dim=32)
+    embedder.fit([c.code for c in chunks])
+    vectors = embedder.embed([c.code for c in chunks])
+
+    store = FaissVectorStore(embedder.dim)
+    store.add(chunks, vectors)
+    lex_index = BM25Index(chunks)
+
+    fake_llm = FakeLLM()
+    engine = QueryEngine(store=store, embedder=embedder, llm=fake_llm, lexical_index=lex_index, hybrid_search=True)
+
+    trace = RetrievalTrace()
+    engine.ask("How does compute_metrics work in @calc_a.py?", trace=trace, no_answer=True)
+
+    # Verify that ONLY chunks from calc_a.py are returned
+    fused_files = [f[1] for f in trace.fused_hits]
+    assert all(f == "calc_a.py" for f in fused_files), f"Expected only calc_a.py, got: {fused_files}"
+    assert "calc_b.py" not in fused_files
+
+
+def test_stopword_removal_and_dedupe():
+    """Part D.2 & Tests: BM25 tokenization removes stopwords, dedupes terms, and strips file mentions."""
+    from core.lexical_index import tokenize_query
+    q = "How does the calculate_total work in @calculator_practice.py? What is it doing?"
+    terms = tokenize_query(q, remove_stopwords=True)
+
+    # Must NOT include calculator_practice or py
+    assert "calculator_practice" not in terms
+    assert "py" not in terms
+    # Must NOT include stopwords
+    for sw in ("how", "does", "the", "in", "what", "is", "it"):
+        assert sw not in terms
+
+    # Terms must be exact and deduped (compound symbol + split parts, stopwords like 'doing' removed)
+    assert terms == ["calculate_total", "calculate", "total", "work"]
+
+
+def test_regression_trace_none_ranking_and_answer(tiny_fixture):
+    """Part D & Tests: Passing trace=None gives exact same answer and ranking as before."""
+    engine, chunks, fake_llm = tiny_fixture
+
+    resp_no_trace = engine.ask("calculate_total", trace=None, no_answer=True)
+    trace = RetrievalTrace()
+    resp_with_trace = engine.ask("calculate_total", trace=trace, no_answer=True)
+
+    assert resp_no_trace["retrieved_chunks"] == resp_with_trace["retrieved_chunks"]
+    assert resp_no_trace["sources"] == resp_with_trace["sources"]

@@ -53,6 +53,15 @@ class FaissVectorStore:
         except Exception:
             pass  # keep flat index on any failure
 
+    def get_vector(self, idx: int) -> Optional[np.ndarray]:
+        """Reconstructs and returns the float32 embedding vector for the chunk at index idx."""
+        if 0 <= idx < self.index.ntotal:
+            try:
+                return self.index.reconstruct(idx)
+            except Exception:
+                return None
+        return None
+
     def search(self, query_vec: np.ndarray, top_k: int = 5) -> List[Tuple[CodeChunk, float]]:
         flat = query_vec.flatten()
         target_d = self.index.d

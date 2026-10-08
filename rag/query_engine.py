@@ -444,36 +444,58 @@ class QueryEngine:
 
     def retrieve(self, query: str, top_k: int = 5, file_filter: Optional[str] = None, trace: Optional[Any] = None) -> List[Tuple[CodeChunk, float]]:
         """Retrieves top-K matches using Hybrid Search (RRF) or pure Dense Vector Search."""
-        # When file_filter is specified, retrieve ALL chunks from that file
+        import re
+        mention_match = re.search(r'@([\w\-.\/]+)', query)
+        if mention_match and not file_filter:
+            file_filter = mention_match.group(1)
+
+        clean_query = re.sub(r'@[\w\-.\/]+', ' ', query).strip()
+        clean_query = re.sub(r'\s+', ' ', clean_query)
+        effective_query = clean_query if clean_query else query
+
+        store_chunks = getattr(self.store, "chunks", [])
+        allowed_chunks = None
         if file_filter:
             f = file_filter.replace("\\", "/").lower()
-            store_chunks = getattr(self.store, "chunks", [])
-            all_file_chunks = [(c, 1.0) for c in store_chunks if f in c.file_path.replace("\\", "/").lower() or f in os.path.basename(c.file_path).lower()]
-            return all_file_chunks
+            allowed_chunks = [c for c in store_chunks if f in c.file_path.replace("\\", "/").lower() or f in os.path.basename(c.file_path).lower()]
+            if not allowed_chunks:
+                return []
+            allowed_ids = {c.chunk_id for c in allowed_chunks}
+        else:
+            allowed_ids = None
 
         if self.hybrid_search and self.lexical_index is not None and len(self.lexical_index) > 0:
-            candidate_k = max(top_k * 4, 20)
+            candidate_k = max(top_k * 4, 20, len(store_chunks) if allowed_ids else 20)
             t0 = time.perf_counter()
-            query_vec = self.embedder.embed([query])[0]
+            query_vec = self.embedder.embed([effective_query])[0]
             t_embed = (time.perf_counter() - t0) * 1000
 
             t0 = time.perf_counter()
             dense_results = self.store.search(query_vec, top_k=candidate_k)
+            if allowed_ids is not None:
+                dense_results = [(c, s) for c, s in dense_results if c.chunk_id in allowed_ids]
             t_dense = (time.perf_counter() - t0) * 1000
 
             t0 = time.perf_counter()
-            bm25_results = self.lexical_index.search(query, top_k=candidate_k)
+            bm25_results = self.lexical_index.search(effective_query, top_k=candidate_k)
+            if allowed_ids is not None:
+                bm25_results = [(c, s) for c, s in bm25_results if c.chunk_id in allowed_ids]
             t_bm25 = (time.perf_counter() - t0) * 1000
 
             t0 = time.perf_counter()
-            results = reciprocal_rank_fusion(
-                [dense_results, bm25_results],
-                list_names=["Dense", "BM25"],
-                k=self.rrf_k,
-                top_k=top_k,
-                include_reason=False,
-                trace=trace,
-            )
+            if dense_results or bm25_results:
+                results = reciprocal_rank_fusion(
+                    [dense_results, bm25_results],
+                    list_names=["Dense", "BM25"],
+                    k=self.rrf_k,
+                    top_k=top_k,
+                    include_reason=False,
+                    trace=trace,
+                )
+            elif allowed_chunks:
+                results = [(c, 1.0) for c in allowed_chunks[:top_k]]
+            else:
+                results = []
             t_fuse = (time.perf_counter() - t0) * 1000
 
             if trace is not None:
@@ -495,13 +517,23 @@ class QueryEngine:
                 for c, _ in dense_results[:top_k]:
                     trace.chunk_codes[c.chunk_id] = c.code
         else:
+            candidate_k = max(top_k, len(store_chunks) if allowed_ids else top_k)
             t0 = time.perf_counter()
-            query_vec = self.embedder.embed([query])[0]
+            query_vec = self.embedder.embed([effective_query])[0]
             t_embed = (time.perf_counter() - t0) * 1000
 
             t0 = time.perf_counter()
-            results = self.store.search(query_vec, top_k=top_k)
+            dense_results = self.store.search(query_vec, top_k=candidate_k)
+            if allowed_ids is not None:
+                dense_results = [(c, s) for c, s in dense_results if c.chunk_id in allowed_ids]
             t_dense = (time.perf_counter() - t0) * 1000
+
+            if dense_results:
+                results = dense_results[:top_k]
+            elif allowed_chunks:
+                results = [(c, 1.0) for c in allowed_chunks[:top_k]]
+            else:
+                results = []
 
             if trace is not None:
                 from core.retrieval_trace import RetrievalHit, FusedHit
@@ -522,40 +554,62 @@ class QueryEngine:
 
     def retrieve_with_reasons(self, query: str, top_k: int = 5, file_filter: Optional[str] = None, trace: Optional[Any] = None) -> List[Tuple[CodeChunk, float, str]]:
         """Retrieves top-K matches with reason annotations for context expansion."""
-        # When file_filter is specified, retrieve ALL chunks from that file
+        import re
+        mention_match = re.search(r'@([\w\-.\/]+)', query)
+        if mention_match and not file_filter:
+            file_filter = mention_match.group(1)
+
+        clean_query = re.sub(r'@[\w\-.\/]+', ' ', query).strip()
+        clean_query = re.sub(r'\s+', ' ', clean_query)
+        effective_query = clean_query if clean_query else query
+
+        store_chunks = getattr(self.store, "chunks", [])
+        allowed_chunks = None
         if file_filter:
             f = file_filter.replace("\\", "/").lower()
-            store_chunks = getattr(self.store, "chunks", [])
-            all_file_chunks = [(c, 1.0, "File Scoping") for c in store_chunks if f in c.file_path.replace("\\", "/").lower() or f in os.path.basename(c.file_path).lower()]
-            return all_file_chunks
+            allowed_chunks = [c for c in store_chunks if f in c.file_path.replace("\\", "/").lower() or f in os.path.basename(c.file_path).lower()]
+            if not allowed_chunks:
+                return []
+            allowed_ids = {c.chunk_id for c in allowed_chunks}
+        else:
+            allowed_ids = None
 
         if self.hybrid_search and self.lexical_index is not None and len(self.lexical_index) > 0:
-            candidate_k = max(top_k * 4, 20)
+            candidate_k = max(top_k * 4, 20, len(store_chunks) if allowed_ids else 20)
             t0 = time.perf_counter()
-            query_vec = self.embedder.embed([query])[0]
+            query_vec = self.embedder.embed([effective_query])[0]
             t_embed = (time.perf_counter() - t0) * 1000
 
             t0 = time.perf_counter()
             dense_results = self.store.search(query_vec, top_k=candidate_k)
+            if allowed_ids is not None:
+                dense_results = [(c, s) for c, s in dense_results if c.chunk_id in allowed_ids]
             t_dense = (time.perf_counter() - t0) * 1000
 
             t0 = time.perf_counter()
-            bm25_results = self.lexical_index.search(query, top_k=candidate_k)
+            bm25_results = self.lexical_index.search(effective_query, top_k=candidate_k)
+            if allowed_ids is not None:
+                bm25_results = [(c, s) for c, s in bm25_results if c.chunk_id in allowed_ids]
             t_bm25 = (time.perf_counter() - t0) * 1000
 
             t0 = time.perf_counter()
-            results = reciprocal_rank_fusion(
-                [dense_results, bm25_results],
-                list_names=["Dense", "BM25"],
-                k=self.rrf_k,
-                top_k=top_k,
-                include_reason=True,
-                trace=trace,
-            )
+            if dense_results or bm25_results:
+                results = reciprocal_rank_fusion(
+                    [dense_results, bm25_results],
+                    list_names=["Dense", "BM25"],
+                    k=self.rrf_k,
+                    top_k=top_k,
+                    include_reason=True,
+                    trace=trace,
+                )
+            elif allowed_chunks:
+                results = [(c, 1.0, "File Scoping") for c in allowed_chunks[:top_k]]
+            else:
+                results = []
             t_fuse = (time.perf_counter() - t0) * 1000
 
             if trace is not None:
-                from core.retrieval_trace import RetrievalHit
+                from core.retrieval_trace import RetrievalHit, FusedHit
                 trace.timings_ms["embed"] = round(t_embed, 2)
                 trace.timings_ms["dense"] = round(t_dense, 2)
                 trace.timings_ms["bm25"] = round(t_bm25, 2)
@@ -568,20 +622,35 @@ class QueryEngine:
                     RetrievalHit(c.chunk_id, c.file_path, c.name or "", c.start_line, c.end_line, float(s))
                     for c, s in dense_results[:top_k]
                 ]
+                if not dense_results and not bm25_results and allowed_chunks:
+                    trace.fused_hits = [
+                        FusedHit(c.chunk_id, c.file_path, c.name or "", c.start_line, c.end_line, 1.0, None, None, 1.0)
+                        for c in allowed_chunks[:top_k]
+                    ]
                 for c, _ in bm25_results[:top_k]:
                     trace.chunk_codes[c.chunk_id] = c.code
                 for c, _ in dense_results[:top_k]:
                     trace.chunk_codes[c.chunk_id] = c.code
+                for c in allowed_chunks or []:
+                    trace.chunk_codes[c.chunk_id] = c.code
         else:
+            candidate_k = max(top_k, len(store_chunks) if allowed_ids else top_k)
             t0 = time.perf_counter()
-            query_vec = self.embedder.embed([query])[0]
+            query_vec = self.embedder.embed([effective_query])[0]
             t_embed = (time.perf_counter() - t0) * 1000
 
             t0 = time.perf_counter()
-            dense_results = self.store.search(query_vec, top_k=top_k)
+            dense_results = self.store.search(query_vec, top_k=candidate_k)
+            if allowed_ids is not None:
+                dense_results = [(c, s) for c, s in dense_results if c.chunk_id in allowed_ids]
             t_dense = (time.perf_counter() - t0) * 1000
 
-            results = [(c, s, "Direct Vector Match") for c, s in dense_results]
+            if dense_results:
+                results = [(c, s, "Direct Vector Match") for c, s in dense_results[:top_k]]
+            elif allowed_chunks:
+                results = [(c, 1.0, "File Scoping") for c in allowed_chunks[:top_k]]
+            else:
+                results = []
 
             if trace is not None:
                 from core.retrieval_trace import RetrievalHit, FusedHit
@@ -593,15 +662,20 @@ class QueryEngine:
                 ]
                 trace.fused_hits = [
                     FusedHit(c.chunk_id, c.file_path, c.name or "", c.start_line, c.end_line, float(s), None, idx, float(s))
-                    for idx, (c, s) in enumerate(dense_results[:top_k], start=1)
+                    for idx, (c, s, _) in enumerate(results[:top_k], start=1)
                 ]
-                for c, _ in dense_results[:top_k]:
+                for c, _, _ in results[:top_k]:
                     trace.chunk_codes[c.chunk_id] = c.code
 
         return results
 
     def retrieve_expanded(self, query: str, top_k: int = 5, file_filter: Optional[str] = None, trace: Optional[Any] = None) -> List[Dict]:
         """Retrieves top-K matches and applies graph-augmented context expansion."""
+        import re
+        mention_match = re.search(r'@([\w\-.\/]+)', query)
+        if mention_match and not file_filter:
+            file_filter = mention_match.group(1)
+
         detailed_results = self.retrieve_with_reasons(query, top_k=top_k, file_filter=file_filter, trace=trace)
         store_chunks = getattr(self.store, "chunks", [])
         if file_filter:
@@ -628,14 +702,27 @@ class QueryEngine:
         """Performs RAG query answering with context expansion, conversation history, and persona reasoning."""
         t_start = time.perf_counter()
 
+        import re
+        mention_match = re.search(r'@([\w\-.\/]+)', question)
+        effective_filter = file_filter
+        if mention_match and not effective_filter:
+            effective_filter = mention_match.group(1)
+
+        search_query = re.sub(r'@[\w\-.\/]+', ' ', question).strip()
+        search_query = re.sub(r'\s+', ' ', search_query)
+        if not search_query:
+            search_query = question
+
         if trace is not None:
-            from core.lexical_index import tokenize_code
+            from core.lexical_index import tokenize_query
             from core.embedder import TfidfEmbedder
             trace.question = question
-            trace.query_terms = tokenize_code(question)
-            trace.embedder = "tfidf" if isinstance(self.embedder, TfidfEmbedder) else "ollama"
+            trace.query_terms = tokenize_query(question, remove_stopwords=True)
+            embed_name = "tfidf" if isinstance(self.embedder, TfidfEmbedder) else "ollama"
+            trace.embedder = embed_name
+            trace.embedder_name = embed_name
 
-        expanded_results = self.retrieve_expanded(question, top_k=top_k, file_filter=file_filter, trace=trace)
+        expanded_results = self.retrieve_expanded(search_query, top_k=top_k, file_filter=effective_filter, trace=trace)
         t_retrieval = time.perf_counter() - t_start
         context = format_context(expanded_results, max_token_budget=max_token_budget, trace=trace)
 
@@ -678,6 +765,79 @@ class QueryEngine:
             "retrieved_chunks": retrieved_chunks,
             "sources": sources,
         }
+
+        # Build prompt and capture augmented prompt & prompt_sections
+        is_analysis = self.memory.is_code_analysis_question(question)
+        history_str = self.memory.format_history(is_analysis=is_analysis) if (use_memory and len(self.memory) > 0) else ""
+        file_scope_note = ""
+        if effective_filter:
+            file_scope_note = (
+                f"SCOPE: Focus your answer on '{effective_filter}'. "
+                f"The context below is scoped to this file. Answer the user's question using this context.\n\n"
+            )
+
+        bug_keywords = [
+            "bug", "error", "issue", "problem", "wrong", "incorrect", "fix", "mistake",
+            "explain", "check", "review", "analyze", "analyse", "find", "look", "inspect",
+            "update", "modify", "correct", "patch", "refactor", "proper", "improve",
+        ]
+        is_bug_query = any(keyword in question.lower() for keyword in bug_keywords) or bool(effective_filter)
+
+        if is_bug_query:
+            anti_hallucination = (
+                "You are analyzing code for bugs, syntax errors, and logic flaws.\n"
+                "IMPORTANT: You MUST analyze and output a separate section for EVERY function, method, and block in the context (including main!). Do NOT stop after the first function.\n\n"
+                "For EVERY function/method found in the context:\n"
+                "1. Name: [function/method name]\n"
+                "2. Docstring/intent: [what the code should do based on name/docstring]\n"
+                "3. Code: [the implementation]\n"
+                "4. Analysis: Check both docstring/name contract and potential runtime failures:\n"
+                "   - Syntax & compile errors (missing colons, missing brackets, unbalanced quotes)\n"
+                "   - Type mismatch errors (e.g. str + int operations, NoneType operations)\n"
+                "   - Logic mistakes & operand order (e.g., 'return b - a' instead of 'a - b')\n"
+                "   - Operator bugs & precision loss (e.g., '//' instead of '/')\n"
+                "   - Boolean logic and quantifier errors (e.g. 'any()' vs 'all()')\n"
+                "5. Answer MATCH or MISMATCH (do NOT assume MATCH if docstring is missing; evaluate function name and arguments)\n"
+                "6. If MISMATCH, quote the exact line with the bug\n"
+                "7. Explain in one sentence why it is a bug and provide the fix\n\n"
+                "CRITICAL: Only report bugs that exist in the code. Quote the exact line from the code.\n\n"
+            )
+        else:
+            anti_hallucination = (
+                "IMPORTANT: When reporting bugs or issues, only report those that exist in the files shown in context below. "
+                "Do NOT attribute a bug from one file to another file. For general questions, use the provided context accurately.\n\n"
+            )
+
+        prompt_parts = []
+        if history_str:
+            prompt_parts.append(history_str)
+        prompt_parts.append(anti_hallucination + file_scope_note + f"Repository context:\n\n{context}")
+        prompt_parts.append(f"Question: {question}\n\nAnswer:")
+        prompt = "\n\n".join(prompt_parts)
+
+        # Context chunks metadata for prompt_sections
+        included_chunks_list = []
+        for item in expanded_results:
+            c = item[0] if isinstance(item, tuple) else (item.get("chunk") if isinstance(item, dict) else None)
+            if c and (not inc_cids or c.chunk_id in inc_cids):
+                included_chunks_list.append({
+                    "file": c.file_path,
+                    "lines": f"{c.start_line}-{c.end_line}",
+                    "symbol": c.name or "—",
+                    "code": c.code,
+                    "chunk_id": c.chunk_id,
+                })
+
+        instruction_block = (self.system_prompt + "\n\n" + anti_hallucination + file_scope_note).strip() if self.system_prompt else (anti_hallucination + file_scope_note).strip()
+
+        if trace is not None:
+            trace.augmented_prompt = prompt
+            trace.prompt_sections = {
+                "instructions": instruction_block,
+                "context_chunks": included_chunks_list,
+                "question": question,
+                "memory": history_str,
+            }
 
         if no_answer:
             if trace is not None:
@@ -729,24 +889,6 @@ class QueryEngine:
                 self.memory.add_turn(question, ans)
             return response
 
-        is_analysis = self.memory.is_code_analysis_question(question)
-        history_str = self.memory.format_history(is_analysis=is_analysis) if (use_memory and len(self.memory) > 0) else ""
-        file_scope_note = ""
-        if file_filter:
-            file_scope_note = (
-                f"SCOPE: Focus your answer on '{file_filter}'. "
-                f"The context below is scoped to this file. Answer the user's question using this context.\n\n"
-            )
-        
-        # Check if user is asking about bugs/issues/errors
-        # Also treat file-scoped 'explain/check/review/analyze' queries as bug-analysis
-        bug_keywords = [
-            "bug", "error", "issue", "problem", "wrong", "incorrect", "fix", "mistake",
-            "explain", "check", "review", "analyze", "analyse", "find", "look", "inspect",
-            "update", "modify", "correct", "patch", "refactor", "proper", "improve",
-        ]
-        is_bug_query = any(keyword in question.lower() for keyword in bug_keywords) or bool(file_filter)
-        
         if is_bug_query:
             # Deterministic Static Analysis Pass (syntax, undefined variables, missing imports)
             static_findings = []
@@ -849,6 +991,8 @@ class QueryEngine:
         prompt_parts.append(f"Question: {question}\n\nAnswer:")
 
         prompt = "\n\n".join(prompt_parts)
+        if trace is not None:
+            trace.augmented_prompt = prompt
         
         # Debug: write prompt to file if debug flag is set
         if DEBUG_PROMPT:

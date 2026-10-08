@@ -204,7 +204,9 @@ Available Commands:
   hybrid / hybrid:status - Check hybrid search status (BM25 + Dense RRF)
   hybrid:on / hybrid:off - Enable or disable BM25 hybrid ranking
   search:<query>         - Instant lexical & semantic search without LLM wait
-  explain:<query>        - Inspect RAG retrieval & fusion provenance (BM25, dense, RRF, graph, tokens)
+  chunks:<file>          - Inspect chunk-level index, start/end lines & vector preview
+  index-stats            - Display overall index statistics (files, chunks, nodes, vocab, FAISS)
+  explain:<query>        - Inspect RAG pipeline & prompt (--no-answer, --compare, --width, --json)
   clear / cls            - Clear terminal screen
   help / ?               - Show this help message
   exit / quit            - Exit IntelliCodeX CLI
@@ -501,7 +503,9 @@ def render_help_panel():
         groups = [
             ("Search & AI", "cyan", [
                 ("search:<query>",  "Instant retrieval without LLM (fast, no AI wait)"),
-                ("explain:<query>", "Inspect RAG pipeline (BM25/Dense hits, RRF, graph, tokens)"),
+                ("chunks:<file>",   "Inspect chunk-level index, line ranges & vectors"),
+                ("index-stats",     "Show comprehensive index statistics across the repo"),
+                ("explain:<query>", "Inspect RAG pipeline, prompt & compare (--compare, --width)"),
                 ("<question>",      "Ask AI a question about the repository"),
                 ("@filename",       "Scope query to a specific file (one-shot)"),
                 ("fix:<error>",     "Diagnose error & generate automated sandbox patch"),
@@ -767,19 +771,37 @@ def render_search_results(query: str, results: list, elapsed: float):
         print()
 
 
-def render_retrieval_trace(trace, full_code: bool = False, no_answer: bool = False):
+def middle_truncate(text: str, max_len: int = 32) -> str:
+    """Truncates text in the middle with '...' so start and end are preserved."""
+    if not text or len(text) <= max_len:
+        return text
+    if max_len <= 5:
+        return text[:max_len]
+    head = (max_len - 3) // 2
+    tail = max_len - 3 - head
+    return f"{text[:head]}...{text[-tail:]}"
+
+
+def render_retrieval_trace(trace, full_code: bool = False, no_answer: bool = False, width: Optional[int] = None, terminal_width: Optional[int] = None):
     """
     Renders RAG retrieval provenance trace in rich tables:
     1. Question and query terms
     2. Two side-by-side tables (BM25 | Dense)
-    3. Merged ranking table with bm25_rank, dense_rank, rrf_score
-    4. Graph additions with reasons
-    5. Budget line
-    6. Answer with sources (if not no_answer)
+    3. Merged ranking table with bm25_rank, dense_rank, rrf_score (middle-truncated files)
+    4. Code previews section below table
+    5. Graph additions with reasons
+    6. Budget line
+    7. Augmented prompt panel (instructions, labelled chunks [1], [2]..., question)
+    8. Answer with sources rendered via rich Markdown (if not no_answer)
     """
-    if HAS_RICH and console:
-        console.print()
-        console.print(Panel(
+    import shutil
+    chosen_width = terminal_width or width
+    term_width = chosen_width or (shutil.get_terminal_size((100, 24)).columns if hasattr(shutil, "get_terminal_size") else 100)
+    trace_console = Console(width=term_width) if (HAS_RICH and console) else console
+
+    if HAS_RICH and trace_console:
+        trace_console.print()
+        trace_console.print(Panel(
             f"[bold cyan]Question:[/bold cyan] {trace.question}\n"
             f"[bold yellow]Query Terms (BM25 tokenized):[/bold yellow] {trace.query_terms}\n"
             f"[dim]Timings (ms): embed={trace.timings_ms.get('embed', 0):.1f} | "
@@ -792,7 +814,7 @@ def render_retrieval_trace(trace, full_code: bool = False, no_answer: bool = Fal
 
         t_bm25 = Table(title="BM25 Lexical Hits", border_style="yellow", padding=(0, 1))
         t_bm25.add_column("Rank", style="dim", width=5)
-        t_bm25.add_column("File::Symbol", style="yellow")
+        t_bm25.add_column("File::Symbol", style="yellow", no_wrap=True, overflow="ellipsis")
         t_bm25.add_column("Lines", style="dim", width=10)
         t_bm25.add_column("Score", style="bold green", justify="right")
         if not trace.bm25_hits:
@@ -800,11 +822,13 @@ def render_retrieval_trace(trace, full_code: bool = False, no_answer: bool = Fal
         else:
             for idx, h in enumerate(trace.bm25_hits, start=1):
                 sym = h[2] or "—"
-                t_bm25.add_row(str(idx), f"{h[1]}::{sym}", f"{h[3]}–{h[4]}", f"{h[5]:.4f}")
+                f_disp = middle_truncate(h[1], 28)
+                s_disp = middle_truncate(sym, 18)
+                t_bm25.add_row(str(idx), f"{f_disp}::{s_disp}", f"{h[3]}–{h[4]}", f"{h[5]:.4f}")
 
         t_dense = Table(title="Dense Vector Hits", border_style="cyan", padding=(0, 1))
         t_dense.add_column("Rank", style="dim", width=5)
-        t_dense.add_column("File::Symbol", style="cyan")
+        t_dense.add_column("File::Symbol", style="cyan", no_wrap=True, overflow="ellipsis")
         t_dense.add_column("Lines", style="dim", width=10)
         t_dense.add_column("Score", style="bold green", justify="right")
         if not trace.dense_hits:
@@ -812,63 +836,134 @@ def render_retrieval_trace(trace, full_code: bool = False, no_answer: bool = Fal
         else:
             for idx, h in enumerate(trace.dense_hits, start=1):
                 sym = h[2] or "—"
-                t_dense.add_row(str(idx), f"{h[1]}::{sym}", f"{h[3]}–{h[4]}", f"{h[5]:.4f}")
+                f_disp = middle_truncate(h[1], 28)
+                s_disp = middle_truncate(sym, 18)
+                t_dense.add_row(str(idx), f"{f_disp}::{s_disp}", f"{h[3]}–{h[4]}", f"{h[5]:.4f}")
 
         if Columns:
-            console.print(Columns([t_bm25, t_dense]))
+            trace_console.print(Columns([t_bm25, t_dense]))
         else:
-            console.print(t_bm25)
-            console.print(t_dense)
+            trace_console.print(t_bm25)
+            trace_console.print(t_dense)
 
         t_fused = Table(title="Merged RRF Ranking", border_style="bright_blue", padding=(0, 1))
         t_fused.add_column("Rank", style="dim", width=5)
-        t_fused.add_column("File::Symbol", style="bold cyan")
+        t_fused.add_column("File::Symbol", style="bold cyan", no_wrap=True, overflow="ellipsis")
         t_fused.add_column("Lines", style="dim", width=10)
         t_fused.add_column("BM25 Rank", style="yellow", justify="right")
         t_fused.add_column("Dense Rank", style="cyan", justify="right")
         t_fused.add_column("RRF Score", style="bold green", justify="right")
-        t_fused.add_column("Code Preview", style="white")
 
         if not trace.fused_hits:
-            t_fused.add_row("-", "(no fused hits)", "-", "-", "-", "-", "-")
+            t_fused.add_row("-", "(no fused hits)", "-", "-", "-", "-")
         else:
             for idx, h in enumerate(trace.fused_hits, start=1):
                 bm25_r = str(h[6]) if h[6] is not None else "-"
                 dense_r = str(h[7]) if h[7] is not None else "-"
                 rrf_s = f"{h[8]:.5f}"
+                sym = h[2] or "—"
+                f_disp = middle_truncate(h[1], 34)
+                s_disp = middle_truncate(sym, 20)
+                t_fused.add_row(str(idx), f"{f_disp}::{s_disp}", f"{h[3]}–{h[4]}", bm25_r, dense_r, rrf_s)
+        trace_console.print(t_fused)
+
+        # Code previews moved out of table into dedicated section below
+        if trace.fused_hits:
+            trace_console.print()
+            trace_console.print("[bold bright_blue]── Code Previews (Top Fused Chunks) ──[/bold bright_blue]")
+            for idx, h in enumerate(trace.fused_hits, start=1):
+                sym = h[2] or "—"
                 code_raw = trace.chunk_codes.get(h[0], "")
                 if full_code:
                     preview = code_raw.strip()
                 else:
                     lines = code_raw.strip().splitlines()
                     preview = "\n".join(lines[:3]) + ("\n..." if len(lines) > 3 else "")
-                sym = h[2] or "—"
-                t_fused.add_row(str(idx), f"{h[1]}::{sym}", f"{h[3]}–{h[4]}", bm25_r, dense_r, rrf_s, preview)
-        console.print(t_fused)
+                trace_console.print(f"[bold cyan][{idx}] {h[1]}::{sym}[/bold cyan] [dim](lines {h[3]}–{h[4]}, RRF: {h[8]:.5f})[/dim]")
+                trace_console.print(Syntax(preview, "python", theme="monokai", line_numbers=False) if HAS_RICH else preview)
 
         t_graph = Table(title="Graph Context Additions", border_style="magenta", padding=(0, 1))
         t_graph.add_column("#", style="dim", width=4)
-        t_graph.add_column("Target (Chunk / File)", style="magenta")
+        t_graph.add_column("Target (Chunk / File)", style="magenta", no_wrap=True, overflow="ellipsis")
         t_graph.add_column("Reason", style="bold yellow")
         t_graph.add_column("Caused By (Fused Hit)", style="dim")
         if not trace.graph_additions:
             t_graph.add_row("-", "(no graph additions)", "-", "-")
         else:
             for idx, g in enumerate(trace.graph_additions, start=1):
-                t_graph.add_row(str(idx), str(g[0]), str(g[1]), str(g[2] or "-"))
-        console.print(t_graph)
+                t_graph.add_row(str(idx), middle_truncate(str(g[0]), 40), str(g[1]), str(g[2] or "-"))
+        trace_console.print(t_graph)
 
         b = trace.budget
         inc_count = len(b.included_chunk_ids)
         drop_detail = f" (Dropped: {', '.join(b.dropped_chunk_ids)})" if b.dropped_chunk_ids else " (0 dropped)"
-        console.print(f"[bold green]Budget:[/bold green] {inc_count} chunks, {b.used_tokens:,} / {b.max_tokens:,} tokens{drop_detail}")
-        console.print()
+        trace_console.print(f"[bold green]Budget:[/bold green] {inc_count} chunks, {b.used_tokens:,} / {b.max_tokens:,} tokens{drop_detail}")
+        trace_console.print()
+
+        # Augmented prompt panel (what the model actually reads)
+        prompt_sections = getattr(trace, "prompt_sections", {}) or {}
+        instructions = prompt_sections.get("instructions", "")
+        if not instructions and hasattr(trace, "augmented_prompt") and trace.augmented_prompt:
+            instructions = "Standard Repository Context Instructions"
+        
+        chunks_to_show = prompt_sections.get("context_chunks", [])
+        if not chunks_to_show and trace.fused_hits:
+            chunks_to_show = [
+                {
+                    "file": h[1],
+                    "lines": f"{h[3]}-{h[4]}",
+                    "symbol": h[2] or "—",
+                    "code": trace.chunk_codes.get(h[0], ""),
+                }
+                for h in trace.fused_hits
+            ]
+
+        prompt_body_parts = []
+        if instructions:
+            prompt_body_parts.append(f"[bold yellow]── Instruction Block (Instructions) ──[/bold yellow]\n{instructions.strip()}\n")
+
+        prompt_body_parts.append("[bold yellow]── Context Chunks ──[/bold yellow]")
+        if not chunks_to_show:
+            prompt_body_parts.append("[dim](no context chunks included)[/dim]\n")
+        else:
+            for idx, c_info in enumerate(chunks_to_show, start=1):
+                fpath = c_info.get("file", "unknown")
+                lines_r = c_info.get("lines", "")
+                sym = c_info.get("symbol", "—")
+                c_code = c_info.get("code", "")
+                c_lines = c_code.splitlines()
+                if not full_code and len(c_lines) > 12:
+                    code_disp = "\n".join(c_lines[:12]) + "\n... [truncated to 12 lines, use --full to view all]"
+                else:
+                    code_disp = "\n".join(c_lines)
+                prompt_body_parts.append(
+                    f"[bold cyan][{idx}] {fpath}:{lines_r}[/bold cyan] [dim]({sym})[/dim]\n```python\n{code_disp}\n```\n"
+                )
+
+        q_disp = prompt_sections.get("question", trace.question) or trace.question
+        prompt_body_parts.append(f"[bold yellow]── User Question ──[/bold yellow]\n{q_disp}")
+
+        if prompt_sections.get("memory"):
+            prompt_body_parts.append(f"\n[bold yellow]── Conversation Memory ──[/bold yellow]\n{prompt_sections['memory']}")
+
+        augmented_panel_text = "\n".join(prompt_body_parts)
+        trace_console.print(Panel(
+            augmented_panel_text,
+            title="[bold bright_blue]Augmented prompt (what the model actually reads)[/bold bright_blue]",
+            border_style="bright_blue",
+        ))
+        trace_console.print()
 
         if not no_answer and trace.answer:
             src_str = ", ".join(trace.sources) if trace.sources else "None"
-            ans_box = f"{trace.answer}\n\n[dim]Sources: {src_str}[/dim]"
-            console.print(Panel(ans_box, title="[bold cyan]AI Answer & Sources[/bold cyan]", border_style="cyan"))
-            console.print()
+            md_ans = Markdown(trace.answer)
+            trace_console.print(Panel(
+                md_ans,
+                subtitle=f"[dim]Sources: {src_str}[/dim]",
+                title="[bold cyan]AI Answer & Sources[/bold cyan]",
+                border_style="cyan",
+            ))
+            trace_console.print()
     else:
         print(f"\n--- Question: {trace.question} ---")
         print(f"Query terms: {trace.query_terms}")
@@ -881,21 +976,340 @@ def render_retrieval_trace(trace, full_code: bool = False, no_answer: bool = Fal
         print("\n--- Merged RRF Ranking ---")
         for idx, h in enumerate(trace.fused_hits, start=1):
             print(f"  [{idx}] {h[1]}::{h[2]} (lines {h[3]}-{h[4]}, bm25_rank={h[6]}, dense_rank={h[7]}, rrf_score={h[8]:.5f})")
+        if trace.fused_hits:
+            print("\n--- Code Previews (Top Fused Chunks) ---")
+            for idx, h in enumerate(trace.fused_hits, start=1):
+                code_raw = trace.chunk_codes.get(h[0], "")
+                lines = code_raw.strip().splitlines()
+                preview = "\n".join(lines[:3]) if not full_code else code_raw
+                print(f"[{idx}] {h[1]}::{h[2]} (lines {h[3]}-{h[4]}):")
+                print(preview)
         print("\n--- Graph Additions ---")
         for idx, g in enumerate(trace.graph_additions, start=1):
             print(f"  [{idx}] {g[0]} reason={g[1]} caused_by={g[2]}")
         b = trace.budget
         print(f"\nBudget: {len(b.included_chunk_ids)} chunks, {b.used_tokens} / {b.max_tokens} tokens (Dropped: {len(b.dropped_chunk_ids)})")
+
+        # Augmented prompt plain text
+        prompt_sections = getattr(trace, "prompt_sections", {}) or {}
+        instructions = prompt_sections.get("instructions", "")
+        chunks_to_show = prompt_sections.get("context_chunks", [])
+        print("\n=== Augmented prompt (what the model actually reads) ===")
+        if instructions:
+            print(f"Instructions:\n{instructions}\n")
+        print("Context Chunks:")
+        for idx, c_info in enumerate(chunks_to_show, start=1):
+            c_code = c_info.get("code", "")
+            c_lines = c_code.splitlines()
+            c_preview = "\n".join(c_lines[:12]) if (not full_code and len(c_lines) > 12) else c_code
+            print(f"[{idx}] {c_info.get('file')}:{c_info.get('lines')} ({c_info.get('symbol')})\n{c_preview}\n")
+        print(f"Question: {trace.question}")
+        if prompt_sections.get("memory"):
+            print(f"Memory: {prompt_sections['memory']}")
+
         if not no_answer and trace.answer:
             print(f"\nAnswer:\n{trace.answer}\nSources: {trace.sources}")
         print()
+
+
+def render_chunks_view(result, target_file: str, current_path: str):
+    """
+    Renders chunk-level indexing and vector inspection for a single file.
+    Shows total lines, chunk count, symbol, line range, token estimate,
+    first 3 lines of embedded text, embedding dimension, and vector preview.
+    """
+    if not target_file:
+        print("[!] Usage: chunks: <filename>\n")
+        return
+
+    if not result or not getattr(result, "store", None) or not getattr(result.store, "chunks", []):
+        print("[!] Repository index is empty (0 chunks). Ingest files first.\n")
+        return
+
+    # Match file in index
+    norm_target = target_file.replace("\\", "/").lower().strip()
+    matching_chunks = [
+        c for c in result.store.chunks
+        if norm_target == c.file_path.replace("\\", "/").lower()
+        or norm_target == os.path.basename(c.file_path).lower()
+        or c.file_path.replace("\\", "/").lower().endswith(norm_target)
+    ]
+
+    if not matching_chunks:
+        print(f"[!] File '{target_file}' is not found in the index. (Run ingestion to index it.)\n")
+        return
+
+    rep_chunk = matching_chunks[0]
+    total_lines = 0
+    full_path = os.path.join(current_path, rep_chunk.file_path) if current_path else rep_chunk.file_path
+    if os.path.isfile(full_path):
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                total_lines = len(f.readlines())
+        except Exception:
+            pass
+    if total_lines == 0:
+        total_lines = max(c.end_line for c in matching_chunks)
+
+    num_chunks = len(matching_chunks)
+    dim = getattr(result.store, "dim", 0)
+
+    if HAS_RICH and console:
+        import shutil
+        term_width = shutil.get_terminal_size((120, 24)).columns if hasattr(shutil, "get_terminal_size") else 120
+        c_console = Console(width=max(term_width, 100))
+
+        c_console.print()
+        c_console.print(Panel(
+            f"[bold cyan]File:[/bold cyan] {rep_chunk.file_path}\n"
+            f"[bold green]Total Lines:[/bold green] {total_lines} | [bold yellow]Indexed Chunks:[/bold yellow] {num_chunks} | [bold magenta]Embedding Dim:[/bold magenta] {dim}",
+            title="[bold bright_blue]Chunk & Vector Index Inspection[/bold bright_blue]",
+            border_style="bright_blue",
+        ))
+
+        t = Table(title=f"Chunks for {os.path.basename(rep_chunk.file_path)}", border_style="cyan", padding=(0, 1))
+        t.add_column("Chunk", style="dim", width=7)
+        t.add_column("Symbol", style="bold cyan", overflow="fold")
+        t.add_column("Lines", style="yellow", width=10)
+        t.add_column("Tokens", style="dim", width=8, justify="right")
+        t.add_column("Embedded Text (First 3 Lines)", style="white")
+        t.add_column("Dim", style="dim", width=6, justify="right")
+        t.add_column("Vector Preview (First 6)", style="green")
+
+        for idx, c in enumerate(matching_chunks, start=1):
+            sym = c.name or "—"
+            lines_str = f"{c.start_line}–{c.end_line}"
+            token_est = int(len(c.code) / 3.5)
+            emb_text = c.as_embedding_text()
+            emb_3 = "\n".join(emb_text.splitlines()[:3])
+
+            vec_idx = result.store.chunks.index(c)
+            vec = result.store.get_vector(vec_idx) if hasattr(result.store, "get_vector") else None
+            if vec is not None and len(vec) >= 6:
+                v6 = [f"{float(x):.4f}" for x in vec[:6]]
+                vec_str = "[" + ", ".join(v6) + ", ...]"
+                v_dim = str(len(vec))
+            elif vec is not None:
+                vec_str = "[" + ", ".join(f"{float(x):.4f}" for x in vec) + "]"
+                v_dim = str(len(vec))
+            else:
+                vec_str = "[...]"
+                v_dim = str(dim)
+
+            t.add_row(f"[{idx}]", sym, lines_str, str(token_est), emb_3, v_dim, vec_str)
+
+        c_console.print(t)
+        c_console.print()
+    else:
+        print(f"\n=== Chunk & Vector Index Inspection: {rep_chunk.file_path} ===")
+        print(f"Total lines: {total_lines} | Number of chunks: {num_chunks} | Embedding dim: {dim}\n")
+        for idx, c in enumerate(matching_chunks, start=1):
+            sym = c.name or "—"
+            lines_str = f"{c.start_line}-{c.end_line}"
+            token_est = int(len(c.code) / 3.5)
+            emb_text = c.as_embedding_text()
+            emb_3 = " / ".join(emb_text.splitlines()[:3])
+
+            vec_idx = result.store.chunks.index(c)
+            vec = result.store.get_vector(vec_idx) if hasattr(result.store, "get_vector") else None
+            if vec is not None and len(vec) >= 6:
+                v6 = [f"{float(x):.4f}" for x in vec[:6]]
+                vec_str = "[" + ", ".join(v6) + ", ...]"
+                v_dim = len(vec)
+            else:
+                vec_str = "[...]"
+                v_dim = dim
+
+            print(f"[{idx}] symbol: {sym} | lines: {lines_str} | tokens: ~{token_est} | dim: {v_dim}")
+            print(f"    embedded text: {emb_3}")
+            print(f"    vector: {vec_str}\n")
+
+
+def render_index_stats(result, embedder):
+    """
+    Renders comprehensive index statistics across the repository.
+    Shows: files, chunks, graph nodes, embedder used, BM25 vocabulary size, FAISS vector count.
+    """
+    if not result or not getattr(result, "store", None):
+        print("[!] Repository index is empty. Ingest files first.\n")
+        return
+
+    files_count = len(result.files) if getattr(result, "files", None) else len(set(c.file_path for c in result.store.chunks))
+    chunks_count = len(result.store.chunks)
+    graph_nodes = result.graph.number_of_nodes() if getattr(result, "graph", None) else 0
+    embedder_name = getattr(result, "embedder_name", None) or type(embedder).__name__
+    if embedder_name == "TfidfEmbedder":
+        embedder_name = "TF-IDF (offline)"
+    elif embedder_name == "OllamaEmbedder":
+        embedder_name = "Ollama (dense)"
+
+    bm25_vocab = len(result.lexical_index.inverted_index) if getattr(result, "lexical_index", None) else 0
+    faiss_count = result.store.index.ntotal if hasattr(result.store, "index") else chunks_count
+
+    if HAS_RICH and console:
+        t = Table(title="Index & Pipeline Statistics", border_style="bright_blue", padding=(0, 2))
+        t.add_column("Metric", style="bold cyan")
+        t.add_column("Value", style="bold green", justify="right")
+        t.add_row("Indexed Files", str(files_count))
+        t.add_row("Code Chunks", str(chunks_count))
+        t.add_row("Dependency Graph Nodes", str(graph_nodes))
+        t.add_row("Embedder Used", str(embedder_name))
+        t.add_row("BM25 Vocabulary Size", f"{bm25_vocab:,} terms")
+        t.add_row("FAISS Vector Count", f"{faiss_count:,} vectors")
+        console.print()
+        console.print(t)
+        console.print()
+    else:
+        print("\n=== Index Statistics ===")
+        print(f"  Files: {files_count}")
+        print(f"  Chunks: {chunks_count}")
+        print(f"  Graph nodes: {graph_nodes}")
+        print(f"  Embedder used: {embedder_name}")
+        print(f"  BM25 vocabulary size: {bm25_vocab} terms")
+        print(f"  FAISS vector count: {faiss_count} vectors\n")
+
+
+def render_compare_panels(no_rag_ans: str, elapsed_no_rag: float, rag_ans: str, elapsed_rag: float):
+    """
+    Renders comparative views: without RAG vs. with RAG.
+    """
+    if HAS_RICH and console:
+        console.print()
+        console.print(Panel(
+            Markdown(no_rag_ans or "*(no response)*"),
+            title=f"[bold yellow]Without RAG (No Context)[/bold yellow] — [dim]{elapsed_no_rag:.2f}s[/dim]",
+            border_style="yellow",
+        ))
+        console.print(Panel(
+            Markdown(rag_ans or "*(no response)*"),
+            title=f"[bold green]With RAG (Repository Context)[/bold green] — [dim]{elapsed_rag:.2f}s[/dim]",
+            border_style="green",
+        ))
+        console.print()
+    else:
+        print(f"\n{'='*70}")
+        print(f"WITHOUT RAG (No Context) — {elapsed_no_rag:.2f}s")
+        print(f"{'='*70}\n{no_rag_ans}\n")
+        print(f"{'='*70}")
+        print(f"WITH RAG (Repository Context) — {elapsed_rag:.2f}s")
+        print(f"{'='*70}\n{rag_ans}\n")
+
+
+def execute_explain_command(engine, result, raw_input: str, active_file_filter: Optional[str] = None):
+    """
+    Unified execution handler for explain: commands across interactive and batch modes.
+    """
+    raw = raw_input.split(":", 1)[1].strip() if ":" in raw_input else raw_input.split(maxsplit=1)[1].strip()
+    parts = raw.split()
+    no_answer = False
+    as_json = False
+    full_code = False
+    compare_mode = False
+    cli_width = None
+    top_k = 5
+    clean_parts = []
+    i = 0
+    while i < len(parts):
+        p = parts[i]
+        if p == "--no-answer":
+            no_answer = True
+        elif p == "--json":
+            as_json = True
+        elif p == "--full":
+            full_code = True
+        elif p == "--compare":
+            compare_mode = True
+        elif p.startswith("--width="):
+            try:
+                cli_width = int(p.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif p == "--width" and i + 1 < len(parts):
+            try:
+                cli_width = int(parts[i + 1])
+                i += 1
+            except ValueError:
+                pass
+        elif p.startswith("--top-k="):
+            try:
+                top_k = int(p.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif p == "--top-k" and i + 1 < len(parts):
+            try:
+                top_k = int(parts[i + 1])
+                i += 1
+            except ValueError:
+                pass
+        else:
+            clean_parts.append(p)
+        i += 1
+
+    explain_q = " ".join(clean_parts).strip()
+    if not explain_q:
+        print("[!] Usage: explain: <question> [--no-answer] [--json] [--full] [--compare] [--width N] [--top-k N]\n")
+        return
+
+    if not getattr(result, "store", None) or not getattr(result.store, "chunks", []):
+        print("[!] Repository index is empty (0 chunks). Ingest files first.\n")
+        return
+
+    # Handle --compare validation
+    no_rag_ans = None
+    elapsed_no_rag = 0.0
+    if compare_mode:
+        if no_answer:
+            print("[!] Note: --compare requires the LLM; ignored because --no-answer was specified.\n")
+            compare_mode = False
+        elif engine.llm is None:
+            print("[!] Note: --compare requires an LLM backend (e.g. Ollama). Current backend has no LLM.\n")
+            compare_mode = False
+
+    cleaned_explain_q, mention_file = parse_mention(explain_q)
+    effective_filter = mention_file if mention_file else active_file_filter
+    search_query = cleaned_explain_q if cleaned_explain_q else (mention_file or explain_q)
+
+    if compare_mode and engine.llm is not None:
+        t0_no = time.perf_counter()
+        no_rag_system = "Answer from your own knowledge, say if you cannot see the code."
+        no_rag_prompt = f"Question: {search_query}\nAnswer:"
+        no_rag_ans = engine.llm.generate(no_rag_prompt, system=no_rag_system)
+        elapsed_no_rag = time.perf_counter() - t0_no
+
+    from core.retrieval_trace import RetrievalTrace
+    trace = RetrievalTrace()
+    engine.ask(
+        search_query,
+        top_k=top_k,
+        file_filter=effective_filter,
+        trace=trace,
+        no_answer=no_answer,
+    )
+
+    if as_json:
+        import json
+        trace_dict = trace.to_dict()
+        if compare_mode and no_rag_ans is not None:
+            trace_dict["compare"] = {
+                "without_rag": {"answer": no_rag_ans, "elapsed_seconds": round(elapsed_no_rag, 3)},
+                "with_rag": {"answer": trace.answer, "elapsed_seconds": round(trace.timings_ms.get("llm", 0.0) / 1000.0, 3)},
+            }
+        print(json.dumps(trace_dict, indent=2))
+        print()
+    else:
+        render_retrieval_trace(trace, full_code=full_code, no_answer=no_answer, terminal_width=cli_width)
+        if compare_mode and no_rag_ans is not None:
+            elapsed_rag = trace.timings_ms.get("llm", 0.0) / 1000.0
+            render_compare_panels(no_rag_ans, elapsed_no_rag, trace.answer or "", elapsed_rag)
 
 
 class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
     """Context-aware autocompleter for commands, files, symbols, and settings."""
 
     COMMANDS = [
-        ("explain:", "Inspect RAG retrieval & fusion provenance for a query"),
+        ("explain:", "Inspect RAG retrieval, augmented prompt & fusion provenance"),
+        ("chunks:", "Inspect index chunks and vector previews for a file"),
+        ("index-stats", "Show comprehensive index statistics across the repository"),
         ("help", "Show available CLI commands"),
         ("?", "Show available CLI commands"),
         ("exit", "Exit IntelliCodeX CLI"),
@@ -983,6 +1397,17 @@ class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
                         else:
                             yield Completion(basename, start_position=-len(arg), display=basename, display_meta="File")
             return
+
+        # 0b. Parameter completion: chunks:<file> or chunks <file>
+        for prefix in ("chunks:", "chunks "):
+            if stripped.startswith(prefix):
+                arg = stripped[len(prefix):]
+                if self.get_files_fn:
+                    files = self.get_files_fn() or []
+                    for f in files:
+                        if arg.lower() in f.lower():
+                            yield Completion(f, start_position=-len(arg), display=f, display_meta="File")
+                return
 
         # 1. Parameter completion: deps:<file> or deps <file>
         for prefix in ("deps:", "deps "):
@@ -1272,6 +1697,20 @@ def main():
 
     # Batch Query Non-Interactive Mode
     if args.query:
+        bq = args.query.strip()
+        if bq.lower().startswith("chunks:") or bq.lower().startswith("chunks "):
+            target_f = bq.split(":", 1)[1].strip() if ":" in bq else bq.split(maxsplit=1)[1].strip()
+            render_chunks_view(result, target_f, current_path)
+            return 0
+
+        if bq.lower() in ("index-stats", "index_stats", "indexstats", "stats"):
+            render_index_stats(result, embedder)
+            return 0
+
+        if bq.lower().startswith("explain:") or bq.lower().startswith("explain "):
+            execute_explain_command(engine, result, bq, active_file_filter=None)
+            return 0
+
         # Parse @mention from batch query as well
         cleaned_query, mention_file = parse_mention(args.query)
         
@@ -1445,6 +1884,10 @@ def main():
 
         if query.lower() == "status":
             render_status_panel(current_path, active_backend, engine, watcher)
+            continue
+
+        if query.lower() in ("index-stats", "index_stats", "indexstats"):
+            render_index_stats(result, embedder)
             continue
 
         if query.lower() in ("files", "ls"):
@@ -1755,67 +2198,15 @@ def main():
                 print(f"\n{sec_report}\n")
             continue
 
-        # Retrieval View: explain: <question> [--no-answer] [--json] [--full] [--top-k N]
+        # Chunks View: chunks: <file>
+        if query.lower().startswith("chunks:") or query.lower().startswith("chunks "):
+            target_f = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+            render_chunks_view(result, target_f, current_path)
+            continue
+
+        # Retrieval View: explain: <question> [--no-answer] [--json] [--full] [--compare] [--width N] [--top-k N]
         if query.lower().startswith("explain:") or query.lower().startswith("explain "):
-            raw = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
-            parts = raw.split()
-            no_answer = False
-            as_json = False
-            full_code = False
-            top_k = 5
-            clean_parts = []
-            i = 0
-            while i < len(parts):
-                p = parts[i]
-                if p == "--no-answer":
-                    no_answer = True
-                elif p == "--json":
-                    as_json = True
-                elif p == "--full":
-                    full_code = True
-                elif p.startswith("--top-k="):
-                    try:
-                        top_k = int(p.split("=", 1)[1])
-                    except ValueError:
-                        pass
-                elif p == "--top-k" and i + 1 < len(parts):
-                    try:
-                        top_k = int(parts[i + 1])
-                        i += 1
-                    except ValueError:
-                        pass
-                else:
-                    clean_parts.append(p)
-                i += 1
-
-            explain_q = " ".join(clean_parts).strip()
-            if not explain_q:
-                print("[!] Usage: explain: <question> [--no-answer] [--json] [--full] [--top-k N]\n")
-                continue
-
-            if not getattr(result, "store", None) or not getattr(result.store, "chunks", []):
-                print("[!] Repository index is empty (0 chunks). Ingest files first.\n")
-                continue
-
-            from core.retrieval_trace import RetrievalTrace
-            trace = RetrievalTrace()
-            cleaned_explain_q, mention_file = parse_mention(explain_q)
-            effective_filter = mention_file if mention_file else active_file_filter
-            search_query = cleaned_explain_q if cleaned_explain_q else (mention_file or explain_q)
-            engine.ask(
-                search_query,
-                top_k=top_k,
-                file_filter=effective_filter,
-                trace=trace,
-                no_answer=no_answer,
-            )
-
-            if as_json:
-                import json
-                print(json.dumps(trace.to_dict(), indent=2))
-                print()
-            else:
-                render_retrieval_trace(trace, full_code=full_code, no_answer=no_answer)
+            execute_explain_command(engine, result, query, active_file_filter=active_file_filter)
             continue
 
 
