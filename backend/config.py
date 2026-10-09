@@ -117,6 +117,14 @@ class Settings(BaseModel):
             os.path.abspath(r"C:\Users\vikas\Downloads\web ui"),
         ]
     )
+    # Git Clone Security
+    ALLOWED_GIT_HOSTS: List[str] = Field(
+        default_factory=lambda: [
+            h.strip().lower()
+            for h in os.getenv("ALLOWED_GIT_HOSTS", "github.com,gitlab.com,bitbucket.org").split(",")
+            if h.strip()
+        ]
+    )
 
     def get_trusted_proxies(self) -> List[str]:
         """Returns parsed list of trusted proxy IP strings."""

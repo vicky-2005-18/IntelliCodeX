@@ -11,7 +11,7 @@ from core.vectorstore import FaissVectorStore
 from core.embedder import BaseEmbedder
 from core.chunker import CodeChunk
 from core.lexical_index import BM25Index
-from core.static_checks import run_static_checks
+from core.static_checks import run_static_checks, run_static_checks_for_chunk
 
 # Debug flag for prompt inspection
 DEBUG_PROMPT = os.getenv("INTELLICODEX_DEBUG_PROMPT", "0") == "1"
@@ -52,6 +52,95 @@ PERSONAS: Dict[str, str] = {
 DEFAULT_SYSTEM_PROMPT = PERSONAS["general"]
 SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
 
+QA_SYSTEM_PROMPT = (
+    "You are IntelliCodeX, an AI code assistant for software repositories. "
+    "Answer the user's question accurately using ONLY the provided repository context. "
+    "Cite relevant file paths and line numbers for your explanation. "
+    "If the context does not contain enough information to answer, state that clearly."
+)
+
+
+def strip_qa_scaffolding(text: str) -> str:
+    """Strips '### Function / Docstring/intent / Code' scaffolding from chunk text or history in Q&A mode."""
+    if not text:
+        return ""
+    import re
+    cleaned_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.match(r'^###\s*Function\b', stripped, re.IGNORECASE):
+            continue
+        if re.match(r'^(?:\d+\.\s*)?Docstring/intent:\s*.*$', stripped, re.IGNORECASE):
+            continue
+        if re.match(r'^(?:\d+\.\s*)?Code:\s*$', stripped, re.IGNORECASE):
+            continue
+        if re.match(r'^(?:\d+\.\s*)?Analysis:\s*.*$', stripped, re.IGNORECASE):
+            continue
+        if re.match(r'^(?:\d+\.\s*)?Answer\s+(?:MATCH|MISMATCH)\b.*$', stripped, re.IGNORECASE):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
+
+
+def partition_sources(answer: str, candidate_chunks: List[Any]) -> Tuple[List[Any], List[Any]]:
+    """
+    Partitions candidate chunks into:
+    1. Relied-on chunks: chunks whose symbol, file:line, or distinctive code appears in the answer.
+    2. Other retrieved context: the remaining chunks.
+    """
+    if not answer or not candidate_chunks:
+        return [], candidate_chunks
+
+    import re
+    relied = []
+    other = []
+
+    answer_clean = answer.split("Sources:")[0] if "Sources:" in answer else answer
+
+    for item in candidate_chunks:
+        chunk = item[0] if isinstance(item, tuple) else (item.get("chunk") if isinstance(item, dict) else item)
+        if not chunk or not getattr(chunk, "file_path", None):
+            continue
+
+        is_relied = False
+        # 1. Symbol name appears in answer (symbol length >= 2)
+        symbol = getattr(chunk, "name", "") or ""
+        if symbol and symbol != "—" and len(symbol) >= 2:
+            if re.search(rf"\b{re.escape(symbol)}\b", answer_clean):
+                is_relied = True
+
+        # 2. File:line appears in answer
+        if not is_relied:
+            fp = chunk.file_path
+            base_fp = os.path.basename(fp)
+            s_line = str(chunk.start_line)
+            e_line = str(chunk.end_line)
+            if f"{fp}:{s_line}" in answer_clean or f"{base_fp}:{s_line}" in answer_clean:
+                is_relied = True
+            elif f"{s_line}-{e_line}" in answer_clean and (fp in answer_clean or base_fp in answer_clean):
+                is_relied = True
+            elif fp in answer_clean or base_fp in answer_clean:
+                for l_num in (s_line, e_line):
+                    if re.search(rf"\bline\s+{l_num}\b", answer_clean, re.IGNORECASE):
+                        is_relied = True
+                        break
+
+        # 3. Distinctive code from chunk appears in answer
+        if not is_relied and getattr(chunk, "code", None):
+            code_lines = [line.strip() for line in chunk.code.splitlines()]
+            for line in code_lines:
+                if len(line) >= 12 and not line.startswith(("#", "//", "/*", "*", "import ", "from ", "def ", "class ", "return None")):
+                    if line in answer_clean:
+                        is_relied = True
+                        break
+
+        if is_relied:
+            relied.append(item)
+        else:
+            other.append(item)
+
+    return relied, other
+
 
 class ConversationMemory:
     """Manages multi-turn conversation dialogue history for RAG queries."""
@@ -59,14 +148,29 @@ class ConversationMemory:
     def __init__(self, max_turns: int = 5):
         self.max_turns = max_turns
         self.turns: List[Tuple[str, str]] = []  # [(user_query, assistant_response)]
+        self.turn_files: List[Set[str]] = []
 
-    def add_turn(self, query: str, response: str):
+    def add_turn(self, query: str, response: str, files: Optional[Set[str]] = None):
         self.turns.append((query, response))
+        self.turn_files.append(set(files) if files else set())
         if len(self.turns) > self.max_turns:
             self.turns = self.turns[-self.max_turns:]
+            self.turn_files = self.turn_files[-self.max_turns:]
 
     def clear(self):
         self.turns.clear()
+        self.turn_files.clear()
+
+    def is_topic_shifted(self, current_files: Set[str]) -> bool:
+        """Detect if the newly retrieved context diverged completely from recent turns."""
+        if not self.turns or not current_files:
+            return False
+        for prev_files in reversed(self.turn_files):
+            if prev_files:
+                if not (current_files & prev_files):
+                    return True
+                return False
+        return False
 
     def is_code_analysis_question(self, query: str) -> bool:
         """Detect if the query is a code analysis/bug-finding question."""
@@ -90,10 +194,13 @@ class ConversationMemory:
                 history_lines.append(f"Q{idx}: {q}")
         else:
             # Normal conversation: include both user and assistant
-            history_lines = ["--- Conversation History ---"]
+            history_lines = [
+                "--- Conversation History (Context only — never let history outweigh or override the retrieved code context below) ---"
+            ]
             for idx, (q, r) in enumerate(self.turns, start=1):
                 history_lines.append(f"Turn {idx} User: {q}")
-                r_snippet = r[:250].replace("\n", " ") + ("..." if len(r) > 250 else "")
+                r_clean = strip_qa_scaffolding(r)
+                r_snippet = r_clean[:250].replace("\n", " ") + ("..." if len(r_clean) > 250 else "")
                 history_lines.append(f"Turn {idx} Assistant: {r_snippet}")
         
         return "\n".join(history_lines)
@@ -311,16 +418,20 @@ def format_context(expanded_results: List[Any], max_token_budget: int = 3000, tr
             if trace is not None:
                 trace.chunk_codes[chunk_obj.chunk_id] = chunk_obj.code
 
-    # Group chunks by file
+    # Group chunks by file, tracking highest retrieval score per file
     file_chunks = defaultdict(list)
+    file_max_score = defaultdict(float)
     for item in expanded_results:
         if isinstance(item, tuple):
             chunk, score = item[0], item[1]
         elif isinstance(item, dict):
             chunk = item["chunk"]
+            score = item.get("score", 0.0)
         else:
             continue
         file_chunks[chunk.file_path].append(chunk)
+        if score > file_max_score[chunk.file_path]:
+            file_max_score[chunk.file_path] = score
     
     # For each file, merge chunks into contiguous line-numbered blocks
     blocks = []
@@ -328,7 +439,8 @@ def format_context(expanded_results: List[Any], max_token_budget: int = 3000, tr
     current_chars = 0
     included_chunk_ids: List[str] = []
     
-    for file_path in sorted(file_chunks.keys()):
+    # Sort files by relevance score descending so top-ranked chunks get precedence in token budget
+    for file_path in sorted(file_chunks.keys(), key=lambda fp: file_max_score[fp], reverse=True):
         chunks = file_chunks[file_path]
         
         # Sort chunks by start line
@@ -396,12 +508,14 @@ class QueryEngine:
         lexical_index: Optional[BM25Index] = None,
         hybrid_search: bool = True,
         rrf_k: int = 60,
+        repo_path: Optional[str] = None,
     ):
         self.store = store
         self.embedder = embedder
         self.llm = llm
         self.dep_graph = dep_graph
         self.call_graph = call_graph
+        self.repo_path = repo_path
         self.memory = ConversationMemory(max_turns=max_turns)
         self.active_persona = "general"
         self.system_prompt = PERSONAS["general"]
@@ -698,6 +812,7 @@ class QueryEngine:
         file_filter: Optional[str] = None,
         trace: Optional[Any] = None,
         no_answer: bool = False,
+        append_sources: bool = False,
     ) -> dict:
         """Performs RAG query answering with context expansion, conversation history, and persona reasoning."""
         t_start = time.perf_counter()
@@ -766,6 +881,16 @@ class QueryEngine:
             "sources": sources,
         }
 
+        # Extract files in current retrieved context for topic-shift tracking
+        current_files = {
+            c.file_path
+            for item in expanded_results
+            for c in [item[0] if isinstance(item, tuple) else item.get("chunk")]
+            if c and getattr(c, "file_path", None)
+        }
+        if use_memory and self.memory.is_topic_shifted(current_files):
+            self.memory.clear()
+
         # Build prompt and capture augmented prompt & prompt_sections
         is_analysis = self.memory.is_code_analysis_question(question)
         history_str = self.memory.format_history(is_analysis=is_analysis) if (use_memory and len(self.memory) > 0) else ""
@@ -776,12 +901,7 @@ class QueryEngine:
                 f"The context below is scoped to this file. Answer the user's question using this context.\n\n"
             )
 
-        bug_keywords = [
-            "bug", "error", "issue", "problem", "wrong", "incorrect", "fix", "mistake",
-            "explain", "check", "review", "analyze", "analyse", "find", "look", "inspect",
-            "update", "modify", "correct", "patch", "refactor", "proper", "improve",
-        ]
-        is_bug_query = any(keyword in question.lower() for keyword in bug_keywords) or bool(effective_filter)
+        is_bug_query = self._classify_query_intent(question, file_filter=effective_filter)
 
         if is_bug_query:
             anti_hallucination = (
@@ -802,11 +922,14 @@ class QueryEngine:
                 "7. Explain in one sentence why it is a bug and provide the fix\n\n"
                 "CRITICAL: Only report bugs that exist in the code. Quote the exact line from the code.\n\n"
             )
+            system_prompt_to_use = self.system_prompt
         else:
             anti_hallucination = (
-                "IMPORTANT: When reporting bugs or issues, only report those that exist in the files shown in context below. "
-                "Do NOT attribute a bug from one file to another file. For general questions, use the provided context accurately.\n\n"
+                "Answer the question directly based on the provided repository context. "
+                "Cite file paths and line numbers accurately. Do not invent or assume behavior not shown in the context.\n\n"
             )
+            system_prompt_to_use = QA_SYSTEM_PROMPT
+            context = strip_qa_scaffolding(context)
 
         prompt_parts = []
         if history_str:
@@ -828,7 +951,7 @@ class QueryEngine:
                     "chunk_id": c.chunk_id,
                 })
 
-        instruction_block = (self.system_prompt + "\n\n" + anti_hallucination + file_scope_note).strip() if self.system_prompt else (anti_hallucination + file_scope_note).strip()
+        instruction_block = (system_prompt_to_use + "\n\n" + anti_hallucination + file_scope_note).strip() if system_prompt_to_use else (anti_hallucination + file_scope_note).strip()
 
         if trace is not None:
             trace.augmented_prompt = prompt
@@ -898,12 +1021,7 @@ class QueryEngine:
                 if chunk and chunk.file_path and chunk.file_path not in files_seen:
                     files_seen.add(chunk.file_path)
                     try:
-                        # Extract full file content or chunk code
-                        file_code = chunk.code
-                        if os.path.isfile(chunk.file_path):
-                            with open(chunk.file_path, "r", encoding="utf-8", errors="replace") as f:
-                                file_code = f.read()
-                        checks = run_static_checks(file_code, chunk.file_path, chunk.language)
+                        checks = run_static_checks_for_chunk(chunk, repo_path=self.repo_path)
                         static_findings.extend(checks)
                     except Exception as e:
                         if DEBUG_PROMPT:
@@ -913,8 +1031,11 @@ class QueryEngine:
             has_syntax_error = any(f.get("type") == "SyntaxError" for f in static_findings)
             if has_syntax_error:
                 answer = self._format_merged_findings(static_findings)
+                answer, unverified_files, unverified_symbols = self._post_process_answer(answer, sources, append_to_answer=append_sources)
                 t_total = time.perf_counter() - t_start
                 response["answer"] = answer
+                response["unverified_files"] = unverified_files
+                response["unverified_symbols"] = unverified_symbols
                 response["elapsed_seconds"] = round(t_total, 3)
                 response["retrieval_seconds"] = round(t_retrieval, 3)
                 response["llm_seconds"] = 0.0
@@ -979,9 +1100,11 @@ class QueryEngine:
             )
         else:
             anti_hallucination = (
-                "IMPORTANT: When reporting bugs or issues, only report those that exist in the files shown in context below. "
-                "Do NOT attribute a bug from one file to another file. For general questions, use the provided context accurately.\n\n"
+                "Answer the question directly based on the provided repository context. "
+                "Cite file paths and line numbers accurately. Do not invent or assume behavior not shown in the context.\n\n"
             )
+            system_prompt_to_use = QA_SYSTEM_PROMPT
+            context = strip_qa_scaffolding(context)
             t_llm0 = time.perf_counter()
 
         prompt_parts = []
@@ -999,13 +1122,13 @@ class QueryEngine:
             from backend.config import settings
             debug_path = os.path.join(settings.STORAGE_DIR, "last_prompt.txt")
             estimated_tokens = int(len(prompt) / 3.5)
-            debug_content = f"=== SYSTEM PROMPT ===\n{self.system_prompt}\n\n=== USER PROMPT ===\n{prompt}\n\n=== ESTIMATED TOKENS ===\n{estimated_tokens}\n"
+            debug_content = f"=== SYSTEM PROMPT ===\n{system_prompt_to_use}\n\n=== USER PROMPT ===\n{prompt}\n\n=== ESTIMATED TOKENS ===\n{estimated_tokens}\n"
             os.makedirs(settings.STORAGE_DIR, exist_ok=True)
             with open(debug_path, "w", encoding="utf-8") as f:
                 f.write(debug_content)
             print(f"[DEBUG] Prompt written to {debug_path} (estimated {estimated_tokens} tokens)")
         
-        answer = self.llm.generate(prompt, system=self.system_prompt, temperature=0.0)
+        answer = self.llm.generate(prompt, system=system_prompt_to_use, temperature=0.0)
 
         # Anti-hallucination filter for bug queries
         if is_bug_query:
@@ -1016,11 +1139,46 @@ class QueryEngine:
             merged = self._merge_findings(static_findings + runtime_findings, semantic_findings)
             if merged:
                 answer = self._format_merged_findings(merged)
+        else:
+            # Guard against Q&A drift: stop generation if "### Analysis" or "MATCH" appears
+            import re
+            drift_match = re.search(r'(?:###\s*Analysis|\bMATCH\b|\bMISMATCH\b)', answer)
+            if drift_match:
+                answer = answer[:drift_match.start()].rstrip()
 
         t_total = time.perf_counter() - t_start
         t_llm = max(0.0, time.perf_counter() - t_llm0)
 
+        # Partition sources into relied-on chunks vs unused retrieved context
+        relied_items, other_items = partition_sources(answer, expanded_results)
+        relied_sources = [
+            f"{c.file_path}:{c.start_line}-{c.end_line}"
+            for item in relied_items
+            for c in [item[0] if isinstance(item, tuple) else item.get("chunk")]
+            if c and getattr(c, "file_path", None)
+        ]
+        relied_sources = list(dict.fromkeys(relied_sources))
+
+        other_sources = [
+            f"{c.file_path}:{c.start_line}-{c.end_line}"
+            for item in other_items
+            for c in [item[0] if isinstance(item, tuple) else item.get("chunk")]
+            if c and getattr(c, "file_path", None)
+        ]
+        other_sources = list(dict.fromkeys(other_sources))
+
+        answer, unverified_files, unverified_symbols = self._post_process_answer(
+            answer,
+            sources=relied_sources,
+            append_to_answer=append_sources,
+            retrieved_context=other_sources,
+        )
+
+        response["sources"] = relied_sources
+        response["retrieved_context"] = other_sources
         response["answer"] = answer
+        response["unverified_files"] = unverified_files
+        response["unverified_symbols"] = unverified_symbols
         response["elapsed_seconds"] = round(t_total, 3)
         response["retrieval_seconds"] = round(t_retrieval, 3)
         response["llm_seconds"] = round(t_llm, 3)
@@ -1029,7 +1187,7 @@ class QueryEngine:
             trace.timings_ms["llm"] = round(t_llm * 1000, 2)
             response["trace"] = trace
         if use_memory:
-            self.memory.add_turn(question, answer)
+            self.memory.add_turn(question, answer, files=current_files)
         return response
 
     def stream_ask(
@@ -1049,6 +1207,15 @@ class QueryEngine:
             yield resp["answer"]
             return
 
+        current_files = {
+            c.file_path
+            for item in expanded_results
+            for c in [item[0] if isinstance(item, tuple) else item.get("chunk")]
+            if c and getattr(c, "file_path", None)
+        }
+        if use_memory and self.memory.is_topic_shifted(current_files):
+            self.memory.clear()
+
         is_analysis = self.memory.is_code_analysis_question(question)
         history_str = self.memory.format_history(is_analysis=is_analysis) if (use_memory and len(self.memory) > 0) else ""
         file_scope_note = ""
@@ -1058,13 +1225,7 @@ class QueryEngine:
                 f"The context below is scoped to this file. Answer the user's question using this context.\n\n"
             )
         
-        # Check if user is asking about bugs/issues/errors
-        # Also treat file-scoped 'explain/check/review/analyze' queries as bug-analysis
-        bug_keywords = [
-            "bug", "error", "issue", "problem", "wrong", "incorrect", "fix", "mistake",
-            "explain", "check", "review", "analyze", "analyse", "find", "look", "inspect",
-        ]
-        is_bug_query = any(keyword in question.lower() for keyword in bug_keywords) or bool(file_filter)
+        is_bug_query = self._classify_query_intent(question, file_filter=file_filter)
         runtime_findings = []
         
         if is_bug_query:
@@ -1091,7 +1252,7 @@ class QueryEngine:
             if has_syntax_error:
                 formatted = self._format_merged_findings(static_findings)
                 if use_memory:
-                    self.memory.add_turn(question, formatted)
+                    self.memory.add_turn(question, formatted, files=current_files)
                 yield formatted
                 return
             # First pass: Runtime errors (syntax, undefined names, missing imports, type errors)
@@ -1121,11 +1282,15 @@ class QueryEngine:
                 "CRITICAL: Only report bugs that exist in the code. Quote the exact line from the code. "
                 "Do not invent bugs. If no bugs found, say 'No bugs found'.\n\n"
             )
+            system_prompt_to_use = self.system_prompt
         else:
             anti_hallucination = (
-                "IMPORTANT: When reporting bugs or issues, only report those that exist in the files shown in context below. "
-                "Do NOT attribute a bug from one file to another file. For general questions, use the provided context accurately.\n\n"
+                "Answer the question directly based on the provided repository context. "
+                "Cite file paths and line numbers accurately. Do not invent or assume behavior not shown in the context.\n\n"
             )
+            system_prompt_to_use = QA_SYSTEM_PROMPT
+            context = strip_qa_scaffolding(context)
+
         prompt_parts = []
         if history_str:
             prompt_parts.append(history_str)
@@ -1135,20 +1300,25 @@ class QueryEngine:
         prompt = "\n\n".join(prompt_parts)
         accumulated_tokens = []
 
-        for token in self.llm.stream_generate(prompt, system=self.system_prompt, temperature=0.0):
+        import re
+        for token in self.llm.stream_generate(prompt, system=system_prompt_to_use, temperature=0.0):
+            if not is_bug_query:
+                curr_text = "".join(accumulated_tokens) + token
+                drift_match = re.search(r'(?:###\s*Analysis|\bMATCH\b|\bMISMATCH\b)', curr_text)
+                if drift_match:
+                    # Halt token streaming on drift
+                    break
             accumulated_tokens.append(token)
             yield token
 
         full_answer = "".join(accumulated_tokens)
         
         # Anti-hallucination filter for bug queries
-        is_bug_query = any(keyword in question.lower() for keyword in ["bug", "error", "issue", "problem", "wrong", "incorrect", "fix", "mistake"])
         if is_bug_query:
             full_answer = self._filter_hallucinated_claims(full_answer, expanded_results)
-            accumulated_tokens = [full_answer]  # Update with filtered answer
         
         if use_memory:
-            self.memory.add_turn(question, full_answer)
+            self.memory.add_turn(question, full_answer, files=current_files)
 
     def _filter_hallucinated_claims(self, answer: str, expanded_results: List[Any]) -> str:
         """Filter out hallucinated claims by verifying quoted lines exist in files."""
@@ -1335,3 +1505,129 @@ class QueryEngine:
                         return True
         
         return False
+
+    def _classify_query_intent(self, question: str, file_filter: Optional[str] = None) -> bool:
+        """Classifies whether a query has explicit bug-finding / crash-localization intent.
+
+        Precedence rules:
+        1. Explicit bug-intent words (bug, bugs, issue, issues, wrong with, review, @file with find/check),
+           stack traces / tracebacks, or crash keywords WIN over leading how/what/where/why.
+        2. Informational questions without explicit bug-intent (e.g. 'How does Flask handle an error raised in a view?')
+           route strictly to normal Q&A.
+        """
+        import re
+        q_lower = question.lower()
+
+        # Stack trace / traceback detection -> crash localization
+        has_stack_trace = (
+            "traceback (most recent call last)" in q_lower
+            or "\n  file " in q_lower
+            or bool(re.search(r'\b(why does this crash|where does it crash|crash(?:ed|es|ing)?)\b', q_lower))
+        )
+        if has_stack_trace:
+            return True
+
+        # Explicit bug-intent words (standalone regex matching)
+        has_explicit_bug_words = bool(re.search(
+            r'\b(bug|bugs|issue|issues|wrong with|syntax error|syntax errors|type error|runtime error|static check|static analysis|code review|audit code)\b',
+            q_lower
+        ))
+
+        # @file / scoped inspection with action verbs
+        has_scoped_inspection = bool(file_filter) and bool(re.search(r'\b(find|check|inspect|review|audit|fix)\b', q_lower))
+
+        if self.active_persona in ("fixer", "reviewer", "audit") or has_explicit_bug_words or has_scoped_inspection:
+            return True
+
+        return False
+
+    def _post_process_answer(
+        self,
+        answer: str,
+        sources: List[str],
+        append_to_answer: bool = False,
+        retrieved_context: Optional[List[str]] = None,
+    ) -> Tuple[str, List[str], List[str]]:
+        """Verifies mentioned file paths and checks for unverified symbol names, optionally appending to answer."""
+        if not answer:
+            return answer, [], []
+
+        # 1. Sources line
+        sources_str = ", ".join(sources) if sources else ""
+        retrieved_str = ", ".join(retrieved_context) if retrieved_context else ""
+
+        # 2. Check mentioned file paths against the repository index
+        indexed_files = set()
+        indexed_basenames = set()
+        store_chunks = getattr(self.store, "chunks", []) or []
+        for c in store_chunks:
+            if getattr(c, "file_path", None):
+                np = c.file_path.replace("\\", "/").lower()
+                indexed_files.add(np)
+                indexed_basenames.add(os.path.basename(np))
+
+        # Extract file paths from answer (excluding Sources line itself)
+        answer_body = answer.split("Sources:")[0] if "Sources:" in answer else answer
+        import re
+        raw_paths = re.findall(r'\b([a-zA-Z0-9_\-\.\/\\]+\.(?:py|js|ts|tsx|jsx|java|c|cpp|h|go|rs|json|yaml|yml|md))\b', answer_body)
+        unverified_files = set()
+        for cand in raw_paths:
+            cand_norm = cand.replace("\\", "/").lower()
+            if cand_norm not in indexed_files and os.path.basename(cand_norm) not in indexed_basenames:
+                if cand_norm not in ("readme.md", "setup.py", "requirements.txt", "pyproject.toml", "license.txt", "license.md", "conftest.py"):
+                    unverified_files.add(cand)
+
+        # 3. Check unverified symbol names against builtins, stdlib, imports, and index
+        import builtins, keyword, sys
+        builtins_set = set(dir(builtins)) | set(keyword.kwlist) | {
+            "def", "class", "self", "cls", "return", "import", "from", "as", "if", "else", "elif",
+            "try", "except", "finally", "with", "raise", "pass", "None", "True", "False", "str",
+            "int", "float", "bool", "dict", "list", "set", "tuple", "len", "print", "open", "type",
+            "range", "isinstance", "issubclass", "getattr", "setattr", "hasattr", "Exception",
+            "ValueError", "KeyError", "TypeError", "AttributeError", "RuntimeError", "SyntaxError",
+            "NameError", "args", "kwargs", "app", "request", "session", "response", "g", "config"
+        }
+
+        stdlib_modules = set(getattr(sys, "stdlib_module_names", set())) | {
+            "os", "sys", "re", "json", "math", "typing", "datetime", "pathlib", "collections",
+            "itertools", "functools", "logging", "unittest", "hashlib", "time", "sqlite3",
+            "dataclasses", "abc", "typing_extensions"
+        }
+
+        imported_names = set()
+        known_symbols = set()
+        for c in store_chunks:
+            if getattr(c, "imports", None):
+                for imp in c.imports:
+                    imported_names.add(imp)
+                    if "." in imp:
+                        imported_names.add(imp.split(".")[0])
+                        imported_names.add(imp.split(".")[-1])
+            if getattr(c, "name", None):
+                known_symbols.add(c.name)
+                if "." in c.name:
+                    known_symbols.add(c.name.split(".")[-1])
+
+        raw_symbols = re.findall(r'`([a-zA-Z_][a-zA-Z0-9_]*)`', answer_body)
+        unverified_symbols = set()
+        for sym in raw_symbols:
+            if (sym not in builtins_set and
+                sym not in stdlib_modules and
+                sym not in imported_names and
+                sym not in known_symbols):
+                found = any(sym in c.code for c in store_chunks) if store_chunks else False
+                if not found:
+                    unverified_symbols.add(sym)
+
+        processed_answer = answer
+        if append_to_answer:
+            if sources_str and "Sources:" not in processed_answer:
+                processed_answer = processed_answer.rstrip() + f"\n\nSources: {sources_str}"
+            if retrieved_str and "Retrieved context:" not in processed_answer:
+                processed_answer = processed_answer.rstrip() + f"\n\nRetrieved context: {retrieved_str}"
+            if unverified_files:
+                processed_answer = processed_answer.rstrip() + f"\n\n[Unverified file path(s): {', '.join(sorted(unverified_files))}]"
+            if unverified_symbols:
+                processed_answer = processed_answer.rstrip() + f"\n\n[Unverified names: {', '.join(sorted(unverified_symbols))}]"
+
+        return processed_answer, sorted(list(unverified_files)), sorted(list(unverified_symbols))

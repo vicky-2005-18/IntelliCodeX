@@ -1,6 +1,6 @@
 # IntelliCodeX — AI-Powered Software Repository Intelligence & Code Analysis Engine
 
-[![Tests: 281 Passed](https://img.shields.io/badge/Tests-281%20Passed-brightgreen)](docs/TESTING.md)
+[![Tests: 305 Passed](https://img.shields.io/badge/Tests-305%20Passed-brightgreen)](docs/TESTING.md)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![CLI: Interactive Terminal Assistant](https://img.shields.io/badge/Interface-CLI%20First-orange)](cli.py)
 [![Backend: FastAPI Bridge](https://img.shields.io/badge/Backend-FastAPI-009688)](backend/main.py)
@@ -214,7 +214,38 @@ python cli.py sample_repo --backend tfidf
 # Option B: Full AI Mode (Requires local Ollama running)
 # Ensure models are pulled: ollama pull qwen2.5-coder && ollama pull nomic-embed-text
 python cli.py sample_repo --backend ollama
+
+# Option C: Remote Git Ingestion (Shallow clone --depth 1 by default, HTTPS only)
+python cli.py https://github.com/bottlepy/bottle.git --backend tfidf
+
+# Option D: Full Git History (Disable shallow clone)
+python cli.py https://github.com/bottlepy/bottle.git --full-history
+
+# Option E: Compare with Legacy Call Graph
+python cli.py sample_repo --legacy-call-graph
 ```
+
+### Git Ingestion & Clone Security
+- **Strict URL Validation**: Both the CLI and REST API enforce HTTPS-only clone URLs (`https://`), rejecting leading hyphens (`-`) to prevent flag injection, whitespace, and embedded credentials (`https://user:pass@host/...`).
+- **Clone Flag Separator & Safe Logging**: Subprocess calls use `--` before the URL, and credentials are never logged or displayed (sanitized via `sanitize_git_url`).
+- **Protocol Restriction**: Sets `GIT_ALLOW_PROTOCOL=https` and `GIT_TERMINAL_PROMPT=0` in the subprocess environment to prevent protocol smuggling.
+- **API Host Allowlist**: Configurable `ALLOWED_GIT_HOSTS` in `backend/config.py` (default: `github.com, gitlab.com, bitbucket.org`) prevents SSRF against internal server addresses.
+- **Shallow Clone Default**: Remote repositories clone using `--depth 1` by default for fast ingestion and minimal disk footprint. Pass `--full-history` (CLI) or `"full_history": true` (API) when complete git commit logs are needed.
+
+### High-Precision Call Graph Engine
+IntelliCodeX constructs function- and method-level symbol call graphs for code navigation and context expansion:
+- **Language-Independent Guarantees (All Languages)**:
+  - **Edge Deduplication**: Call sites produce a single edge attributed to the most specific enclosing chunk based on source line span (method/function, not also class/file container chunks).
+  - **Fan-Out Capping**: Unresolved calls matching more than 3 internal definitions are dropped to eliminate noisy cross-module links.
+  - **Self-Call Exclusion**: Self-directed recursive calls within the same chunk are excluded.
+- **Python Scope Resolution**:
+  - `self.method()` and `cls.method()` resolve strictly to the enclosing class and its base classes.
+  - Receiver method calls on objects other than `self`/`cls` link only when the receiver's class is known (instantiated from `ClassName(...)`, type-annotated, or imported module symbol); unresolved receivers are dropped. Scope rules are Python-specific.
+- **Non-Python Languages (JS/TS, Java, C/C++, Go, Rust)**:
+  - Performs Tree-Sitter AST call extraction with name-only matching against internal candidates, protected by chunk deduplication and the 3-candidate fan-out cap.
+- **Legacy Mode**: Pass `--legacy-call-graph` to compare against the unconstrained baseline.
+- **Cache Invalidation**: Cached SQLite/FAISS indexes store `graph_version: 2`; indexes built with legacy or prior graph versions are automatically rebuilt.
+- **Audit Tool (`scripts/audit_call_graph.py`)**: Supports precision audit mode and source recall audit mode with un-prefilled labeling templates (`null` labels) for developer evaluation. On `bottle.py` (sample size N=25, seed 42), false matches dropped from 21/25 (84.0%) in legacy to 0/25 in precision (labels evaluated by the agent).
 
 ### 4.3 Start Local Backend API Server (Optional) `[TESTED]`
 

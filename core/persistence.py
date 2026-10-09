@@ -22,7 +22,7 @@ from core.chunker import CodeChunk
 from core.vectorstore import FaissVectorStore
 
 DEFAULT_DB_PATH = os.path.join(".storage", "metadata.db")
-
+GRAPH_FORMAT_VERSION: int = 3
 
 
 def compute_file_hash(content: str) -> str:
@@ -51,9 +51,19 @@ def init_schema(conn: sqlite3.Connection):
                 backend TEXT DEFAULT 'tfidf',
                 total_files INTEGER DEFAULT 0,
                 total_chunks INTEGER DEFAULT 0,
-                last_indexed_at REAL NOT NULL
+                last_indexed_at REAL NOT NULL,
+                graph_version INTEGER DEFAULT 1,
+                skip_overloads INTEGER DEFAULT 1
             );
         """)
+        try:
+            conn.execute("ALTER TABLE repos ADD COLUMN graph_version INTEGER DEFAULT 1;")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE repos ADD COLUMN skip_overloads INTEGER DEFAULT 1;")
+        except Exception:
+            pass
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS files (
@@ -93,22 +103,26 @@ def save_repo_metadata(
     repo_path: str,
     backend: str,
     source_files: List[SourceFile],
-    chunks: List[CodeChunk]
+    chunks: List[CodeChunk],
+    graph_version: int = GRAPH_FORMAT_VERSION,
+    skip_overload_stubs: bool = True,
 ):
     """Saves or updates repository metadata, file hashes, and code chunks in SQLite."""
     now = time.time()
     with conn:
         # 1. Update repos table
         conn.execute("""
-            INSERT INTO repos (repo_id, repo_path, backend, total_files, total_chunks, last_indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO repos (repo_id, repo_path, backend, total_files, total_chunks, last_indexed_at, graph_version, skip_overloads)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo_id) DO UPDATE SET
                 repo_path=excluded.repo_path,
                 backend=excluded.backend,
                 total_files=excluded.total_files,
                 total_chunks=excluded.total_chunks,
-                last_indexed_at=excluded.last_indexed_at;
-        """, (repo_id, os.path.abspath(repo_path), backend, len(source_files), len(chunks), now))
+                last_indexed_at=excluded.last_indexed_at,
+                graph_version=excluded.graph_version,
+                skip_overloads=excluded.skip_overloads;
+        """, (repo_id, os.path.abspath(repo_path), backend, len(source_files), len(chunks), now, graph_version, 1 if skip_overload_stubs else 0))
 
         # 2. Insert/Update files table
         for sf in source_files:
@@ -222,22 +236,48 @@ def save_index(
     chunks: List[CodeChunk],
     store: FaissVectorStore,
     db_path: str = DEFAULT_DB_PATH,
-    storage_dir: str = ".storage"
+    storage_dir: str = ".storage",
+    graph_version: int = GRAPH_FORMAT_VERSION,
+    skip_overload_stubs: bool = True,
 ) -> Tuple[str, str]:
     """
     Unified high-level save function:
     1. Saves repository metadata, file hashes, and chunks to SQLite (.storage/metadata.db).
     2. Serializes FAISS vector store index to disk (.storage/<repo_id>.faiss).
+    3. Validates invariants: unique chunk IDs, SQLite rows == FAISS ntotal == in-memory chunks.
     Returns (db_path, faiss_path).
     """
     repo_id = get_repo_id(repo_path)
     conn = get_db_connection(db_path)
     try:
-        save_repo_metadata(conn, repo_id, repo_path, backend, source_files, chunks)
+        save_repo_metadata(
+            conn,
+            repo_id,
+            repo_path,
+            backend,
+            source_files,
+            chunks,
+            graph_version=graph_version,
+            skip_overload_stubs=skip_overload_stubs,
+        )
+        sqlite_row_count = conn.execute("SELECT COUNT(*) FROM chunks WHERE repo_id = ?", (repo_id,)).fetchone()[0]
     finally:
         conn.close()
 
     faiss_path = save_faiss_index(store, repo_id, storage_dir)
+
+    faiss_ntotal = store.index.ntotal if (store and hasattr(store, "index")) else len(chunks)
+    in_mem_count = len(chunks)
+    unique_ids_count = len(set(c.chunk_id for c in chunks))
+
+    if not (unique_ids_count == in_mem_count == sqlite_row_count == faiss_ntotal):
+        msg = (
+            f"[!] Invariant violation at ingest for repo '{repo_id}': "
+            f"unique_chunk_ids={unique_ids_count}, in-memory chunks={in_mem_count}, "
+            f"SQLite chunk rows={sqlite_row_count}, FAISS ntotal={faiss_ntotal}."
+        )
+        raise ValueError(msg)
+
     return db_path, faiss_path
 
 

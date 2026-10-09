@@ -242,3 +242,95 @@ def test_cli_remote_server_interactive(capsys):
     assert "Interactive remote answer." in captured.out
     assert "Exiting Remote Session." in captured.out
 
+
+def test_resolve_repo_path_shallow_clone_default():
+    """Verify resolve_repo_path uses --depth 1 by default when cloning."""
+    from cli import resolve_repo_path
+    import subprocess
+    from unittest.mock import patch, MagicMock
+
+    with patch("subprocess.run") as mock_run, patch("os.path.exists", return_value=False):
+        mock_run.return_value = MagicMock(returncode=0)
+        resolve_repo_path("https://github.com/example/repo.git")
+
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        env = mock_run.call_args[1].get("env", {})
+        assert "git" in cmd
+        assert "clone" in cmd
+        assert "--depth" in cmd
+        depth_idx = cmd.index("--depth")
+        assert cmd[depth_idx + 1] == "1"
+        assert "--" in cmd
+        dash_idx = cmd.index("--")
+        assert cmd[dash_idx + 1] == "https://github.com/example/repo.git"
+        assert env.get("GIT_ALLOW_PROTOCOL") == "https"
+        assert env.get("GIT_TERMINAL_PROMPT") == "0"
+
+
+def test_resolve_repo_path_full_history_flag():
+    """Verify resolve_repo_path omits --depth when full_history=True."""
+    from cli import resolve_repo_path
+    import subprocess
+    from unittest.mock import patch, MagicMock
+
+    with patch("subprocess.run") as mock_run, patch("os.path.exists", return_value=False):
+        mock_run.return_value = MagicMock(returncode=0)
+        resolve_repo_path("https://github.com/example/repo.git", full_history=True)
+
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert "git" in cmd
+        assert "clone" in cmd
+        assert "--depth" not in cmd
+        assert "--" in cmd
+
+
+def test_validate_git_url_cli():
+    """Verify CLI validate_git_url enforces https only, rejects leading '-', rejects whitespace, and rejects embedded credentials."""
+    from cli import validate_git_url
+
+    # Valid HTTPS URL accepted
+    valid_url = "https://github.com/example/repo.git"
+    assert validate_git_url(valid_url) == valid_url
+
+    # Reject empty URL
+    with pytest.raises(ValueError, match="cannot be empty"):
+        validate_git_url("")
+
+    # Reject leading '-'
+    with pytest.raises(ValueError, match="cannot start with '-'"):
+        validate_git_url("--upload-pack=touch /tmp/x")
+
+    with pytest.raises(ValueError, match="cannot start with '-'"):
+        validate_git_url("-malicious-flag")
+
+    # Reject whitespace
+    with pytest.raises(ValueError, match="cannot contain whitespace"):
+        validate_git_url("https://github.com/example /repo.git")
+
+    with pytest.raises(ValueError, match="cannot contain whitespace"):
+        validate_git_url("https://github.com/example/repo.git\n")
+
+    # Reject embedded credentials
+    with pytest.raises(ValueError, match="embedded credentials"):
+        validate_git_url("https://user:password@github.com/example/repo.git")
+
+    with pytest.raises(ValueError, match="embedded credentials"):
+        validate_git_url("https://token@github.com/example/repo.git")
+
+    # Reject non-https protocols
+    with pytest.raises(ValueError, match="https:// protocol only"):
+        validate_git_url("http://github.com/example/repo.git")
+
+    with pytest.raises(ValueError, match="https:// protocol only"):
+        validate_git_url("git@github.com:example/repo.git")
+
+    with pytest.raises(ValueError, match="https:// protocol only"):
+        validate_git_url("ssh://user@server/repo.git")
+
+    with pytest.raises(ValueError, match="https:// protocol only"):
+        validate_git_url("file:///etc/passwd")
+
+
+

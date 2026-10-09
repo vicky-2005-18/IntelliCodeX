@@ -15,6 +15,9 @@ from core.persistence import (
     save_index,
     load_index,
     detect_repository_changes,
+    GRAPH_FORMAT_VERSION,
+    DEFAULT_DB_PATH,
+    get_db_connection,
 )
 from core.lexical_index import BM25Index
 
@@ -40,14 +43,17 @@ def ingest_repository(
     repo_path: str,
     embedder: BaseEmbedder,
     force_reindex: bool = False,
-    save_to_disk: bool = True
+    save_to_disk: bool = True,
+    legacy_call_graph: bool = False,
+    skip_overload_stubs: bool = True,
+    db_path: str = DEFAULT_DB_PATH,
 ) -> IngestedRepository:
     """
     Ingests a repository directory with incremental re-indexing & disk caching support:
     1. Detects file changes via SHA-256 hashes in SQLite.
-    2. If unchanged and cached index exists -> Loads instantly from disk (near 0ms latency).
+    2. If unchanged and cached index exists (with matching graph format version) -> Loads instantly from disk.
     3. If partially changed -> Re-chunks & re-embeds changed/added files only, reusing retained FAISS vectors.
-    4. If fresh index or force_reindex -> Performs full end-to-end ingestion.
+    4. If fresh index, graph format version mismatch, or force_reindex -> Performs full end-to-end ingestion.
     """
     start_t = time.perf_counter()
     if not os.path.exists(repo_path):
@@ -63,17 +69,45 @@ def ingest_repository(
 
     repo_id = get_repo_id(repo_path)
     backend_name = "ollama" if embedder.__class__.__name__ == "OllamaEmbedder" else "tfidf"
+    expected_graph_version = 1 if legacy_call_graph else GRAPH_FORMAT_VERSION
+    expected_skip_overloads = 1 if skip_overload_stubs else 0
 
     if not force_reindex:
-        delta = detect_repository_changes(repo_path, source_files)
+        delta = detect_repository_changes(repo_path, source_files, db_path=db_path)
         if not delta.is_fresh_index:
-            cached_data = load_index(repo_path)
+            cached_data = load_index(repo_path, db_path=db_path)
             if cached_data is not None:
                 meta, cached_chunks, cached_store = cached_data
                 cached_backend = meta.get("backend")
+                cached_graph_version = meta.get("graph_version", 1)
+                cached_skip = meta.get("skip_overloads", 1)
 
-                # Only reuse cached vectors if backend model matches active embedder
-                if cached_backend == backend_name:
+                # Invariant verification at cache load:
+                cids = [c.chunk_id for c in cached_chunks]
+                unique_cids = len(set(cids)) == len(cids)
+                conn = get_db_connection(db_path)
+                try:
+                    sqlite_row_count = conn.execute("SELECT COUNT(*) FROM chunks WHERE repo_id = ?", (repo_id,)).fetchone()[0]
+                finally:
+                    conn.close()
+                faiss_ntotal = cached_store.index.ntotal if (cached_store and hasattr(cached_store, "index")) else -1
+                in_mem_count = len(cached_chunks)
+
+                invariants_ok = (unique_cids and sqlite_row_count == faiss_ntotal == in_mem_count)
+
+                if not invariants_ok:
+                    msg = (
+                        f"[!] Cache integrity check failed for '{repo_path}': "
+                        f"unique_chunk_ids={unique_cids}, SQLite rows={sqlite_row_count}, "
+                        f"FAISS ntotal={faiss_ntotal}, in-memory chunks={in_mem_count}. "
+                        f"Rebuilding index from scratch..."
+                    )
+                    logger.warning(msg)
+                    print(msg)
+                # Only reuse cached vectors if backend model, graph format version, and overload settings all match
+                elif (cached_backend == backend_name and
+                      cached_graph_version == expected_graph_version and
+                      cached_skip == expected_skip_overloads):
                     # Case A: 100% unchanged -> zero computation reload
                     if not delta.has_changes():
                         logger.info(f"[*] Loaded 100% cached index for '{repo_path}' ({len(cached_chunks)} chunks).")
@@ -81,7 +115,7 @@ def ingest_repository(
                             embedder.fit([c.as_embedding_text() for c in cached_chunks])
 
                         graph = build_dependency_graph(source_files)
-                        call_g = build_call_graph(cached_chunks, source_files)
+                        call_g = build_call_graph(cached_chunks, source_files, legacy=legacy_call_graph)
                         ast_count = sum(1 for c in cached_chunks if c.kind in ("function", "class", "method", "interface", "enum", "type", "struct", "section"))
 
                         lex_idx = BM25Index(cached_chunks)
@@ -115,7 +149,7 @@ def ingest_repository(
 
                     # Chunk changed/added files
                     changed_files = delta.added + delta.modified
-                    new_chunks = chunk_repository(changed_files) if changed_files else []
+                    new_chunks = chunk_repository(changed_files, skip_overload_stubs=skip_overload_stubs) if changed_files else []
 
                     if new_chunks:
                         if hasattr(embedder, "dim") and getattr(embedder, "dim", None) != cached_store.dim:
@@ -153,11 +187,11 @@ def ingest_repository(
                         store = FaissVectorStore(dim=embedder.dim)
 
                     graph = build_dependency_graph(source_files)
-                    call_g = build_call_graph(all_chunks, source_files)
+                    call_g = build_call_graph(all_chunks, source_files, legacy=legacy_call_graph)
                     ast_chunks_count = sum(1 for c in all_chunks if c.kind in ("function", "class", "method", "interface", "enum", "type", "struct", "section"))
 
                     if save_to_disk:
-                        save_index(repo_path, backend_name, source_files, all_chunks, store)
+                        save_index(repo_path, backend_name, source_files, all_chunks, store, db_path=db_path, graph_version=expected_graph_version, skip_overload_stubs=skip_overload_stubs)
 
                     lex_idx = BM25Index(all_chunks)
                     elapsed = time.perf_counter() - start_t
@@ -176,13 +210,13 @@ def ingest_repository(
                     )
 
     # Full Ingestion (Fresh or force_reindex)
-    chunks = chunk_repository(source_files)
+    chunks = chunk_repository(source_files, skip_overload_stubs=skip_overload_stubs)
     if not chunks:
         raise ValueError(f"No code chunks could be extracted from files in '{repo_path}'")
 
     ast_chunks_count = sum(1 for c in chunks if c.kind in ("function", "class", "method", "interface", "enum", "type", "struct", "section"))
     graph = build_dependency_graph(source_files)
-    call_g = build_call_graph(chunks, source_files)
+    call_g = build_call_graph(chunks, source_files, legacy=legacy_call_graph)
 
     texts = [c.as_embedding_text() for c in chunks]
     vectors = embedder.embed(texts)
@@ -191,7 +225,7 @@ def ingest_repository(
     store.add(chunks, vectors)
 
     if save_to_disk:
-        save_index(repo_path, backend_name, source_files, chunks, store)
+        save_index(repo_path, backend_name, source_files, chunks, store, db_path=db_path, graph_version=expected_graph_version, skip_overload_stubs=skip_overload_stubs)
 
     lex_idx = BM25Index(chunks)
     elapsed = time.perf_counter() - start_t

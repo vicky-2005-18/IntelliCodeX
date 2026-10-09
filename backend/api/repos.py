@@ -68,17 +68,54 @@ def validate_ingest_path(repo_path: str) -> str:
     return real_target
 
 
+import urllib.parse
+
+
+def sanitize_git_url(url: str) -> str:
+    """Redacts credentials in URL for safe logging/printing."""
+    return re.sub(r"://([^@/]+)@", r"://***@", url)
+
+
 def validate_clone_url(git_url: str) -> str:
-    """Validates that clone URL is https:// or git@ only, preventing flag injection or unauthorized protocols."""
-    url = git_url.strip()
-    if url.startswith("-"):
-        raise HTTPException(status_code=400, detail="Invalid git clone URL.")
-    if not (url.startswith("https://") or url.startswith("git@")):
+    """Validates that clone URL uses https:// only, rejecting leading '-', whitespace, embedded credentials, and unallowed hosts."""
+    if not git_url:
+        raise HTTPException(status_code=400, detail="Git clone URL cannot be empty.")
+    if git_url.startswith("-"):
+        raise HTTPException(status_code=400, detail="Invalid git clone URL: cannot start with '-'.")
+    if any(c.isspace() for c in git_url):
+        raise HTTPException(status_code=400, detail="Git clone URL cannot contain whitespace.")
+    if not git_url.startswith("https://"):
         raise HTTPException(
             status_code=400,
-            detail="Git clone URL must use https:// or git@ protocols only.",
+            detail="Git clone URL must use https:// protocol only.",
         )
-    return url
+
+    try:
+        parsed = urllib.parse.urlparse(git_url)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Malformed git clone URL: {e}")
+
+    # Reject URLs with embedded credentials
+    if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
+        raise HTTPException(status_code=400, detail="Git clone URL must not contain embedded credentials.")
+
+    # Host allowlist check (if configured)
+    allowed_hosts = getattr(settings, "ALLOWED_GIT_HOSTS", None)
+    if allowed_hosts:
+        host = (parsed.hostname or "").lower()
+        if not host:
+            raise HTTPException(status_code=400, detail="Git clone URL must contain a valid hostname.")
+        allowed = any(
+            host == h.lower() or host.endswith("." + h.lower())
+            for h in allowed_hosts
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Git host '{host}' is not in the allowed hosts list: {', '.join(allowed_hosts)}",
+            )
+
+    return git_url
 
 
 class IngestRequest(BaseModel):
@@ -91,6 +128,7 @@ class GitCloneRequest(BaseModel):
     repo_id: str
     git_url: str
     backend: str = settings.DEFAULT_EMBEDDER_BACKEND
+    full_history: bool = False
 
 
 def get_repo_engine(repo_id: str, user: Optional[User] = None):
@@ -303,7 +341,7 @@ def clone_repo(req: GitCloneRequest, current_user: User = Depends(get_current_us
 
     git_service = GitService()
     try:
-        local_path = git_service.clone_repository(valid_url, valid_id)
+        local_path = git_service.clone_repository(valid_url, valid_id, full_history=req.full_history)
         ingest_req = IngestRequest(repo_id=valid_id, repo_path=local_path, backend=req.backend)
         return ingest_repo(ingest_req, current_user)
     except HTTPException:

@@ -1,3 +1,4 @@
+
 @echo off
 setlocal enabledelayedexpansion
 
@@ -49,7 +50,7 @@ echo =======================================================================
 echo                 INTELLICODEX LAUNCHER - CLI AND LOCAL ENGINE
 echo =======================================================================
 echo.
-echo   [1] Run Interactive CLI (Ollama Mode - qwen2.5-coder)
+echo   [1] Run Interactive CLI (Ollama Mode - qwen2.5-coder:7b)
 echo   [2] Run Interactive CLI (Offline Mode - TF-IDF / CPU-only)
 echo   [3] Start Local Backend API Server (FastAPI - Port 8000)
 echo   [4] Run with Docker Compose (MongoDB + Ollama + Backend)
@@ -74,8 +75,8 @@ goto :MENU
 
 :START_CLI
 echo.
-echo Running IntelliCodeX Interactive CLI (Ollama backend)...
-"%PYTHON_EXE%" cli.py sample_repo --backend ollama --tui
+echo Running IntelliCodeX Interactive CLI (Ollama backend - qwen2.5-coder:7b)...
+"%PYTHON_EXE%" cli.py sample_repo --backend ollama --model qwen2.5-coder:7b --tui
 echo.
 echo =======================================================================
 echo IntelliCodeX CLI has stopped.

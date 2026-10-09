@@ -55,3 +55,9 @@ Thumbs.db
 # Workspace scripts & temp clones
 fix_workspace_readme.py
 intellicodex/
+
+# Evaluation and query outputs
+q*.txt
+q*_7b.txt
+e*.txt
+

@@ -384,7 +384,7 @@ def test_developer_ingest_and_delete_own_repo(client, clean_users):
 
 
 def test_clone_url_validation(client, clean_users):
-    """Clone URLs must use https:// or git@ only; flag injection or other schemes rejected."""
+    """Clone URLs must use https:// only; leading hyphens, whitespace, flag injection, or other schemes rejected."""
     dev = _create_db_user("clone_dev", "developer")
     token = create_access_token(dev)
     headers = {"Authorization": f"Bearer {token}"}
@@ -393,8 +393,15 @@ def test_clone_url_validation(client, clean_users):
         "http://insecure.com/repo.git",
         "file:///etc/passwd",
         "--upload-pack=sh",
+        "-badflag",
         "ssh://user@server/repo.git",
         "ftp://server/repo.git",
+        "git@github.com:user/repo.git",
+        "https://github.com/user/ repo.git",
+        "https://github.com/user/repo.git\n",
+        "https://user:password@github.com/user/repo.git",
+        "https://internal-server.local/user/repo.git",
+        "https://192.168.1.1/user/repo.git",
     ]
 
     for bad_url in invalid_urls:
@@ -491,8 +498,16 @@ def test_git_service_flag_injection_and_timeout():
     with pytest.raises(ValueError, match="cannot start with '-'"):
         svc.clone_repository("--upload-pack=touch /tmp/x", "bad_repo_id")
 
-    # Reject non-https / non-git@ URLs
-    with pytest.raises(ValueError, match="https:// or git@"):
+    # Reject URLs containing whitespace
+    with pytest.raises(ValueError, match="cannot contain whitespace"):
+        svc.clone_repository("https://github.com/foo/bar repo.git", "bad_repo_id")
+
+    # Reject URLs with embedded credentials
+    with pytest.raises(ValueError, match="embedded credentials"):
+        svc.clone_repository("https://user:password@github.com/foo/bar.git", "bad_repo_id")
+
+    # Reject non-https URLs
+    with pytest.raises(ValueError, match="https:// protocol only"):
         svc.clone_repository("file:///etc/passwd", "bad_repo_id")
 
 
@@ -519,6 +534,46 @@ def test_git_service_timeout_expired_cleans_up_and_does_not_hang(monkeypatch):
 
     # Assert partial clone directory was removed
     assert not os.path.exists(target_dir), "Partial clone directory should have been cleaned up on timeout"
+
+
+def test_git_service_clone_shallow_by_default_and_full_history(monkeypatch):
+    """Assert GitService clones with --depth 1 by default, omits --depth when full_history=True, uses '--', and sets GIT_ALLOW_PROTOCOL=https."""
+    import subprocess
+    from unittest.mock import MagicMock
+    from backend.services.git_service import GitService
+
+    captured_cmds = []
+    captured_envs = []
+
+    def mock_run(cmd, *args, **kwargs):
+        captured_cmds.append(cmd)
+        captured_envs.append(kwargs.get("env", {}))
+        mock_res = MagicMock()
+        mock_res.returncode = 0
+        return mock_res
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    monkeypatch.setattr("os.path.exists", lambda p: False)
+
+    svc = GitService()
+    svc.clone_repository("https://github.com/example/repo.git", "repo_shallow")
+    assert len(captured_cmds) == 1
+    cmd1 = captured_cmds[0]
+    env1 = captured_envs[0]
+    assert "--depth" in cmd1
+    assert cmd1[cmd1.index("--depth") + 1] == "1"
+    assert "--" in cmd1
+    dash_idx = cmd1.index("--")
+    assert cmd1[dash_idx + 1] == "https://github.com/example/repo.git"
+    assert env1.get("GIT_ALLOW_PROTOCOL") == "https"
+    assert env1.get("GIT_TERMINAL_PROMPT") == "0"
+
+    svc.clone_repository("https://github.com/example/repo.git", "repo_full", full_history=True)
+    assert len(captured_cmds) == 2
+    cmd2 = captured_cmds[1]
+    assert "--depth" not in cmd2
+    assert "--" in cmd2
+
 
 
 def test_cross_user_all_repo_id_routes_forbidden_for_other_users(client, clean_users, tmp_path):

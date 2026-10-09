@@ -28,7 +28,7 @@ if exist "%~dp0.venv\Scripts\python.exe" (
 :CLI_LOOP
 echo Launching IntelliCodeX Interactive CLI...
 if "%~1"=="" (
-    "%PYTHON_EXE%" cli.py sample_repo --backend ollama --tui
+    "%PYTHON_EXE%" cli.py sample_repo --backend ollama --model qwen2.5-coder:7b --tui
 ) else (
     "%PYTHON_EXE%" cli.py %*
 )

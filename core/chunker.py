@@ -61,7 +61,35 @@ def _extract_imports(tree: ast.Module) -> List[str]:
     return imports
 
 
-def chunk_python_file(sf: SourceFile) -> List[CodeChunk]:
+def _is_overload_stub(node: ast.AST) -> bool:
+    """Checks whether an AST function is an @overload stub whose body is only '...' (Ellipsis) or pass."""
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    has_overload = False
+    for d in getattr(node, "decorator_list", []):
+        if isinstance(d, ast.Name) and d.id == "overload":
+            has_overload = True
+            break
+        elif isinstance(d, ast.Attribute) and d.attr == "overload":
+            has_overload = True
+            break
+    if not has_overload:
+        return False
+    # Filter out docstrings to check if functional body is only Ellipsis or pass
+    non_doc_stmts = [
+        s for s in node.body
+        if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str))
+    ]
+    if len(non_doc_stmts) == 1:
+        s = non_doc_stmts[0]
+        if isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and s.value.value is Ellipsis:
+            return True
+        if isinstance(s, ast.Pass):
+            return True
+    return False
+
+
+def chunk_python_file(sf: SourceFile, skip_overload_stubs: bool = True) -> List[CodeChunk]:
     chunks: List[CodeChunk] = []
     try:
         tree = ast.parse(sf.content, filename=sf.rel_path)
@@ -71,14 +99,20 @@ def chunk_python_file(sf: SourceFile) -> List[CodeChunk]:
     imports = _extract_imports(tree)
     lines = sf.content.splitlines()
 
+    seen_cids = set()
+
     def make_chunk(node, kind):
         start = node.lineno
         end = getattr(node, "end_lineno", start)
         code = "\n".join(lines[start - 1:end])
         name = getattr(node, "name", "module")
         docstring = ast.get_docstring(node)
+        cid = f"{sf.rel_path}::{name}"
+        if cid in seen_cids:
+            cid = f"{cid}:L{start}"
+        seen_cids.add(cid)
         return CodeChunk(
-            chunk_id=f"{sf.rel_path}::{name}",
+            chunk_id=cid,
             file_path=sf.rel_path,
             language=sf.language,
             kind=kind,
@@ -92,16 +126,24 @@ def chunk_python_file(sf: SourceFile) -> List[CodeChunk]:
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if skip_overload_stubs and _is_overload_stub(node):
+                continue
             chunks.append(make_chunk(node, "function"))
         elif isinstance(node, ast.ClassDef):
             chunks.append(make_chunk(node, "class"))
             for sub in node.body:
                 if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if skip_overload_stubs and _is_overload_stub(sub):
+                        continue
                     start = sub.lineno
                     end = getattr(sub, "end_lineno", start)
                     code = "\n".join(lines[start - 1:end])
+                    cid = f"{sf.rel_path}::{node.name}.{sub.name}"
+                    if cid in seen_cids:
+                        cid = f"{cid}:L{start}"
+                    seen_cids.add(cid)
                     chunks.append(CodeChunk(
-                        chunk_id=f"{sf.rel_path}::{node.name}.{sub.name}",
+                        chunk_id=cid,
                         file_path=sf.rel_path,
                         language=sf.language,
                         kind="method",
@@ -235,10 +277,10 @@ def _windowed_chunks(sf: SourceFile, window_size: int = 50, overlap: int = 10) -
     return chunks
 
 
-def chunk_file(sf: SourceFile) -> List[CodeChunk]:
+def chunk_file(sf: SourceFile, skip_overload_stubs: bool = True) -> List[CodeChunk]:
     """Chunks a source file using AST (Python/Tree-Sitter), Sectioning (Markdown), or Windowing."""
     if sf.language == "python":
-        return chunk_python_file(sf)
+        return chunk_python_file(sf, skip_overload_stubs=skip_overload_stubs)
 
     if sf.language == "markdown":
         return _chunk_markdown_file(sf)
@@ -264,8 +306,14 @@ def chunk_file(sf: SourceFile) -> List[CodeChunk]:
     return _windowed_chunks(sf)
 
 
-def chunk_repository(source_files: List[SourceFile]) -> List[CodeChunk]:
+def chunk_repository(source_files: List[SourceFile], skip_overload_stubs: bool = True) -> List[CodeChunk]:
     all_chunks: List[CodeChunk] = []
+    seen_ids = set()
     for sf in source_files:
-        all_chunks.extend(chunk_file(sf))
+        file_chunks = chunk_file(sf, skip_overload_stubs=skip_overload_stubs)
+        for c in file_chunks:
+            if c.chunk_id in seen_ids:
+                c.chunk_id = f"{c.chunk_id}:L{c.start_line}"
+            seen_ids.add(c.chunk_id)
+            all_chunks.append(c)
     return all_chunks

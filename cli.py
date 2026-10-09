@@ -24,6 +24,19 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
+# Automatically load .env configuration if present
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(_env_path):
+    try:
+        with open(_env_path, "r", encoding="utf-8") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _v = _line.split("=", 1)
+                    os.environ.setdefault(_k.strip(), _v.strip())
+    except Exception:
+        pass
+
 from core.pipeline import ingest_repository
 from core.embedder import TfidfEmbedder, OllamaEmbedder
 from core.llm_client import OllamaLLM
@@ -32,7 +45,7 @@ from core.dependency_graph import files_likely_affected_by, get_top_central_file
 from core.call_graph import find_callers_of_symbol, get_top_central_symbols
 from core.git_hooks import install_git_hooks, uninstall_git_hooks, check_git_hooks_status
 from core.patch_generator import PatchEngine
-from core.persistence import get_repo_id
+from core.persistence import get_repo_id, GRAPH_FORMAT_VERSION
 from core.code_review import (
     display_review_screen,
     compute_file_sha256,
@@ -122,6 +135,7 @@ def print_ingestion_summary(result, current_path: str, elapsed: float):
     print(f"[*] Dependency graph: {result.graph.number_of_nodes()} nodes, {result.graph.number_of_edges()} edges")
     if getattr(result, "call_graph", None):
         print(f"[*] Call graph: {result.call_graph.number_of_nodes()} nodes, {result.call_graph.number_of_edges()} call edges")
+    print(f"[*] Format version: v{GRAPH_FORMAT_VERSION} (Graph/Index v{GRAPH_FORMAT_VERSION})")
     print(f"[*] [Time Consumed]: {time_str}{speed_str} [{mode_badge}]")
 
 
@@ -134,20 +148,63 @@ def check_ollama_available(host: str = "http://localhost:11434") -> bool:
         return False
 
 
-def resolve_repo_path(repo_target: str) -> str:
-    """Resolves local directory path or clones remote Git repository URL into .repos folder."""
-    repo_target = repo_target.strip()
-    if repo_target.startswith("http://") or repo_target.startswith("https://") or repo_target.startswith("git@"):
+import urllib.parse
+
+
+def sanitize_git_url(url: str) -> str:
+    """Redacts credentials in URL for safe logging/printing."""
+    return re.sub(r"://([^@/]+)@", r"://***@", url)
+
+
+def validate_git_url(url: str) -> str:
+    """Validates that a Git clone URL uses https:// only, rejecting leading '-', whitespace, and embedded credentials."""
+    if not url:
+        raise ValueError("Git clone URL cannot be empty.")
+    if url.startswith("-"):
+        raise ValueError(f"Invalid git clone URL: '{url}' cannot start with '-'")
+    if any(c.isspace() for c in url):
+        raise ValueError(f"Git clone URL cannot contain whitespace: '{url}'")
+    if not url.startswith("https://"):
+        raise ValueError("Git clone URL must use https:// protocol only.")
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception as e:
+        raise ValueError(f"Malformed git clone URL: {e}")
+
+    # Reject URLs with embedded credentials (userinfo)
+    if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
+        raise ValueError("Git clone URL must not contain embedded credentials.")
+
+    return url
+
+
+def resolve_repo_path(repo_target: str, full_history: bool = False) -> str:
+    """Resolves local directory path or clones remote Git repository URL into .repos folder (shallow clone --depth 1 by default)."""
+    # Check if target is a remote repository URL or malicious clone argument
+    is_remote = (
+        repo_target.startswith("-") or
+        repo_target.startswith("http://") or
+        repo_target.startswith("https://") or
+        repo_target.startswith("git@") or
+        (repo_target.endswith(".git") and not os.path.exists(repo_target))
+    )
+    if is_remote:
+        validate_git_url(repo_target)
         repo_name = repo_target.rstrip("/").split("/")[-1]
         if repo_name.endswith(".git"):
             repo_name = repo_name[:-4]
         target_dir = os.path.abspath(os.path.join(".repos", repo_name))
 
+        git_env = os.environ.copy()
+        git_env["GIT_TERMINAL_PROMPT"] = "0"
+        git_env["GIT_ALLOW_PROTOCOL"] = "https"
+
         if os.path.exists(target_dir) and os.path.exists(os.path.join(target_dir, ".git")):
             print(f"[*] Local clone found at '{target_dir}'. Syncing latest changes...")
             t_pull = time.perf_counter()
             try:
-                subprocess.run(["git", "pull"], cwd=target_dir, capture_output=True, text=True, timeout=15)
+                subprocess.run(["git", "pull"], cwd=target_dir, capture_output=True, text=True, timeout=15, env=git_env)
                 print(f"[*] Git sync finished in {format_time_consumed(time.perf_counter() - t_pull)}.")
             except subprocess.TimeoutExpired:
                 print(f"[!] Warning: 'git pull' timed out after 15s. Using existing local files.")
@@ -155,10 +212,16 @@ def resolve_repo_path(repo_target: str) -> str:
                 print(f"[!] Warning: 'git pull' encountered an issue: {e}. Using existing local files.")
         else:
             os.makedirs(".repos", exist_ok=True)
-            print(f"[*] Cloning remote Git repository '{repo_target}' into '{target_dir}'...")
+            mode_desc = "full history" if full_history else "shallow --depth 1"
+            safe_target = sanitize_git_url(repo_target)
+            print(f"[*] Cloning remote Git repository '{safe_target}' into '{target_dir}' ({mode_desc})...")
             t_clone = time.perf_counter()
+            clone_cmd = ["git", "clone"]
+            if not full_history:
+                clone_cmd.extend(["--depth", "1"])
+            clone_cmd.extend(["--", repo_target, target_dir])
             try:
-                res = subprocess.run(["git", "clone", "--depth", "50", repo_target, target_dir], capture_output=True, text=True, timeout=45)
+                res = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=45, env=git_env)
                 if res.returncode != 0:
                     raise RuntimeError(f"Git clone failed: {res.stderr.strip() or 'Unknown error or empty repository'}")
                 print(f"[*] Git clone finished in {format_time_consumed(time.perf_counter() - t_clone)}.")
@@ -517,7 +580,8 @@ def render_help_panel():
                 ("info:<file>",     "Show file stats: size, chunk count, centrality score"),
             ]),
             ("Repository", "green", [
-                ("repo <path|url>", "Switch or clone a repository (local or GitHub URL)"),
+                ("repo <path|url>", "Switch or clone a repository (shallow --depth 1 default)"),
+                ("clone <url>",     "Clone repository (shallow default, use --full-history for all commits)"),
                 ("repo <number>",   "Switch to a previously added repo by list number"),
                 ("repos",           "List all known repositories"),
                 ("files / ls",      "List all indexed source files"),
@@ -597,6 +661,7 @@ def render_ingestion_panel(result, current_path: str, elapsed: float):
                 f"{call_g.number_of_nodes()} nodes, {call_g.number_of_edges()} call edges",
             )
         grid.add_row("[green]✓[/green] Mode:", mode_badge)
+        grid.add_row("[green]✓[/green] Format version:", f"[dim]v{GRAPH_FORMAT_VERSION} (Graph/Index v{GRAPH_FORMAT_VERSION})[/dim]")
         grid.add_row("[green]✓[/green] Time consumed:", f"[bold green]{time_str}[/bold green]{speed_str}")
         console.print(Panel(
             grid,
@@ -1490,12 +1555,29 @@ class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
         for cmd, desc in self.COMMANDS:
             if cmd.lower().startswith(stripped.lower()):
                 yield Completion(cmd, start_position=-len(stripped), display=cmd, display_meta=desc)
-def create_components(backend_choice: str):
+def create_components(
+    backend_choice: str,
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    num_predict: Optional[int] = None,
+    repeat_penalty: Optional[float] = None,
+):
     """Factory helper to instantiate embedder and LLM with automatic fallback."""
     if backend_choice == "ollama":
         if check_ollama_available():
-            print("[*] Backend: Ollama AI (qwen2.5-coder + nomic-embed-text)")
-            return OllamaEmbedder(), OllamaLLM(), "ollama"
+            chosen_model = model or os.getenv("OLLAMA_LLM_MODEL", "qwen2.5-coder:7b")
+            temp = 0.0 if temperature is None else temperature
+            predict = 800 if num_predict is None else num_predict
+            penalty = 1.1 if repeat_penalty is None else repeat_penalty
+            print(f"[*] Backend: Ollama AI ({chosen_model} + nomic-embed-text)")
+            print(f"[*] Generation Config: temperature={temp}, num_predict={predict}, repeat_penalty={penalty}")
+            llm = OllamaLLM(
+                model=chosen_model,
+                temperature=temp,
+                num_predict=predict,
+                repeat_penalty=penalty,
+            )
+            return OllamaEmbedder(), llm, "ollama"
         else:
             print("[!] Ollama server not detected at http://localhost:11434.")
             print("[*] Automatically falling back to offline TF-IDF mode.")
@@ -1557,8 +1639,23 @@ def main():
                         help="Remote IntelliCodeX server URL (e.g., http://localhost:8000)")
     parser.add_argument("--token", type=str, default=None,
                         help="JWT Bearer authentication token for remote server access")
-    parser.add_argument("--backend", choices=["ollama", "tfidf"], default="tfidf",
-                        help="LLM & Embedding backend (default: tfidf)")
+    default_backend = os.getenv("DEFAULT_EMBEDDER_BACKEND", "ollama")
+    parser.add_argument("--backend", choices=["ollama", "tfidf"], default=default_backend,
+                        help=f"LLM & Embedding backend (default: {default_backend})")
+    parser.add_argument("--model", type=str, default=None,
+                        help="Ollama LLM model name (default: qwen2.5-coder:7b)")
+    parser.add_argument("--temperature", type=float, default=None,
+                        help="LLM sampling temperature (default: 0.0 for factual Q&A)")
+    parser.add_argument("--num-predict", type=int, default=None,
+                        help="LLM max output tokens cap (default: 800)")
+    parser.add_argument("--repeat-penalty", type=float, default=None,
+                        help="LLM repetition penalty (default: 1.1)")
+    parser.add_argument("--full-history", action="store_true", default=False,
+                        help="Clone remote Git repository with full history instead of shallow clone (--depth 1)")
+    parser.add_argument("--legacy-call-graph", action="store_true", default=False,
+                        help="Use legacy bare-name matching for call graph generation instead of scoped resolution")
+    parser.add_argument("--include-overloads", action="store_true", default=False,
+                        help="Include @typing.overload stub chunks (default: False, stubs are skipped)")
     parser.add_argument("-q", "--query", type=str,
                         help="Execute a non-interactive query in batch mode and exit")
     parser.add_argument("--tui", action="store_true", default=False,
@@ -1577,7 +1674,7 @@ def main():
     args = parser.parse_args()
 
     if args.benchmark:
-        target = resolve_repo_path(args.repo_path)
+        target = resolve_repo_path(args.repo_path, full_history=args.full_history)
         print(f"[*] Running IntelliCodeX Benchmark on '{target}'...")
         report = run_benchmark(target)
         print("=" * 65)
@@ -1595,13 +1692,13 @@ def main():
 
     # Handle direct hook CLI flags if requested
     if args.setup_hooks:
-        target = resolve_repo_path(args.repo_path)
+        target = resolve_repo_path(args.repo_path, full_history=args.full_history)
         ok, msg = install_git_hooks(target)
         print(f"[*] {msg}")
         return 0 if ok else 1
 
     if args.check_hooks:
-        target = resolve_repo_path(args.repo_path)
+        target = resolve_repo_path(args.repo_path, full_history=args.full_history)
         st = check_git_hooks_status(target)
         print(f"[*] Git Hook Status for '{target}':")
         for hook, is_inst in st.items():
@@ -1609,7 +1706,7 @@ def main():
         return 0
 
     if args.remove_hooks:
-        target = resolve_repo_path(args.repo_path)
+        target = resolve_repo_path(args.repo_path, full_history=args.full_history)
         ok, msg = uninstall_git_hooks(target)
         print(f"[*] {msg}")
         return 0 if ok else 1
@@ -1657,13 +1754,20 @@ def main():
             except Exception as e:
                 print(f"[!] Error: {e}\n")
 
-    embedder, llm, active_backend = create_components(args.backend)
+    embedder, llm, active_backend = create_components(
+        args.backend,
+        model=args.model,
+        temperature=args.temperature,
+        num_predict=args.num_predict,
+        repeat_penalty=args.repeat_penalty,
+    )
 
+    skip_overload_stubs = not args.include_overloads
     try:
-        current_path = resolve_repo_path(args.repo_path)
+        current_path = resolve_repo_path(args.repo_path, full_history=args.full_history)
         print(f"[*] Ingesting repository: {current_path}")
         t0 = time.perf_counter()
-        result = ingest_repository(current_path, embedder)
+        result = ingest_repository(current_path, embedder, legacy_call_graph=args.legacy_call_graph, skip_overload_stubs=skip_overload_stubs)
         elapsed = result.elapsed_seconds if getattr(result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t0)
     except KeyboardInterrupt:
         print("\n[!] Initial repository ingestion cancelled by user (Ctrl+C).")
@@ -1671,7 +1775,7 @@ def main():
             print("[*] Falling back to default 'sample_repo'...")
             try:
                 current_path = "sample_repo"
-                result = ingest_repository(current_path, embedder)
+                result = ingest_repository(current_path, embedder, legacy_call_graph=args.legacy_call_graph, skip_overload_stubs=skip_overload_stubs)
                 elapsed = result.elapsed_seconds if getattr(result, "elapsed_seconds", 0) > 0 else 0.1
             except Exception as e_inner:
                 print(f"[!] Fallback error: {e_inner}")
@@ -1693,6 +1797,7 @@ def main():
         call_graph=getattr(result, "call_graph", None),
         lexical_index=getattr(result, "lexical_index", None),
         hybrid_search=True,
+        repo_path=current_path,
     )
 
     # Batch Query Non-Interactive Mode
@@ -1726,8 +1831,23 @@ def main():
         
         print(f"\n[*] Executing Batch Query: '{cleaned_query}'\n")
         t_batch = time.perf_counter()
-        response = engine.ask(cleaned_query, file_filter=effective_file_filter)
+        response = engine.ask(cleaned_query, file_filter=effective_file_filter, append_sources=True)
         total_batch = response.get("elapsed_seconds", time.perf_counter() - t_batch)
+
+        # Requirement F: Print retrieved chunks list before the answer (as in interactive mode)
+        retrieved_chunks = response.get("retrieved_chunks", [])
+        retrieval_time = response.get("retrieval_seconds", 0.0)
+        print(f"--- Retrieved {len(retrieved_chunks)} chunks ({format_time_consumed(retrieval_time)}) ---")
+        for rc in retrieved_chunks:
+            c_fp = rc.get("file") or rc.get("file_path", "")
+            c_name = rc.get("name", "")
+            c_score = rc.get("score", 0.0)
+            c_lines = rc.get("lines") or f"{rc.get('start_line', '')}-{rc.get('end_line', '')}"
+            c_reason = rc.get("reason", "")
+            reason_str = f", context={c_reason}" if c_reason else ""
+            print(f"  {c_fp} :: {c_name} (lines {c_lines}, score={c_score:.3f}{reason_str})")
+        print()
+
         render_markdown_panel(response['answer'], title="Answer")
         print(f"[*] [Time Consumed]: {format_time_consumed(total_batch)} (Retrieval: {format_time_consumed(response.get('retrieval_seconds', 0.0))}, Generation: {format_time_consumed(response.get('llm_seconds', 0.0))})\n")
         return 0
@@ -1913,7 +2033,7 @@ def main():
                 new_embedder, new_llm, new_active_backend = create_components(new_backend)
                 print(f"[*] Re-indexing repository with '{new_active_backend}' backend...")
                 t_sw = time.perf_counter()
-                new_result = ingest_repository(current_path, new_embedder)
+                new_result = ingest_repository(current_path, new_embedder, skip_overload_stubs=skip_overload_stubs)
                 elapsed_sw = new_result.elapsed_seconds if getattr(new_result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t_sw)
                 embedder, llm, active_backend = new_embedder, new_llm, new_active_backend
                 result = new_result
@@ -1943,11 +2063,21 @@ def main():
             continue
 
         if (query.startswith("repo ") or query.startswith("repo:") or 
+            query.startswith("clone ") or query.startswith("repo-clone ") or
             query.startswith("use ") or query.startswith("ingest ") or 
             query.startswith("http://") or query.startswith("https://") or query.startswith("git@")):
 
+            full_hist = False
+            if "--full-history" in query:
+                full_hist = True
+                query = query.replace("--full-history", "").strip()
+
             if query.startswith("repo:"):
                 target = query[len("repo:"):].strip()
+            elif query.startswith("clone "):
+                target = query[len("clone "):].strip()
+            elif query.startswith("repo-clone "):
+                target = query[len("repo-clone "):].strip()
             elif query.startswith("repo ") or query.startswith("use ") or query.startswith("ingest "):
                 target = query.split(maxsplit=1)[1].strip()
             else:
@@ -1966,10 +2096,10 @@ def main():
 
             print(f"[*] Processing repository target: {target}")
             try:
-                new_path = resolve_repo_path(target)
+                new_path = resolve_repo_path(target, full_history=full_hist)
                 print(f"[*] Parsing files and generating embeddings for '{new_path}'...")
                 t_repo = time.perf_counter()
-                new_result = ingest_repository(new_path, embedder)
+                new_result = ingest_repository(new_path, embedder, skip_overload_stubs=skip_overload_stubs)
                 elapsed_repo = new_result.elapsed_seconds if getattr(new_result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t_repo)
                 result = new_result
                 current_path = new_path
@@ -2468,22 +2598,60 @@ def main():
             if len(expanded_results) == 0 and effective_file_filter:
                 print(f"[!] No chunks found matching file filter '{effective_file_filter}'. Try checking the exact filename with 'files' command.")
             
+            # Deduplicate by chunk_id
+            seen_cids = set()
+            deduped_results = []
+            for item in expanded_results:
+                c = item[0] if isinstance(item, tuple) else item.get("chunk")
+                if c and getattr(c, "chunk_id", None):
+                    if c.chunk_id not in seen_cids:
+                        seen_cids.add(c.chunk_id)
+                        deduped_results.append(item)
+                else:
+                    deduped_results.append(item)
+            expanded_results = deduped_results
+
+            def _format_entry_80col(file_path: str, name: str, lines: str, score: float, reason: str = "", max_width: int = 80) -> str:
+                prefix = f"  {file_path} :: {name} (lines {lines}, score={score:.3f}"
+                suffix = f", context={reason})" if reason else ")"
+                full = prefix + suffix
+                if len(full) <= max_width:
+                    return full
+                avail_for_reason = max_width - len(prefix) - len(", context=...)")
+                if avail_for_reason > 5 and reason:
+                    trunc_reason = reason[:avail_for_reason] + "..."
+                    cand = f"{prefix}, context={trunc_reason})"
+                    if len(cand) <= max_width:
+                        return cand
+                cand = f"{prefix})"
+                if len(cand) <= max_width:
+                    return cand
+                return prefix[:max_width - 4] + "...)"
+
             print(f"--- Retrieved {len(expanded_results)} chunks ({format_time_consumed(t_retrieval)}) ---")
             for item in expanded_results:
-                chunk = item["chunk"]
-                score = item["score"]
-                reason = item.get("reason", "")
-                reason_str = f", context={reason}" if reason else ""
+                chunk = item[0] if isinstance(item, tuple) else item["chunk"]
+                score = item[1] if isinstance(item, tuple) else item["score"]
+                reason = item[2] if isinstance(item, tuple) and len(item) > 2 else (item.get("reason", "") if isinstance(item, dict) else "")
                 lines_str = f"{chunk.start_line}-{chunk.end_line}"
-                print(f"  {chunk.file_path} :: {chunk.name} (lines {lines_str}, score={score:.3f}{reason_str})")
+                print(_format_entry_80col(chunk.file_path, chunk.name, lines_str, score, reason, max_width=80))
 
             # Phase 2: Stream LLM answer tokens in real-time (or fall back to ask() for tfidf mode)
             print(f"\n--- Answer ---")
             if engine.llm is not None and hasattr(engine.llm, "stream_generate"):
                 # Streaming path: tokens appear immediately as they are generated
-                from rag.query_engine import format_context
+                from rag.query_engine import format_context, QA_SYSTEM_PROMPT, strip_qa_scaffolding, partition_sources
                 context = format_context(expanded_results, max_token_budget=3000)
-                
+
+                current_files = {
+                    c.file_path
+                    for item in expanded_results
+                    for c in [item[0] if isinstance(item, tuple) else item.get("chunk")]
+                    if c and getattr(c, "file_path", None)
+                }
+                if len(engine.memory) > 0 and engine.memory.is_topic_shifted(current_files):
+                    engine.memory.clear()
+
                 is_analysis = engine.memory.is_code_analysis_question(cleaned_query)
                 history_str = engine.memory.format_history(is_analysis=is_analysis) if len(engine.memory) > 0 else ""
                 file_scope_note = ""
@@ -2492,13 +2660,8 @@ def main():
                         f"SCOPE: Focus your answer on '{effective_file_filter}'. "
                         f"The context below is scoped to this file. Answer the user's question using this context.\n\n"
                     )
-                # Check if user is asking about bugs/issues/errors
-                bug_keywords = [
-                    "bug", "error", "issue", "problem", "wrong", "incorrect", "fix", "mistake",
-                    "check", "find", "analyze", "analyse", "inspect", "review",
-                    "update", "modify", "correct", "patch", "refactor", "proper", "improve",
-                ]
-                is_bug_query = any(keyword in cleaned_query.lower() for keyword in bug_keywords) or bool(effective_file_filter and not cleaned_query.strip())
+
+                is_bug_query = engine._classify_query_intent(cleaned_query, file_filter=effective_file_filter)
                 
                 if is_bug_query:
                     anti_hallucination = (
@@ -2520,11 +2683,15 @@ def main():
                         "7. Explain in one sentence why it is a bug and provide the fix\n\n"
                         "CRITICAL: Only report bugs that exist in the code. Quote the exact line from the code.\n\n"
                     )
+                    system_prompt_to_use = engine.system_prompt
                 else:
                     anti_hallucination = (
-                        "IMPORTANT: When reporting bugs or issues, only report those that exist in the files shown in context below. "
-                        "Do NOT attribute a bug from one file to another file. For general questions, use the provided context accurately.\n\n"
+                        "Answer the question directly based on the provided repository context. "
+                        "Cite file paths and line numbers accurately. Do not invent or assume behavior not shown in the context.\n\n"
                     )
+                    system_prompt_to_use = QA_SYSTEM_PROMPT
+                    context = strip_qa_scaffolding(context)
+
                 prompt_parts = []
                 if history_str:
                     prompt_parts.append(history_str)
@@ -2534,8 +2701,13 @@ def main():
 
                 accumulated = []
                 t_gen_start = time.perf_counter()
-                temp = 0.0 if is_bug_query else 0.2
-                for token in engine.llm.stream_generate(prompt, system=engine.system_prompt, temperature=temp):
+                temp = 0.0
+                for token in engine.llm.stream_generate(prompt, system=system_prompt_to_use, temperature=temp):
+                    if not is_bug_query:
+                        curr_text = "".join(accumulated) + token
+                        drift_match = re.search(r'(?:###\s*Analysis|\bMATCH\b|\bMISMATCH\b)', curr_text)
+                        if drift_match:
+                            break
                     print(token, end="", flush=True)
                     accumulated.append(token)
                 print()
@@ -2546,14 +2718,46 @@ def main():
                 if is_bug_query:
                     full_answer = engine._filter_hallucinated_claims(full_answer, expanded_results)
                     print(f"\n[Anti-hallucination filter applied]")
+
+                relied_items, other_items = partition_sources(full_answer, expanded_results)
+                relied_sources = [
+                    f"{c.file_path}:{c.start_line}-{c.end_line}"
+                    for item in relied_items
+                    for c in [item[0] if isinstance(item, tuple) else item.get("chunk")]
+                    if c and getattr(c, "file_path", None)
+                ]
+                relied_sources = list(dict.fromkeys(relied_sources))
+
+                other_sources = [
+                    f"{c.file_path}:{c.start_line}-{c.end_line}"
+                    for item in other_items
+                    for c in [item[0] if isinstance(item, tuple) else item.get("chunk")]
+                    if c and getattr(c, "file_path", None)
+                ]
+                other_sources = list(dict.fromkeys(other_sources))
+
+                full_answer, unv_f, unv_s = engine._post_process_answer(
+                    full_answer,
+                    sources=relied_sources,
+                    append_to_answer=False,
+                    retrieved_context=other_sources,
+                )
+                if relied_sources and "Sources:" not in "".join(accumulated):
+                    print(f"\nSources: {', '.join(relied_sources)}")
+                if other_sources and "Retrieved context:" not in "".join(accumulated):
+                    print(f"\nRetrieved context: {', '.join(other_sources)}")
+                if unv_f:
+                    print(f"\n[Unverified file path(s): {', '.join(unv_f)}]")
+                if unv_s:
+                    print(f"\n[Unverified names: {', '.join(unv_s)}]")
                 
                 _last_answer = full_answer
-                engine.memory.add_turn(cleaned_query, full_answer)
+                engine.memory.add_turn(cleaned_query, full_answer, files=current_files)
                 t_llm = time.perf_counter() - t_gen_start
                 total_time = time.perf_counter() - t_ask
             else:
                 # Offline / tfidf fallback: use standard ask() without streaming
-                response = engine.ask(cleaned_query)
+                response = engine.ask(cleaned_query, append_sources=True)
                 _last_answer = response.get("answer", "")
                 render_markdown_panel(response["answer"], title="Answer")
                 total_time = response.get("elapsed_seconds", time.perf_counter() - t_ask)

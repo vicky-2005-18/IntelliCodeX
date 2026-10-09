@@ -194,9 +194,17 @@ def generate_eval_markdown(metrics: dict, output_path: str):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Empirical LLM & Static Bug Evaluation Script")
+    parser.add_argument("--llm", action="store_true", help="Run with Ollama LLM")
+    parser.add_argument("--model", type=str, default="qwen2.5-coder:7b", help="Ollama LLM model name (default: qwen2.5-coder:7b)")
+    args = parser.parse_args()
+
     print("[*] Running Planted Bug Benchmark Evaluation...")
-    # Use offline evaluation (or OllamaLLM if available)
-    metrics = evaluate_planted_bugs(llm=None)
+    llm = OllamaLLM(model=args.model) if args.llm else None
+    if llm:
+        print(f"[*] Active LLM Evaluator: Ollama ({args.model})")
+    metrics = evaluate_planted_bugs(llm=llm)
     output_doc = os.path.join(REPO_ROOT, "docs", "LLM_EVAL.md")
     generate_eval_markdown(metrics, output_doc)
     print(f"[+] Evaluation finished. Report written to: {output_doc}")

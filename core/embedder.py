@@ -66,10 +66,16 @@ class OllamaEmbedder(BaseEmbedder):
         self.host = host.rstrip("/")
         self.dim = 768  # nomic-embed-text output size
         self.cache_dir = cache_dir
+        self.embedder_name = "ollama"
         # Fix 1: Hot in-memory layer — avoids Ollama HTTP round-trip on repeated queries
         self._ram_cache: Dict[str, np.ndarray] = {}
         # Fix 2: Persistent SQLite connection — opened once, reused across all embed() calls
         self._db_conn = _get_embedding_cache(self.cache_dir)
+
+    def get_cache_key(self, text: str) -> str:
+        """Returns the composite cache key containing embedder name, model, and text hash."""
+        h = hashlib.sha256(text[:4000].encode("utf-8", errors="ignore")).hexdigest()
+        return f"{self.embedder_name}:{self.model}:{h}"
 
     def embed(self, texts: List[str]) -> np.ndarray:
         if not texts:
@@ -78,13 +84,16 @@ class OllamaEmbedder(BaseEmbedder):
         total = len(texts)
         start_time = time.perf_counter()
 
-        # Step 1: Compute hashes for caching and deduplication
+        # Step 1: Compute hashes and composite keys for caching and deduplication
         hashes = [hashlib.sha256(t[:4000].encode("utf-8", errors="ignore")).hexdigest() for t in texts]
+        keys = [f"{self.embedder_name}:{self.model}:{h}" for h in hashes]
         cached_map: Dict[str, np.ndarray] = {}
 
         # Step 2a: Check hot in-memory RAM cache first (zero latency)
-        for h in hashes:
-            if h in self._ram_cache:
+        for h, k in zip(hashes, keys):
+            if k in self._ram_cache:
+                cached_map[h] = self._ram_cache[k]
+            elif h in self._ram_cache:
                 cached_map[h] = self._ram_cache[h]
 
         # Step 2b: Check persistent SQLite cache for any still-missing hashes
@@ -93,17 +102,17 @@ class OllamaEmbedder(BaseEmbedder):
             try:
                 remaining_hashes = [h for h in hashes if h not in cached_map]
                 cur = conn.cursor()
-                for chunk_start in range(0, len(remaining_hashes), 900):
-                    batch_hashes = remaining_hashes[chunk_start : chunk_start + 900]
+                for chunk_start in range(0, len(remaining_hashes), 450):
+                    batch_hashes = remaining_hashes[chunk_start : chunk_start + 450]
                     placeholders = ",".join("?" for _ in batch_hashes)
                     rows = cur.execute(
-                        f"SELECT text_hash, vector FROM chunk_embeddings WHERE model = ? AND text_hash IN ({placeholders})",
-                        [self.model] + batch_hashes
+                        f"SELECT text_hash, vector FROM chunk_embeddings WHERE model IN (?, ?) AND text_hash IN ({placeholders})",
+                        [self.model, f"{self.embedder_name}:{self.model}"] + batch_hashes
                     ).fetchall()
-                    for h, blob in rows:
+                    for h_val, blob in rows:
                         vec = np.frombuffer(blob, dtype=np.float32)
-                        cached_map[h] = vec
-                        self._ram_cache[h] = vec  # promote to RAM cache
+                        cached_map[h_val] = vec
+                        self._ram_cache[f"{self.embedder_name}:{self.model}:{h_val}"] = vec  # promote to RAM cache
             except Exception:
                 pass
 
@@ -122,6 +131,7 @@ class OllamaEmbedder(BaseEmbedder):
         # Step 3: Embed missing chunks in batches with auto-checkpointing
         batch_size = 64
         num_missing = len(missing_indices)
+        initial_cached_count = len(cached_map)
         processed_missing = 0
 
         for i in range(0, num_missing, batch_size):
@@ -129,7 +139,7 @@ class OllamaEmbedder(BaseEmbedder):
             batch = [texts[idx][:4000] for idx in sub_indices]
 
             processed_missing = min(i + batch_size, num_missing)
-            overall_done = len(cached_map) + processed_missing
+            overall_done = initial_cached_count + processed_missing
             elapsed = time.perf_counter() - start_time
             rate = processed_missing / elapsed if elapsed > 0.05 else 0.0
             eta = (num_missing - processed_missing) / rate if rate > 0 else 0.0
@@ -195,9 +205,11 @@ class OllamaEmbedder(BaseEmbedder):
             new_cache_rows = []
             for sub_idx, vec in zip(sub_indices, batch_vectors):
                 h = hashes[sub_idx]
+                k = keys[sub_idx]
                 vec_np = np.array(vec, dtype="float32")
                 cached_map[h] = vec_np
                 self._ram_cache[h] = vec_np  # promote to hot RAM cache
+                self._ram_cache[k] = vec_np  # promote with composite key
                 new_cache_rows.append((self.model, h, len(vec_np), vec_np.tobytes()))
 
             if conn and new_cache_rows:

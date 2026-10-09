@@ -369,5 +369,85 @@ def test_syntax_error_skips_llm():
     assert fake_llm.generate.call_count == 0
 
 
+def test_chunk_with_module_imports_produces_no_undefined_name_findings():
+    """Requirement A test: a chunk from a file with module-level imports must produce no UndefinedName findings."""
+    from core.static_checks import run_static_checks_for_chunk
+    
+    whole_file = (
+        "import typing as t\n"
+        "import os\n"
+        "import click\n"
+        "\n"
+        "def helper(name: str) -> t.Optional[str]:\n"
+        "    val = os.getenv(name)\n"
+        "    if not val:\n"
+        "        click.echo('Missing')\n"
+        "    return t.cast(t.Optional[str], val)\n"
+    )
+    
+    # Chunk representing helper function starting at line 5
+    chunk = CodeChunk(
+        chunk_id="pkg/mod.py::helper",
+        file_path="pkg/mod.py",
+        language="python",
+        kind="function",
+        name="helper",
+        start_line=5,
+        end_line=9,
+        code=(
+            "def helper(name: str) -> t.Optional[str]:\n"
+            "    val = os.getenv(name)\n"
+            "    if not val:\n"
+            "        click.echo('Missing')\n"
+            "    return t.cast(t.Optional[str], val)"
+        ),
+        imports=["typing", "os", "click"],
+    )
+    
+    findings = run_static_checks_for_chunk(chunk, whole_file_content=whole_file)
+    undefined_names = [f for f in findings if f.get("type") == "UndefinedName"]
+    assert len(undefined_names) == 0, f"Expected 0 UndefinedName findings, got: {undefined_names}"
+
+
+def test_post_process_answer_sources_and_unverified_checks():
+    """Requirement D test: Sources line, unverified-names check, and check that file paths exist in index."""
+    embedder = FakeEmbedder()
+    store = FaissVectorStore(dim=768)
+    fake_llm = FakeLLM()
+    engine = QueryEngine(store, embedder, llm=fake_llm)
+
+    indexed_chunk = CodeChunk(
+        chunk_id="src/flask/app.py::Flask",
+        file_path="src/flask/app.py",
+        language="python",
+        kind="class",
+        name="Flask",
+        start_line=10,
+        end_line=50,
+        code="class Flask:\n    def wsgi_app(self, environ, start_response):\n        pass",
+    )
+    import numpy as np
+    store.add([indexed_chunk], np.array(embedder.embed([indexed_chunk.code])))
+
+    answer = (
+        "Flask dispatches requests in `wsgi_app` defined in `src/flask/app.py`.\n"
+        "It also references `non_existent_func` located in `fake_module.py`."
+    )
+    sources = ["src/flask/app.py:10-50"]
+
+    processed, unverified_files, unverified_symbols = engine._post_process_answer(
+        answer, sources, append_to_answer=True
+    )
+
+    assert "Sources: src/flask/app.py:10-50" in processed
+    assert "fake_module.py" in unverified_files
+    assert "src/flask/app.py" not in unverified_files
+    assert "non_existent_func" in unverified_symbols
+    assert "wsgi_app" not in unverified_symbols
+    assert "[Unverified file path(s): fake_module.py]" in processed
+    assert "[Unverified names: non_existent_func]" in processed
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+

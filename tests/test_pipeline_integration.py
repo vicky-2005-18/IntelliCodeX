@@ -43,3 +43,79 @@ def test_multi_language_pipeline_ingestion():
         results = ingested.store.search(query_vec[0], top_k=3)
         assert len(results) > 0
         assert results[0][0].file_path in ("api.ts", "service.py", "README.md", "server.go")
+
+
+def test_embedder_called_once_per_chunk_no_duplicates():
+    """
+    Asserts that repository ingestion calls the embedder exactly once per chunk,
+    with no duplicate chunk embedding calls.
+    """
+    from typing import List
+    import numpy as np
+    from core.embedder import BaseEmbedder
+
+    class FakeCountingEmbedder(BaseEmbedder):
+        def __init__(self, dim: int = 16):
+            self.dim = dim
+            self.texts_embedded: List[str] = []
+            self.call_count = 0
+
+        def embed(self, texts: List[str]) -> np.ndarray:
+            self.call_count += 1
+            self.texts_embedded.extend(texts)
+            return np.zeros((len(texts), self.dim), dtype="float32")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for i in range(5):
+            with open(os.path.join(tmpdir, f"module_{i}.py"), "w", encoding="utf-8") as f:
+                f.write(f"def func_a_{i}():\n    return {i}\n\ndef func_b_{i}():\n    return {i} * 2\n")
+
+        fake_embedder = FakeCountingEmbedder()
+        ingested = ingest_repository(tmpdir, fake_embedder)
+
+        assert ingested.num_chunks == 10
+        # Exactly 10 chunks were passed to the embedder, matching num_chunks
+        assert len(fake_embedder.texts_embedded) == ingested.num_chunks
+        assert fake_embedder.call_count == 1
+        # Assert no duplicated chunk texts
+        assert len(set(fake_embedder.texts_embedded)) == ingested.num_chunks
+
+
+def test_ollama_embedder_progress_not_overcounting(capsys, monkeypatch):
+    """
+    Simulates embedding 408 chunks with OllamaEmbedder and asserts
+    that printed progress accurately reflects 408/408 (100.0%) and
+    does not double-count (e.g. 792/408).
+    """
+    from unittest.mock import MagicMock
+    from core.embedder import OllamaEmbedder
+
+    with tempfile.TemporaryDirectory() as tmp_cache:
+        embedder = OllamaEmbedder(host="http://fake-host", cache_dir=tmp_cache)
+        texts = [f"chunk_code_{i}" for i in range(408)]
+
+        # Mock Ollama batch /api/embed endpoint
+        def fake_post(url, json=None, timeout=None):
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            batch_input = json.get("input", [])
+            mock_resp.json.return_value = {
+                "embeddings": [[0.0] * 768 for _ in batch_input]
+            }
+            return mock_resp
+
+        import requests
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        vecs = embedder.embed(texts)
+        assert vecs.shape == (408, 768)
+
+        if embedder._db_conn:
+            embedder._db_conn.close()
+
+        captured = capsys.readouterr().out
+        # Assert correct final progress was printed, not 792/408
+        assert "408/408 chunks (100.0%)" in captured
+        assert "792" not in captured
+
+

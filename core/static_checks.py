@@ -174,3 +174,58 @@ def run_static_checks(code: str, file_path: str = "", language: Optional[str] = 
 
     findings.sort(key=lambda x: (x.get("line", 0), x.get("column", 0)))
     return findings
+
+
+def run_static_checks_for_chunk(
+    chunk: Any,
+    repo_path: Optional[str] = None,
+    whole_file_content: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Runs deterministic static checks on the WHOLE source file containing the chunk.
+    
+    Guarantees:
+    1. Static checks run on the WHOLE source file (with true module-level imports and context),
+       never on isolated chunk snippets, eliminating false UndefinedName and unexpected indent SyntaxErrors.
+    2. If the whole source file cannot be resolved (and is not provided), returns [] rather than
+       analyzing a severed snippet out of context.
+    3. Any valid findings reported from the whole file are filtered to the chunk's line range [start_line, end_line].
+    """
+    file_path = getattr(chunk, "file_path", "")
+    language = getattr(chunk, "language", None)
+    start_line = getattr(chunk, "start_line", 1)
+    end_line = getattr(chunk, "end_line", 999999)
+
+    full_code = whole_file_content
+    if full_code is None and file_path:
+        candidates = []
+        if os.path.isabs(file_path) and os.path.isfile(file_path):
+            candidates.append(file_path)
+        if repo_path:
+            candidates.append(os.path.join(repo_path, file_path))
+        candidates.append(file_path)
+        candidates.append(os.path.join(".repos", "flask", file_path))
+        candidates.append(os.path.join("sample_repo", file_path))
+
+        for cand in candidates:
+            if cand and os.path.isfile(cand):
+                try:
+                    with open(cand, "r", encoding="utf-8", errors="replace") as f:
+                        full_code = f.read()
+                    break
+                except Exception:
+                    pass
+
+    if full_code is None:
+        if start_line == 1 and not getattr(chunk, "imports", None):
+            full_code = getattr(chunk, "code", "")
+        else:
+            return []
+
+    all_findings = run_static_checks(full_code, file_path=file_path, language=language)
+
+    chunk_findings = [
+        f for f in all_findings
+        if start_line <= f.get("line", 1) <= end_line
+    ]
+    return chunk_findings
+

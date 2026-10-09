@@ -2,8 +2,8 @@
 
 > **Inspection & Execution Date**: 2026-10-08
 > **Environment**: Windows 11, Python 3.14
-> **Automated Test Results**: **281 Passed**, 4 Skipped, 0 Failed (Duration: ~18 seconds)
-> **Target Scope**: CLI Core, Tree-Sitter Parsers, FAISS Vector Engine, RAG, Patch Generator, Security Hardening, Anti-Hallucination, Concurrency Serialization, Remote Server Bridge, Bandit AST Security, 30-Query MRR Benchmark, Retrieval View Provenance Trace, Whole RAG Pipeline View
+> **Automated Test Results**: **305 Passed**, 4 Skipped, 0 Failed (Duration: ~21 seconds, 309 collected)
+> **Target Scope**: CLI Core, Tree-Sitter Parsers, FAISS Vector Engine, RAG, Patch Generator, Security Hardening, Anti-Hallucination, Concurrency Serialization, Remote Server Bridge, Bandit AST Security, 30-Query MRR Benchmark, Retrieval View Provenance Trace, Whole RAG Pipeline View, Precision Call Graph & Git Clone Validation, Storage v3 Cache Invariants, Typing Overload Stub Filtering, Intent Routing Precedence & Anti-Hallucination Filtering
 
 ---
 
@@ -39,13 +39,15 @@ tests/
 ├── test_week3_verification.py              # Milestone 3 verification test suite (persistence & caching)
 ├── test_week4_verification.py              # Milestone 4 verification test suite (Ochiai & patch engine)
 ├── test_week5_verification.py              # Milestone 5 verification test suite (memory, personas, streaming)
-├── test_anti_hallucination.py              # Anti-hallucination filter and prompt pipeline (6 tests)
-├── test_auth_and_rbac.py                   # Authentication, rate limiting, and RBAC (18 tests)
+├── test_anti_hallucination.py              # Anti-hallucination filter and prompt pipeline (13 tests)
+├── test_auth_and_rbac.py                   # Authentication, rate limiting, and RBAC (20 tests)
 ├── test_cors_security.py                   # CORS origin/method/header validation (6 tests)
 ├── test_path_safety.py                     # Path traversal prevention for diffs and user inputs (9 tests)
-├── test_sandbox_runner.py                  # Sandbox test execution (4 tests)
-├── test_sandbox_hardening.py               # Sandbox security hardening (18 tests)
-└── test_retrieval_trace.py                 # Whole RAG pipeline inspection, compare mode, file filtering (16 tests)
+├── test_sandbox_runner.py                  # Sandbox test execution (9 tests)
+├── test_sandbox_hardening.py               # Sandbox security hardening (19 tests)
+├── test_retrieval_trace.py                 # Whole RAG pipeline inspection, compare mode, file filtering (16 tests)
+├── test_code_review.py                     # Static AST code review and lint filtering (5 tests)
+└── test_quality_and_invariants.py          # Storage v3 invariants, overload stubs, intent routing, anti-hallucination (11 tests)
 ```
 
 ---
@@ -157,6 +159,22 @@ python cli.py sample_repo --benchmark
   - *Expectation*: Trace records BM25 & dense hits, consistent fused RRF ranks, graph expansion with caller/callee/import reasons and causing hits, budgeting partitioning (included + dropped), no-answer mode skips LLM, exact augmented prompt equality (`augmented_prompt == fake_llm.last_prompt`), prompt sections capture (`instructions`, `context_chunks`, `question`, `memory`), zero disk writes for prompt/code, single-file chunk inspection (`chunks: <file>`), vector previews, side-by-side `--compare` mode calling LLM twice with clean no-context baseline, strict `@file` filtering without other-file leakage, and BM25 stopword/deduplication handling.
   - *Result*: **PASSED** (16 tests passed).
 
+### 3.6 Call Graph Precision, Git Clone Hardening & Cache Invalidation Scenarios
+* **Scenario**: High-Precision Call Graph Engine and Scope Resolution.
+  - *Files*: `tests/test_call_graph.py`
+  - *Expectation*: `self.method()` and `cls.method()` resolve strictly to enclosing and base classes; edge deduplication attributes call to most specific enclosing method/function chunk rather than duplicating on class chunk; unknown receivers drop attribute method calls; fan-out cap prunes calls matching > 3 candidates; `--legacy-call-graph` flag restores unconstrained mode; cached indexes built with older graph versions are rebuilt on format version mismatch (`graph_version: 2`). Non-Python languages use name-only matching with deduplication and 3-candidate fan-out capping.
+  - *Result*: **PASSED** (8 tests passed).
+* **Scenario**: Git Clone URL Validation, Security Hardening and Shallow Ingestion.
+  - *Files*: `tests/test_cli.py`, `tests/test_auth_and_rbac.py`
+  - *Expectation*: CLI and API enforce HTTPS-only clone URLs, reject leading hyphens (`-`), reject whitespace, and reject embedded credentials (`https://user:pass@host/...`); subprocess uses `--` before URL and sets `GIT_ALLOW_PROTOCOL=https` and `GIT_TERMINAL_PROMPT=0`; API restricts clone hosts to `ALLOWED_GIT_HOSTS`; shallow clone (`--depth 1`) is enabled by default with `--full-history` opt-out.
+  - *Result*: **PASSED** (all tests passed).
+* **Scenario**: Empirical Call Graph Audit Tool (`scripts/audit_call_graph.py`).
+  - *Precision Mode*: Seeded sampling ($N=25$, seed 42) on `bottle` before and after:
+    - Edges: 1832 -> 247 (86.5% reduction)
+    - False-Match Rate: 21/25 (84.0%) in legacy -> 0/25 in precision (sample size N=25, seed 42, labels evaluated by the agent).
+  - *Recall Mode*: Samples $N$ source call sites from codebase; outputs un-prefilled labeling templates (`null` labels); evaluates recall against user-labeled ground-truth.
+
+
 ---
 
 ## 4. Empirical Test Execution Record
@@ -164,11 +182,11 @@ python cli.py sample_repo --benchmark
 * **Execution Timestamp**: 2026-10-08
 * **Execution Command**: `pytest -q`
 * **Test Summary**:
-  - Total Tests: 285
-  - Passed: 281 (98.6%)
+  - Total Tests: 296 (from `pytest --collect-only -q`)
+  - Passed: 292 (98.6%)
   - Failed: 0
   - Skipped: 4 (1.4%)
-  - Execution Time: ~18 seconds
+  - Execution Time: ~19 seconds
 * **Skipped Tests**:
   - 4 symlink-related tests require Linux or elevated Windows privileges (test_symlink_safe_directory resolution in `test_path_safety.py` and `test_incremental_pipeline.py`)
 * **Warnings Summary**:

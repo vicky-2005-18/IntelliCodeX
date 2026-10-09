@@ -9,16 +9,39 @@ from typing import List, Dict, Any, Optional
 from backend.config import settings
 
 
+import re
+import urllib.parse
+
+
+def sanitize_git_url(url: str) -> str:
+    """Redacts credentials in URL for safe logging/printing."""
+    return re.sub(r"://([^@/]+)@", r"://***@", url)
+
+
 class GitService:
-    def clone_repository(self, repo_url: str, repo_id: str, timeout_seconds: int = 60) -> str:
-        """Clones a remote repository URL into local storage directory."""
+    def clone_repository(self, repo_url: str, repo_id: str, timeout_seconds: int = 60, full_history: bool = False) -> str:
+        """Clones a remote repository URL into local storage directory (shallow clone --depth 1 by default)."""
         import stat
 
-        url = repo_url.strip()
-        if url.startswith("-"):
+        if not repo_url:
+            raise ValueError("Git clone URL cannot be empty.")
+        if repo_url.startswith("-"):
             raise ValueError(f"Invalid git clone URL: '{repo_url}' cannot start with '-'")
-        if not (url.startswith("https://") or url.startswith("git@")):
-            raise ValueError("Git clone URL must use https:// or git@ protocols only.")
+        if any(c.isspace() for c in repo_url):
+            raise ValueError(f"Git clone URL cannot contain whitespace: '{repo_url}'")
+        if not repo_url.startswith("https://"):
+            raise ValueError("Git clone URL must use https:// protocol only.")
+
+        try:
+            parsed = urllib.parse.urlparse(repo_url)
+        except Exception as e:
+            raise ValueError(f"Malformed git clone URL: {e}")
+
+        # Reject URLs with embedded credentials (userinfo)
+        if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
+            raise ValueError("Git clone URL must not contain embedded credentials.")
+
+        url = repo_url
 
         def remove_readonly(func, path, exc_info):
             try:
@@ -45,6 +68,7 @@ class GitService:
         target_dir = os.path.abspath(os.path.join(settings.REPOS_DIR, repo_id))
         git_env = os.environ.copy()
         git_env["GIT_TERMINAL_PROMPT"] = "0"
+        git_env["GIT_ALLOW_PROTOCOL"] = "https"
 
         # Check if target_dir is a valid git repository with working status
         is_valid = False
@@ -80,7 +104,10 @@ class GitService:
 
         _cleanup_dir(target_dir)
 
-        cmd = ["git", "clone", "--depth", "50", "--", url, target_dir]
+        cmd = ["git", "clone"]
+        if not full_history:
+            cmd.extend(["--depth", "1"])
+        cmd.extend(["--", url, target_dir])
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, env=git_env)
         except subprocess.TimeoutExpired:
