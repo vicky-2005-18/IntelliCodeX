@@ -14,6 +14,11 @@ _GLOBAL_OLLAMA_ASYNC_SEMAPHORE: Optional[asyncio.Semaphore] = None
 
 def get_ollama_semaphore() -> asyncio.Semaphore:
     """Lazily initialize and return the global async semaphore in the running event loop."""
+    try:
+        from backend.api.concurrency import gpu_manager
+        return gpu_manager._ensure_async_semaphore()
+    except Exception:
+        pass
     global _GLOBAL_OLLAMA_ASYNC_SEMAPHORE
     if _GLOBAL_OLLAMA_ASYNC_SEMAPHORE is None:
         _GLOBAL_OLLAMA_ASYNC_SEMAPHORE = asyncio.Semaphore(1)
@@ -81,6 +86,14 @@ class OllamaLLM:
         self.repeat_penalty = float(os.getenv("OLLAMA_REPEAT_PENALTY", str(repeat_penalty)))
         self._lock = _GLOBAL_OLLAMA_THREAD_LOCK
 
+    def _acquire_gpu(self):
+        """Acquires GPU execution slot via global concurrency manager or fallback thread lock."""
+        try:
+            from backend.api.concurrency import gpu_manager
+            return gpu_manager.acquire()
+        except Exception:
+            return self._lock
+
     def set_model(self, model: str):
         """Dynamically switches active Ollama LLM model."""
         self.model = model
@@ -117,7 +130,7 @@ class OllamaLLM:
             "repeat_penalty": penalty,
         }
         
-        with self._lock:
+        with self._acquire_gpu():
             try:
                 resp = requests.post(
                     f"{self.host}/api/generate",
@@ -166,7 +179,7 @@ class OllamaLLM:
             "repeat_penalty": penalty,
         }
         
-        with self._lock:
+        with self._acquire_gpu():
             try:
                 resp = requests.post(
                     f"{self.host}/api/generate",

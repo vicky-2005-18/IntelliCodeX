@@ -25,6 +25,32 @@ def get_blast_radius(repo_id: str, file_path: str, current_user: User = Depends(
     }
 
 
+@router.get("/{repo_id}/architecture-optimization")
+@router.get("/{repo_id}/optimize")
+def get_architecture_optimization(repo_id: str, current_user: User = Depends(get_current_user)):
+    """
+    REQ-FUT-06: Architecture Optimization Endpoint.
+    Analyzes dependency graph for circular dependencies, God-component bottlenecks,
+    and returns decoupling refactoring recommendations.
+    """
+    repo_data = get_repo_for_user(repo_id, current_user)
+    source_files = repo_data.get("source_files", [])
+
+    enhanced_engine = EnhancedDependencyGraph()
+    enhanced_engine.build(source_files)
+
+    from core.architecture_optimizer import ArchitectureOptimizer
+    optimizer = ArchitectureOptimizer()
+    report = optimizer.analyze(
+        dep_graph=enhanced_engine.graph,
+        source_files=source_files,
+        llm=repo_data.get("engine", {}).llm if hasattr(repo_data.get("engine", {}), "llm") else None,
+    )
+    res = report.to_dict()
+    res["repo_id"] = repo_id
+    return res
+
+
 @router.get("/{repo_id:path}")
 def get_graph(repo_id: str, current_user: User = Depends(get_current_user)):
     repo_data = get_repo_for_user(repo_id, current_user)

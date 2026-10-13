@@ -146,3 +146,17 @@ def format_security_report(scan_result: Dict[str, Any], llm=None) -> str:
                 pass
 
     return "\n".join(lines)
+
+
+class SecurityScanner:
+    """Object-oriented security scanner service."""
+    def __init__(self, llm=None):
+        self.llm = llm
+
+    def scan(self, target_path: str) -> Dict[str, Any]:
+        return run_bandit_scan(target_path)
+
+    def scan_and_report(self, target_path: str) -> str:
+        res = self.scan(target_path)
+        return format_security_report(res, llm=self.llm)
+

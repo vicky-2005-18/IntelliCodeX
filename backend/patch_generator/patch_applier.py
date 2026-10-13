@@ -15,13 +15,19 @@ def apply_patch_to_file(
     target_file: str,
     patched_content: str,
     create_backup: bool = True,
+    expected_original: Optional[str] = None,
+    expected_hash: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Write patched content to the target file within the repository.
 
     Creates a .bak backup alongside the original when create_backup=True.
     Rejects any target_file that escapes repo_path via path traversal.
+    Verifies that the target file has not been concurrently modified since
+    patch proposal generation if expected_original or expected_hash is provided.
     """
+    import hashlib
+
     # -- Path-safety check: must resolve inside repo_path --
     try:
         abs_path = resolve_within(repo_path, target_file)
@@ -33,6 +39,30 @@ def apply_patch_to_file(
             "success": False,
             "error": f"Target file not found: {abs_path}",
         }
+
+    # -- Concurrent modification conflict detection (REQ-CORE-17) --
+    if expected_hash is not None or expected_original is not None:
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                current_disk_content = f.read()
+        except Exception as exc:
+            return {"success": False, "error": f"Failed to read target file: {exc}"}
+
+        if expected_hash is not None:
+            current_hash = hashlib.sha256(current_disk_content.encode("utf-8")).hexdigest()
+            if current_hash != expected_hash:
+                return {
+                    "success": False,
+                    "error": "Conflict detected: Target file content has changed on disk since patch proposal was generated.",
+                    "conflict": True,
+                }
+        elif expected_original is not None:
+            if current_disk_content != expected_original:
+                return {
+                    "success": False,
+                    "error": "Conflict detected: Target file content has changed on disk since patch proposal was generated.",
+                    "conflict": True,
+                }
 
     backup_path = None
     try:
@@ -50,6 +80,7 @@ def apply_patch_to_file(
         }
     except OSError as exc:
         return {"success": False, "error": str(exc)}
+
 
 
 def apply_unified_diff(

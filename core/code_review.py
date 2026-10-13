@@ -282,12 +282,17 @@ def commit_approved_changes(
     if not os.path.isdir(os.path.join(repo_path, ".git")):
         return False, f"Not a Git repository: '{repo_path}'. Changes applied to disk without git commit."
 
+    if not modified_files:
+        return False, "No files specified to commit."
+
     try:
-        # Stage only the specified files
+        # Stage only the specified files and build normalized pathspecs
+        norm_files = []
         for rel_file in modified_files:
             abs_f = os.path.join(repo_path, rel_file) if not os.path.isabs(rel_file) else rel_file
+            rel_path = os.path.relpath(abs_f, repo_path)
             res = subprocess.run(
-                ["git", "add", abs_f],
+                ["git", "add", rel_path],
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
@@ -295,17 +300,19 @@ def commit_approved_changes(
             )
             if res.returncode != 0:
                 return False, f"Failed to stage '{rel_file}': {res.stderr.strip()}"
+            norm_files.append(rel_path)
 
-        # Execute git commit for staged files only
+        # Execute git commit with explicit pathspecs so ONLY approved files are committed.
+        # Any pre-staged unrelated files in the Git index remain untouched in the staging area.
         c_res = subprocess.run(
-            ["git", "commit", "-m", commit_message],
+            ["git", "commit", "-m", commit_message, "--"] + norm_files,
             cwd=repo_path,
             capture_output=True,
             text=True,
             check=False
         )
         if c_res.returncode == 0:
-            return True, f"Created local Git commit for {len(modified_files)} file(s): '{commit_message}'"
+            return True, f"Created local Git commit for {len(norm_files)} file(s): '{commit_message}'"
         else:
             return False, f"Git commit failed: {c_res.stderr.strip() or c_res.stdout.strip()}"
     except Exception as e:

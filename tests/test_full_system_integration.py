@@ -124,3 +124,45 @@ def test_full_system_end_to_end_pipeline(tmp_path):
     report = run_benchmark(repo_dir)
     assert report.num_files == 3
     assert report.speedup_factor >= 1.0
+
+
+def test_api_created_query_engine_has_graph_context():
+    """Verify that QueryEngine created via backend API repos maintains dep_graph, call_graph, and lexical_index."""
+    from backend.api.repos import get_repo_engine, ACTIVE_REPOS
+    from backend.auth import User
+
+    with tempfile.TemporaryDirectory() as td:
+        file_a = os.path.join(td, "main.py")
+        file_b = os.path.join(td, "util.py")
+        with open(file_a, "w") as f:
+            f.write("from util import helper\ndef main():\n    return helper()\n")
+        with open(file_b, "w") as f:
+            f.write("def helper():\n    return 42\n")
+
+        admin_user = User(id="admin_1", username="admin", email="admin@example.com", role="admin")
+        repo_id = get_repo_id(td)
+
+        embedder = TfidfEmbedder()
+        result = ingest_repository(td, embedder)
+        from backend.database.faiss_persistence import save_vector_store
+        save_vector_store(repo_id, result.store)
+
+        from backend.database import db_manager
+        db_manager.update("repositories", {"repo_id": repo_id}, {
+            "repo_id": repo_id,
+            "repo_path": td,
+            "backend": "tfidf",
+            "owner_id": "admin_1",
+            "created_at": 12345.0,
+        })
+
+        repo_data = get_repo_engine(repo_id, admin_user)
+        engine = repo_data["engine"]
+
+        # Assert query engine contains the rich context components supplied by CLI
+        assert engine.dep_graph is not None, "dep_graph must not be None in API-created QueryEngine"
+        assert engine.call_graph is not None, "call_graph must not be None in API-created QueryEngine"
+        assert engine.repo_path == td, "repo_path must match in API-created QueryEngine"
+        assert repo_data.get("dep_graph") is not None
+        assert repo_data.get("call_graph") is not None
+

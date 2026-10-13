@@ -216,11 +216,17 @@ class BugLocalizer:
         embedder: BaseEmbedder,
         graph: Optional[nx.DiGraph] = None,
         spectrum_scores: Optional[Dict[str, float]] = None,
+        coverage_records: Optional[List[CoverageRecord]] = None,
+        total_failing: int = 0,
+        total_passing: int = 0,
     ):
         self.store = store
         self.embedder = embedder
         self.graph = graph
-        self.spectrum_scores = spectrum_scores or {}
+        self.spectrum_scores = dict(spectrum_scores) if spectrum_scores else {}
+        if coverage_records and total_failing > 0:
+            calculated = calculate_ochiai_spectrum(coverage_records, total_failing, total_passing)
+            self.spectrum_scores.update(calculated)
         self.parser = StackTraceParser()
 
     def localize(self, error_report: str, top_k: int = 5) -> Dict[str, Any]:
@@ -304,8 +310,15 @@ class BugLocalizer:
             graph_boost = min(0.15, graph_ctx["in_degree"] * self.GRAPH_CENTRALITY_WEIGHT)
             confidence = min(0.99, max(0.1, confidence + graph_boost))
 
-            # Apply Ochiai spectrum score boost if available
-            ochiai_score = self.spectrum_scores.get(chunk.file_path, 0.0)
+            # Apply Ochiai spectrum score boost if available (checks symbol-level, chunk_id, and file-level keys)
+            ochiai_score = max(
+                self.spectrum_scores.get(chunk.chunk_id, 0.0),
+                self.spectrum_scores.get(f"{chunk.file_path}::{chunk.name}", 0.0),
+                self.spectrum_scores.get(chunk.file_path, 0.0),
+                self.spectrum_scores.get(f"{os.path.basename(chunk.file_path)}::{chunk.name}", 0.0),
+                self.spectrum_scores.get(os.path.basename(chunk.file_path), 0.0),
+                self.spectrum_scores.get(chunk.name, 0.0),
+            )
             if ochiai_score > 0:
                 confidence = min(0.99, confidence + (ochiai_score * 0.2))
 
@@ -357,6 +370,11 @@ class BugLocalizer:
                 f"Stack trace points to {matched_frame.file_path}:{matched_frame.line_number} "
                 f"in '{matched_frame.function}'.",
             )
+        elif ochiai_score > 0:
+            parts.insert(
+                0,
+                "Candidate localized via Ochiai SBFL spectrum scoring (logical fault without active stack frame).",
+            )
 
         if ochiai_score > 0:
             parts.append(f"Ochiai suspiciousness score: {ochiai_score:.2f}.")
@@ -380,6 +398,25 @@ class BugLocalizer:
                 best[fp] = cand
         return list(best.values())
 
+    def _diagnose_violated_invariants(self, error_type: str, error_message: str) -> Optional[str]:
+        """Diagnoses failure mechanisms and violated preconditions/invariants based on error type."""
+        err_lower = error_type.lower()
+        if "typeerror" in err_lower:
+            return "Violated precondition: Type contract mismatch or unexpected NoneType operand passed to operation."
+        if "valueerror" in err_lower:
+            return "Violated precondition: Argument received has invalid state, shape, or domain bounds."
+        if "keyerror" in err_lower:
+            return "Violated invariant: Required mapping key is missing from dictionary/lookup structure."
+        if "indexerror" in err_lower or "outofbounds" in err_lower:
+            return "Violated invariant: Sequence index exceeds length boundary or list is empty."
+        if "attributeerror" in err_lower or "nullpointer" in err_lower:
+            return "Violated precondition: Invoked attribute or method on uninitialized or NoneType reference."
+        if "zerodivision" in err_lower:
+            return "Violated invariant: Divisor evaluates to zero without boundary guard."
+        if "syntaxerror" in err_lower:
+            return "Violated syntactic rule: Invalid grammar, unbalanced delimiter, or malformed statement."
+        return None
+
     def _build_root_cause_explanation(
         self,
         trace: ParsedStackTrace,
@@ -392,15 +429,24 @@ class BugLocalizer:
             )
 
         top = candidates[0]
+        mode = "Reproduced cause (Stack Trace)" if trace.frames else "Suspected cause (SBFL & Static Reasoning)"
         explanation_parts = [
-            f"Most likely root cause: {top['file_path']} in function '{top['function']}' "
+            f"[{mode}] Most likely root cause: {top['file_path']} in function '{top['function']}' "
             f"around line {top['line_number']} (confidence {top['confidence_score']:.0%}).",
         ]
+
+        violated_inv = self._diagnose_violated_invariants(trace.error_type, trace.error_message)
+        if violated_inv:
+            explanation_parts.append(violated_inv)
 
         if trace.frames:
             deepest = trace.frames[0]
             explanation_parts.append(
                 f"The stack trace originates at {deepest.file_path}:{deepest.line_number}."
+            )
+        elif top.get("ochiai_score", 0.0) > 0:
+            explanation_parts.append(
+                f"Spectrum-based fault localization (Ochiai metric {top['ochiai_score']:.2f}) indicates high fault suspiciousness."
             )
 
         if top.get("graph_context", {}).get("callers"):
@@ -412,6 +458,7 @@ class BugLocalizer:
 
         explanation_parts.append(top["explanation"])
         return " ".join(explanation_parts)
+
 
 
 # Alias AdvancedBugLocalizer for backward compatibility

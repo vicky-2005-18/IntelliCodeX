@@ -249,7 +249,7 @@ def test_docker_mode_fallback_without_docker(sample_repo):
             repo_path=sample_repo,
             target_file="math.py",
             patched_code="def add(a, b):\n    return a + b\n",
-            test_command=f"{sys.executable} -c 'print(1)'",
+            test_command=[sys.executable, "-c", "print(1)"],
             timeout=10
         )
 
@@ -257,6 +257,26 @@ def test_docker_mode_fallback_without_docker(sample_repo):
         # (The test should still run, just with a warning logged)
         # Check that it didn't fail due to Docker error
         assert "Docker execution failed" not in result.error_message
+
+
+def test_docker_mode_fails_safely_when_local_sandbox_disabled(sample_repo):
+    """Test that Docker mode fails safely without running code locally when Docker is unavailable and allow_local_sandbox=False."""
+    runner = SandboxRunner(default_timeout=10, sandbox_mode="docker", allow_local_sandbox=False, is_admin=True)
+
+    with patch.object(runner, "_check_docker_available", return_value=False):
+        result = runner.run_tests_with_patch(
+            repo_path=sample_repo,
+            target_file="math.py",
+            patched_code="def add(a, b):\n    return a + b\n",
+            test_command=[sys.executable, "-c", "print(1)"],
+            timeout=10
+        )
+
+        # Must not run locally; must fail safely reporting isolation failure
+        assert result.success is False
+        assert result.exit_code == -8
+        assert "Docker unavailable and local sandbox disabled" in result.error_message
+        assert runner.sandbox_mode == "docker"  # Must not mutate instance mode
 
 
 def test_allowlisted_executable_accepted(sample_repo):

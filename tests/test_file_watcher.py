@@ -186,3 +186,64 @@ def test_repository_watcher_trigger_reindex_direct(tmp_path):
     assert res is not None
     assert len(reindex_called) == 1
     assert watcher.current_result == res
+
+
+def test_repository_event_handler_directory_moved_and_deleted(tmp_path):
+    """Verifies that directory rename/move and deletion events are correctly captured."""
+    repo_dir = str(tmp_path)
+    pkg_dir = os.path.join(repo_dir, "pkg")
+    os.makedirs(pkg_dir, exist_ok=True)
+    f1 = os.path.join(pkg_dir, "utils.py")
+    with open(f1, "w", encoding="utf-8") as f:
+        f.write("def helper(): pass\n")
+
+    called_batches = []
+    event_done = threading.Event()
+
+    def on_batch(paths):
+        called_batches.append(paths)
+        event_done.set()
+
+    handler = RepositoryEventHandler(repo_root=repo_dir, callback=on_batch, debounce_delay=0.1)
+
+    class MockDirMovedEvent:
+        def __init__(self, src_path, dest_path):
+            self.src_path = src_path
+            self.dest_path = dest_path
+            self.is_directory = True
+
+    class MockDirDeletedEvent:
+        def __init__(self, src_path):
+            self.src_path = src_path
+            self.is_directory = True
+
+    # Simulate directory move pkg -> lib
+    lib_dir = os.path.join(repo_dir, "lib")
+    os.rename(pkg_dir, lib_dir)
+    handler.on_moved(MockDirMovedEvent(pkg_dir, lib_dir))
+
+    event_done.wait(timeout=1.0)
+    assert len(called_batches) >= 1
+    flat_paths = [os.path.normpath(p) for b in called_batches for p in b]
+    # Destination file lib/utils.py should be registered
+    assert any("lib" in p and "utils.py" in p for p in flat_paths)
+    # Old directory pkg should also be flagged for cleanup
+    assert any("pkg" in p for p in flat_paths)
+    handler.cancel_pending()
+
+
+def test_core_watcher_facade():
+    """Verifies REQ-FUT-03 canonical core.watcher facade imports."""
+    from core.watcher import (
+        RepositoryWatcher,
+        RepositoryEventHandler,
+        IncrementalIndexer,
+        is_ignored_path,
+        compute_file_hash,
+    )
+    assert RepositoryWatcher is not None
+    assert RepositoryEventHandler is not None
+    assert IncrementalIndexer is not None
+    assert callable(is_ignored_path)
+    assert callable(compute_file_hash)
+

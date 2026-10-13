@@ -64,6 +64,14 @@ def init_schema(conn: sqlite3.Connection):
             conn.execute("ALTER TABLE repos ADD COLUMN skip_overloads INTEGER DEFAULT 1;")
         except Exception:
             pass
+        try:
+            conn.execute("ALTER TABLE repos ADD COLUMN embedding_dim INTEGER DEFAULT 0;")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE repos ADD COLUMN model_name TEXT DEFAULT '';")
+        except Exception:
+            pass
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS files (
@@ -106,14 +114,16 @@ def save_repo_metadata(
     chunks: List[CodeChunk],
     graph_version: int = GRAPH_FORMAT_VERSION,
     skip_overload_stubs: bool = True,
+    embedding_dim: int = 0,
+    model_name: str = "",
 ):
     """Saves or updates repository metadata, file hashes, and code chunks in SQLite."""
     now = time.time()
     with conn:
         # 1. Update repos table
         conn.execute("""
-            INSERT INTO repos (repo_id, repo_path, backend, total_files, total_chunks, last_indexed_at, graph_version, skip_overloads)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO repos (repo_id, repo_path, backend, total_files, total_chunks, last_indexed_at, graph_version, skip_overloads, embedding_dim, model_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo_id) DO UPDATE SET
                 repo_path=excluded.repo_path,
                 backend=excluded.backend,
@@ -121,10 +131,30 @@ def save_repo_metadata(
                 total_chunks=excluded.total_chunks,
                 last_indexed_at=excluded.last_indexed_at,
                 graph_version=excluded.graph_version,
-                skip_overloads=excluded.skip_overloads;
-        """, (repo_id, os.path.abspath(repo_path), backend, len(source_files), len(chunks), now, graph_version, 1 if skip_overload_stubs else 0))
+                skip_overloads=excluded.skip_overloads,
+                embedding_dim=excluded.embedding_dim,
+                model_name=excluded.model_name;
+        """, (
+            repo_id,
+            os.path.abspath(repo_path),
+            backend,
+            len(source_files),
+            len(chunks),
+            now,
+            graph_version,
+            1 if skip_overload_stubs else 0,
+            embedding_dim,
+            model_name,
+        ))
 
-        # 2. Insert/Update files table
+        # 2. Synchronize files table (remove deleted files, upsert current files)
+        current_rel_paths = {sf.rel_path for sf in source_files}
+        cursor = conn.execute("SELECT rel_path FROM files WHERE repo_id = ?", (repo_id,))
+        existing_stored_paths = {row["rel_path"] for row in cursor.fetchall()}
+        deleted_stored_paths = list(existing_stored_paths - current_rel_paths)
+        if deleted_stored_paths:
+            delete_files_from_db(conn, repo_id, deleted_stored_paths)
+
         for sf in source_files:
             f_hash = compute_file_hash(sf.content)
             mtime = os.path.getmtime(sf.path) if os.path.exists(sf.path) else now
@@ -239,6 +269,8 @@ def save_index(
     storage_dir: str = ".storage",
     graph_version: int = GRAPH_FORMAT_VERSION,
     skip_overload_stubs: bool = True,
+    embedding_dim: Optional[int] = None,
+    model_name: str = "",
 ) -> Tuple[str, str]:
     """
     Unified high-level save function:
@@ -248,6 +280,7 @@ def save_index(
     Returns (db_path, faiss_path).
     """
     repo_id = get_repo_id(repo_path)
+    eff_dim = embedding_dim if embedding_dim is not None else (store.dim if (store and hasattr(store, "dim")) else 0)
     conn = get_db_connection(db_path)
     try:
         save_repo_metadata(
@@ -259,6 +292,8 @@ def save_index(
             chunks,
             graph_version=graph_version,
             skip_overload_stubs=skip_overload_stubs,
+            embedding_dim=eff_dim,
+            model_name=model_name,
         )
         sqlite_row_count = conn.execute("SELECT COUNT(*) FROM chunks WHERE repo_id = ?", (repo_id,)).fetchone()[0]
     finally:

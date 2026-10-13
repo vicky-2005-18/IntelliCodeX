@@ -8,8 +8,10 @@ from backend.config import settings
 from backend.auth import get_current_user
 from backend.api import (
     auth_router, repos_router, chat_router, bugs_router,
-    patches_router, graph_router, analytics_router, docs_router, review_router, query_router
+    patches_router, graph_router, analytics_router, docs_router, review_router, query_router,
+    concurrency_router, multi_repo_router, org_memory_router
 )
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
@@ -49,6 +51,9 @@ app.include_router(analytics_router, prefix=settings.API_PREFIX, dependencies=[D
 app.include_router(docs_router, prefix=settings.API_PREFIX, dependencies=[Depends(get_current_user)])
 app.include_router(review_router, prefix=settings.API_PREFIX, dependencies=[Depends(get_current_user)])
 app.include_router(query_router, prefix=settings.API_PREFIX, dependencies=[Depends(get_current_user)])
+app.include_router(concurrency_router, prefix=settings.API_PREFIX, dependencies=[Depends(get_current_user)])
+app.include_router(multi_repo_router, prefix=settings.API_PREFIX, dependencies=[Depends(get_current_user)])
+app.include_router(org_memory_router, prefix=settings.API_PREFIX, dependencies=[Depends(get_current_user)])
 
 
 @app.get("/")

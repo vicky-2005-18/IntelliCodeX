@@ -30,6 +30,7 @@ from backend.patch_generator.llm_parser import extract_code_and_explanation, str
 from backend.patch_generator.patch_validator import validate_patch, compute_patch_quality_score
 from backend.patch_generator.patch_applier import apply_patch_to_file, merge_snippet_into_file
 from rag.query_engine import format_context
+from core.self_improving import RepairExperienceBank, global_experience_bank
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ class PatchEngine:
         is_admin: bool = False,  # CLI mode should pass True
         allow_local_sandbox: bool = True,  # CLI mode should pass True
         default_timeout: int = 30,
+        experience_bank: Optional[RepairExperienceBank] = None,
     ):
         self.store = store
         self.embedder = embedder
@@ -91,6 +93,7 @@ class PatchEngine:
         self.graph = graph
         self.repo_path = repo_path
         self.default_timeout = default_timeout
+        self.experience_bank = experience_bank or global_experience_bank
         self.localizer = BugLocalizer(store, embedder, graph)
         # Initialize sandbox_runner with config if not provided
         if sandbox_runner is None:
@@ -121,6 +124,8 @@ class PatchEngine:
         test_command: Optional[str] = None,
         max_iterations: int = 3,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        owner_id: Optional[str] = None,
+        **kwargs,
     ) -> Dict[str, Any]:
         """
         Generates a patch recommendation based on error report and repository context.
@@ -134,6 +139,8 @@ class PatchEngine:
                 test_command=test_command,
                 max_iterations=max_iterations,
                 progress_callback=progress_callback,
+                owner_id=owner_id,
+                **kwargs,
             )
 
         localization = self.localizer.localize(error_report, top_k=3)
@@ -150,8 +157,10 @@ class PatchEngine:
         language = self._detect_language(file_path)
         localization_confidence = top_candidate["confidence_score"]
 
-        full_original = self._read_file(file_path) or snippet
+        disk_content = self._read_file(file_path)
+        full_original = disk_content or snippet
         using_full_file = full_original != snippet
+        file_read_from_disk = disk_content is not None
 
         rag_chunks = self._retrieve_rag_chunks(error_report, file_path, top_k=4)
         rag_context = format_context(rag_chunks) if rag_chunks else ""
@@ -188,11 +197,15 @@ class PatchEngine:
         )
 
         patch_id = str(uuid.uuid4())
+        import hashlib
         patch_record = {
             "patch_id": patch_id,
             "repo_id": repo_id,
             "target_file": file_path,
             "original_code": diff_original,
+            "using_full_file": using_full_file,
+            "file_read_from_disk": file_read_from_disk,
+            "original_hash": hashlib.sha256(diff_original.encode("utf-8")).hexdigest() if file_read_from_disk else None,
             "suggested_patch": patched_full,
             "snippet_patch": suggested_snippet,
             "git_diff": git_diff,
@@ -221,6 +234,7 @@ class PatchEngine:
             },
             "llm_generated": llm_generated,
             "error_type": localization.get("error_type", "UnknownError"),
+            "owner_id": owner_id,
             "status": "pending",
             "created_at": time.time(),
         }
@@ -242,6 +256,8 @@ class PatchEngine:
         test_command: Optional[str] = None,
         max_iterations: int = 3,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        owner_id: Optional[str] = None,
+        **kwargs,
     ) -> Dict[str, Any]:
         """
         Closed-Loop Agentic Test-Driven Repair (Milestone 1).
@@ -261,8 +277,10 @@ class PatchEngine:
         language = self._detect_language(file_path)
         localization_confidence = top_candidate["confidence_score"]
 
-        full_original = self._read_file(file_path) or snippet
+        disk_content = self._read_file(file_path)
+        full_original = disk_content or snippet
         using_full_file = full_original != snippet
+        file_read_from_disk = disk_content is not None
 
         rag_chunks = self._retrieve_rag_chunks(error_report, file_path, top_k=4)
         rag_context = format_context(rag_chunks) if rag_chunks else ""
@@ -365,11 +383,15 @@ class PatchEngine:
             confidence_score = base_score
 
         patch_id = str(uuid.uuid4())
+        import hashlib
         patch_record = {
             "patch_id": patch_id,
             "repo_id": repo_id,
             "target_file": file_path,
             "original_code": diff_original,
+            "using_full_file": using_full_file,
+            "file_read_from_disk": file_read_from_disk,
+            "original_hash": hashlib.sha256(diff_original.encode("utf-8")).hexdigest() if file_read_from_disk else None,
             "suggested_patch": patched_full,
             "snippet_patch": current_snippet,
             "git_diff": git_diff,
@@ -401,9 +423,29 @@ class PatchEngine:
             },
             "llm_generated": llm_generated,
             "error_type": localization.get("error_type", "UnknownError"),
+            "owner_id": owner_id,
             "status": "verified" if (test_passed and not test_skipped) else "pending",
             "created_at": time.time(),
         }
+
+        # Record verified fix in self-improving experience bank (REQ-FUT-10)
+        if test_passed and not test_skipped and self.experience_bank:
+            try:
+                self.experience_bank.record_success(
+                    error_type=localization.get("error_type", "UnknownError"),
+                    error_description=error_report,
+                    original_code=snippet,
+                    fixed_code=current_snippet,
+                    explanation=current_explanation,
+                    source="sandbox_pass",
+                    language=language,
+                    test_verified=True,
+                    developer_approved=False,
+                    repo_id=repo_id,
+                    event_id=f"sandbox:{repo_id}:{patch_id}",
+                )
+            except Exception:
+                pass
 
         # Dynamically record patch entry if db_manager is available
         try:
@@ -414,9 +456,15 @@ class PatchEngine:
 
         return patch_record
 
-    def apply_patch(self, patch_record: Dict[str, Any], approved_by: Optional[str] = None) -> Tuple[bool, str]:
+    def apply_patch(
+        self,
+        patch_record: Dict[str, Any],
+        approved_by: Optional[str] = None,
+        force: bool = False,
+    ) -> Tuple[bool, str]:
         """Applies suggested patch directly to physical file on disk.
         Enforces review gate: patch must be approved or explicitly confirmed.
+        Checks for concurrent file modification conflicts unless force=True.
         Records an audit log entry upon successful application.
         """
         if not self.repo_path:
@@ -426,7 +474,17 @@ class PatchEngine:
         if not target_file or not suggested:
             return False, "Invalid patch record"
 
-        res = apply_patch_to_file(self.repo_path, target_file, suggested)
+        is_disk_tracked = patch_record.get("file_read_from_disk", patch_record.get("using_full_file", False))
+        expected_original = None if force or not is_disk_tracked else patch_record.get("original_code")
+        expected_hash = None if force or not is_disk_tracked else patch_record.get("original_hash")
+
+        res = apply_patch_to_file(
+            self.repo_path,
+            target_file,
+            suggested,
+            expected_original=expected_original,
+            expected_hash=expected_hash,
+        )
         if res.get("success"):
             patch_record["status"] = "applied"
             patch_id = patch_record.get("patch_id", "unknown")
@@ -439,8 +497,33 @@ class PatchEngine:
                 user=approved_by or "system",
                 status="applied",
             )
+
+            # Record approved fix in self-improving experience bank (REQ-FUT-10)
+            if self.experience_bank:
+                try:
+                    orig_snip = patch_record.get("original_code", "")
+                    fix_snip = patch_record.get("snippet_patch") or patch_record.get("suggested_patch", "")
+                    is_test_verified = patch_record.get("sandbox_validation", {}).get("verified", False)
+                    if orig_snip and fix_snip:
+                        self.experience_bank.record_success(
+                            error_type=patch_record.get("error_type", "UnknownError"),
+                            error_description=patch_record.get("explanation", ""),
+                            original_code=orig_snip,
+                            fixed_code=fix_snip,
+                            explanation=patch_record.get("explanation", ""),
+                            source="developer_approval",
+                            language=self._detect_language(target_file),
+                            test_verified=is_test_verified,
+                            developer_approved=True,
+                            repo_id=patch_record.get("repo_id"),
+                            event_id=f"approval:{patch_id}",
+                        )
+                except Exception:
+                    pass
+
             return True, f"Successfully applied patch to '{target_file}'!"
         return False, f"Failed to apply patch: {res.get('error', 'unknown error')}"
+
 
     def update_patch_status(
         self,
@@ -639,12 +722,28 @@ class PatchEngine:
         rag_context: str,
         localization: Dict[str, Any],
     ) -> str:
+        error_type = localization.get("error_type", "Unknown")
+        few_shots = ""
+        lang = self._detect_language(file_path)
+        if self.experience_bank:
+            few_shots = self.experience_bank.format_few_shot_prompt(
+                error_type=error_type,
+                query_text=error_report,
+                language=lang,
+                repo_id=getattr(self, "repo_id", None),
+                max_tokens_budget=450,
+                limit=2,
+            )
+
+        few_shots_section = f"\n\n{few_shots}" if few_shots else ""
+
         return (
             f"Bug / Error Report:\n{error_report}\n\n"
-            f"Error Type: {localization.get('error_type', 'Unknown')}\n"
+            f"Error Type: {error_type}\n"
             f"Target File: {file_path}\n\n"
             f"Code to fix:\n```{self._detect_language(file_path)}\n{snippet}\n```\n\n"
-            f"Additional repository context:\n{rag_context}\n\n"
+            f"Additional repository context:\n{rag_context}"
+            f"{few_shots_section}\n\n"
             f"Generate the corrected version of the code snippet above. "
             f"Make minimal changes — only fix the bug. "
             f"Provide the fixed code in a single code block, then explain the fix."
@@ -660,8 +759,16 @@ class PatchEngine:
         rag_context: str,
     ) -> str:
         failed_tests_str = ", ".join(test_result.failed_tests) if test_result.failed_tests else "Automated Test Suite"
-        assertions_str = "\n".join(f"- {err}" for err in test_result.assertion_errors) if test_result.assertion_errors else "Assertion failed during test execution."
-        traceback_str = test_result.traceback_summary or test_result.stdout[-1000:]
+        if not test_result.assertion_errors and test_result.error_message:
+            assertions_str = f"- {test_result.error_message}"
+        else:
+            assertions_str = "\n".join(f"- {err}" for err in test_result.assertion_errors) if test_result.assertion_errors else "Assertion failed during test execution."
+        
+        traceback_str = (
+            test_result.traceback_summary
+            or (test_result.stderr[-1000:] if test_result.stderr else "")
+            or (test_result.stdout[-1000:] if test_result.stdout else "No output captured.")
+        )
 
         return (
             f"Bug / Error Report:\n{error_report}\n\n"

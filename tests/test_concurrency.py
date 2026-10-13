@@ -6,6 +6,7 @@ Tests:
 - Calculation of p50 and p95 latencies and assertion of no deadlock or race conditions
 """
 import concurrent.futures
+import threading
 import time
 import uuid
 import numpy as np
@@ -161,3 +162,95 @@ def test_concurrent_clients_ask_endpoint():
     print(f"\n[Concurrency Benchmark] 5 Parallel Clients: p50={p50*1000:.1f}ms, p95={p95*1000:.1f}ms")
     assert p50 > 0.0
     assert p95 >= p50
+
+
+def test_gpu_concurrency_manager_metrics():
+    """Verifies that GPUConcurrencyManager tracks active workers, queue depth, and metrics properly."""
+    from backend.api.concurrency import GPUConcurrencyManager
+
+    mgr = GPUConcurrencyManager(max_concurrency=1)
+    metrics_initial = mgr.get_metrics()
+    assert metrics_initial["max_concurrency"] == 1
+    assert metrics_initial["active_workers"] == 0
+    assert metrics_initial["total_processed"] == 0
+
+    # Verify synchronous acquisition
+    with mgr.acquire():
+        metrics_inside = mgr.get_metrics()
+        assert metrics_inside["active_workers"] == 1
+
+    metrics_after = mgr.get_metrics()
+    assert metrics_after["active_workers"] == 0
+    assert metrics_after["total_processed"] == 1
+
+
+@pytest.mark.anyio
+async def test_gpu_concurrency_manager_async_acquisition():
+    """Verifies async coroutine acquisition via GPUConcurrencyManager."""
+    from backend.api.concurrency import GPUConcurrencyManager
+
+    mgr = GPUConcurrencyManager(max_concurrency=1)
+    async with mgr.acquire_async():
+        metrics_inside = mgr.get_metrics()
+        assert metrics_inside["active_workers"] == 1
+
+    metrics_after = mgr.get_metrics()
+    assert metrics_after["active_workers"] == 0
+    assert metrics_after["total_processed"] == 1
+
+
+def test_concurrency_status_api_endpoint():
+    """Verifies authenticated GET /api/concurrency/status endpoint returns valid telemetry."""
+    user_id = str(uuid.uuid4())
+    username = f"telem_user_{int(time.time() * 1000)}"
+    user = User(id=user_id, username=username, email=f"{username}@example.com", role="developer")
+    db_manager.insert("users", {
+        "id": user_id,
+        "username": username,
+        "email": user.email,
+        "hashed_password": hash_password("ValidPassword123!"),
+        "role": "developer",
+        "created_at": time.time(),
+    })
+
+    token = create_access_token(user)
+    client = TestClient(app)
+    resp = client.get("/api/concurrency/status", headers={"Authorization": f"Bearer {token}"})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "healthy"
+    assert "telemetry" in data
+    assert data["telemetry"]["max_concurrency"] == 1
+    assert "Serialized" in data["telemetry"]["vram_policy"]
+
+
+def test_high_concurrency_stress_test():
+    """Stress test with 10 concurrent threads to ensure zero race conditions or deadlocks."""
+    from backend.api.concurrency import GPUConcurrencyManager
+
+    mgr = GPUConcurrencyManager(max_concurrency=1)
+    max_concurrent_observed = 0
+    lock = threading.Lock()
+    active_now = 0
+
+    def worker_task(idx):
+        nonlocal max_concurrent_observed, active_now
+        with mgr.acquire():
+            with lock:
+                active_now += 1
+                if active_now > max_concurrent_observed:
+                    max_concurrent_observed = active_now
+            time.sleep(0.01)  # Simulate workload
+            with lock:
+                active_now -= 1
+        return idx
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(worker_task, i) for i in range(10)]
+        results = [f.result() for f in futures]
+
+    assert len(results) == 10
+    assert max_concurrent_observed == 1  # Strictly serialized
+    assert mgr.get_metrics()["total_processed"] == 10
+

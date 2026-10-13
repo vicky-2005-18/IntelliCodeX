@@ -19,11 +19,30 @@ def validate_python_syntax(code: str) -> Dict[str, Any]:
 
 
 def validate_syntax(code: str, language: str = "python") -> Dict[str, Any]:
-    """Language-aware syntax validation. Currently supports Python only."""
-    if language == "python":
+    """Language-aware syntax validation. Uses Python ast for Python and Tree-sitter for other supported languages."""
+    lang_lower = (language or "python").lower().strip()
+    if lang_lower == "python":
         return validate_python_syntax(code)
-    # Non-Python languages: skip syntax check (no parser available)
+
+    try:
+        from core.ts_loader import get_tree_sitter_parser
+        parser = get_tree_sitter_parser(lang_lower)
+        if parser is not None:
+            code_bytes = code.encode("utf-8")
+            tree = parser.parse(code_bytes)
+            if tree and tree.root_node:
+                if tree.root_node.has_error:
+                    return {
+                        "valid": False,
+                        "error": f"Tree-sitter syntax error detected in {language} code",
+                    }
+                return {"valid": True, "error": None}
+    except Exception:
+        pass
+
+    # Non-Python languages without tree-sitter bindings: skip syntax check
     return {"valid": True, "error": None, "skipped": True}
+
 
 
 def validate_git_apply(

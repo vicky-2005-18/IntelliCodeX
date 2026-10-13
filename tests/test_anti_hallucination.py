@@ -448,6 +448,73 @@ def test_post_process_answer_sources_and_unverified_checks():
     assert "[Unverified names: non_existent_func]" in processed
 
 
+def test_post_process_answer_out_of_bounds_citations():
+    """Test detection of out-of-bounds line number citations against AST chunk boundaries."""
+    embedder = FakeEmbedder()
+    store = FaissVectorStore(dim=768)
+    fake_llm = FakeLLM()
+    engine = QueryEngine(store, embedder, llm=fake_llm)
+
+    indexed_chunk = CodeChunk(
+        chunk_id="src/math_utils.py::add",
+        file_path="src/math_utils.py",
+        language="python",
+        kind="function",
+        name="add",
+        start_line=1,
+        end_line=25,
+        code="def add(a, b):\n    return a + b",
+    )
+    import numpy as np
+    store.add([indexed_chunk], np.array(embedder.embed([indexed_chunk.code])))
+
+    answer = "The function add is defined in src/math_utils.py:150-160 and executes properly."
+    sources = ["src/math_utils.py:1-25"]
+
+    processed, unverified_files, unverified_symbols = engine._post_process_answer(
+        answer, sources, append_to_answer=True
+    )
+
+    assert hasattr(engine, "last_out_of_bounds_citations")
+    assert any("src/math_utils.py:150-160" in cit for cit in engine.last_out_of_bounds_citations)
+    assert "[Out-of-bounds citation(s):" in processed
+    assert "src/math_utils.py:150-160 (exceeds file boundary of 25 lines)" in processed
+
+
+def test_dynamic_num_ctx_dispatch():
+    """Test dynamic num_ctx calculation based on max_token_budget to optimize VRAM."""
+    embedder = FakeEmbedder()
+    store = FaissVectorStore(dim=768)
+    fake_llm = FakeLLM()
+    engine = QueryEngine(store, embedder, llm=fake_llm)
+
+    indexed_chunk = CodeChunk(
+        chunk_id="src/app.py::main",
+        file_path="src/app.py",
+        language="python",
+        kind="function",
+        name="main",
+        start_line=1,
+        end_line=10,
+        code="def main():\n    pass",
+    )
+    import numpy as np
+    store.add([indexed_chunk], np.array(embedder.embed([indexed_chunk.code])))
+
+    # Low budget -> min clamped to 2048
+    engine.ask("Explain the entrypoint", max_token_budget=1000)
+    assert fake_llm.last_num_ctx == 2048
+
+    # Moderate budget -> 3000 * 1.5 = 4500
+    engine.ask("Explain the entrypoint", max_token_budget=3000)
+    assert fake_llm.last_num_ctx == 4500
+
+    # Large budget -> max clamped to 8192
+    engine.ask("Explain the entrypoint", max_token_budget=6000)
+    assert fake_llm.last_num_ctx == 8192
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
 

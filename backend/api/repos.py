@@ -149,8 +149,9 @@ def get_repo_engine(repo_id: str, user: Optional[User] = None):
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Access denied: repository '{valid_id}' belongs to another user",
                 )
-        if repo_data["engine"].llm is None and backend == "ollama":
-            repo_data["engine"].llm = create_llm("ollama")
+        engine = repo_data.get("engine")
+        if engine and getattr(engine, "llm", None) is None and backend == "ollama":
+            engine.llm = create_llm("ollama")
         return repo_data
 
     # Check DB metadata first
@@ -188,12 +189,33 @@ def get_repo_engine(repo_id: str, user: Optional[User] = None):
         source_files = parse_repository_files(repo_path) if os.path.exists(repo_path) else []
         enhanced_graph = EnhancedDependencyGraph().build(source_files) if source_files else EnhancedDependencyGraph().build([])
 
+        from core.dependency_graph import build_dependency_graph
+        from core.call_graph import build_call_graph
+        from core.lexical_index import BM25Index
+
+        chunks = getattr(store, "chunks", [])
+        dep_g = build_dependency_graph(source_files) if source_files else enhanced_graph
+        call_g = build_call_graph(chunks, source_files) if (source_files and chunks) else None
+        lex_idx = BM25Index(chunks) if chunks else None
+
         from rag.query_engine import QueryEngine
-        engine = QueryEngine(store, embedder, llm)
+        engine = QueryEngine(
+            store,
+            embedder,
+            llm,
+            dep_graph=dep_g,
+            call_graph=call_g,
+            lexical_index=lex_idx,
+            hybrid_search=True,
+            repo_path=repo_path if os.path.exists(repo_path) else None,
+        )
 
         ACTIVE_REPOS[valid_id] = {
             "engine": engine,
             "graph": enhanced_graph,
+            "dep_graph": dep_g,
+            "call_graph": call_g,
+            "lexical_index": lex_idx,
             "store": store,
             "meta": repo_meta,
             "source_files": source_files,
@@ -219,7 +241,16 @@ def get_repo_engine(repo_id: str, user: Optional[User] = None):
         enhanced_graph = enhanced_graph_engine.build(source_files)
 
         from rag.query_engine import QueryEngine
-        engine = QueryEngine(result.store, embedder, llm)
+        engine = QueryEngine(
+            result.store,
+            embedder,
+            llm,
+            dep_graph=result.graph,
+            call_graph=getattr(result, "call_graph", None),
+            lexical_index=getattr(result, "lexical_index", None),
+            hybrid_search=True,
+            repo_path=target_path,
+        )
 
         repo_record = {
             "repo_id": valid_id,
@@ -236,6 +267,9 @@ def get_repo_engine(repo_id: str, user: Optional[User] = None):
         ACTIVE_REPOS[valid_id] = {
             "engine": engine,
             "graph": enhanced_graph,
+            "dep_graph": result.graph,
+            "call_graph": getattr(result, "call_graph", None),
+            "lexical_index": getattr(result, "lexical_index", None),
             "store": result.store,
             "meta": repo_record,
             "source_files": source_files,
@@ -291,7 +325,16 @@ def ingest_repo(req: IngestRequest, current_user: User = Depends(get_current_use
     enhanced_graph = enhanced_graph_engine.build(source_files)
 
     from rag.query_engine import QueryEngine
-    engine = QueryEngine(result.store, embedder, llm)
+    engine = QueryEngine(
+        result.store,
+        embedder,
+        llm,
+        dep_graph=result.graph,
+        call_graph=getattr(result, "call_graph", None),
+        lexical_index=getattr(result, "lexical_index", None),
+        hybrid_search=True,
+        repo_path=valid_path,
+    )
 
     repo_record = {
         "repo_id": valid_id,
@@ -310,6 +353,9 @@ def ingest_repo(req: IngestRequest, current_user: User = Depends(get_current_use
     ACTIVE_REPOS[valid_id] = {
         "engine": engine,
         "graph": enhanced_graph,
+        "dep_graph": result.graph,
+        "call_graph": getattr(result, "call_graph", None),
+        "lexical_index": getattr(result, "lexical_index", None),
         "store": result.store,
         "meta": repo_record,
         "source_files": source_files,

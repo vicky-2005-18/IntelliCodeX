@@ -35,3 +35,32 @@ def test_graph_context_expansion():
     reasons = [r["reason"] for r in results]
     assert any("Match" in r for r in reasons)
     assert any("Called by process" in r for r in reasons)
+
+
+def test_lexical_fallback_when_dense_fails():
+    """Verify that QueryEngine seamlessly falls back to BM25 lexical search when dense embedding fails."""
+    from core.lexical_index import BM25Index
+
+    sf = SourceFile("src/auth.py", "src/auth.py", "python", "def authenticate_user(token):\n    return True\n", has_tree_sitter=True)
+    chunks = chunk_file(sf)
+
+    # Embedder that fails on embed()
+    class FailingEmbedder(TfidfEmbedder):
+        def embed(self, texts):
+            raise RuntimeError("Ollama embedding service temporarily unavailable")
+
+    failing_embedder = FailingEmbedder()
+    store = FaissVectorStore(dim=8)  # empty vector store
+    lex_index = BM25Index(chunks)
+
+    engine = QueryEngine(store=store, embedder=failing_embedder, lexical_index=lex_index, hybrid_search=True)
+
+    # Retrieval should NOT raise RuntimeError; should fallback to BM25
+    results = engine.retrieve("authenticate_user", top_k=1)
+    assert len(results) == 1
+    assert "authenticate_user" in results[0][0].name
+
+    results_reasons = engine.retrieve_with_reasons("authenticate_user", top_k=1)
+    assert len(results_reasons) == 1
+    assert "BM25" in results_reasons[0][2]
+

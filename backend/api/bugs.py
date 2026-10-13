@@ -18,6 +18,10 @@ class BugReportRequest(BaseModel):
     repo_id: str
     error_report: str
     top_k: int = 5
+    spectrum_scores: Optional[Dict[str, float]] = None
+    coverage_records: Optional[List[Dict[str, Any]]] = None
+    total_failing: Optional[int] = 0
+    total_passing: Optional[int] = 0
 
 
 @router.post("/localize")
@@ -27,7 +31,28 @@ def localize_bug(req: BugReportRequest, current_user: User = Depends(get_current
     embedder = repo_data["embedder"]
     graph = repo_data["graph"]
 
-    localizer = AdvancedBugLocalizer(store=store, embedder=embedder, graph=graph)
+    cov_records = None
+    if req.coverage_records:
+        from core.bug_localizer import CoverageRecord
+        cov_records = [
+            CoverageRecord(
+                element_id=r.get("element_id", ""),
+                failing_exec_count=r.get("failing_exec_count", 0),
+                passing_exec_count=r.get("passing_exec_count", 0),
+            )
+            for r in req.coverage_records
+            if "element_id" in r
+        ]
+
+    localizer = AdvancedBugLocalizer(
+        store=store,
+        embedder=embedder,
+        graph=graph,
+        spectrum_scores=req.spectrum_scores,
+        coverage_records=cov_records,
+        total_failing=req.total_failing or 0,
+        total_passing=req.total_passing or 0,
+    )
     result = localizer.localize(req.error_report, top_k=req.top_k)
 
     result["repo_id"] = req.repo_id

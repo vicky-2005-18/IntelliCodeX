@@ -556,6 +556,37 @@ class QueryEngine:
         """Clears current conversation history."""
         self.memory.clear()
 
+    def _call_llm_generate(
+        self,
+        prompt: str,
+        system: str = "",
+        temperature: float = 0.0,
+        num_ctx: Optional[int] = None,
+    ) -> str:
+        """Invokes LLM generate with optional num_ctx, falling back if num_ctx unsupported."""
+        if num_ctx is not None:
+            try:
+                return self.llm.generate(prompt, system=system, temperature=temperature, num_ctx=num_ctx)
+            except TypeError:
+                pass
+        return self.llm.generate(prompt, system=system, temperature=temperature)
+
+    def _call_llm_stream_generate(
+        self,
+        prompt: str,
+        system: str = "",
+        temperature: float = 0.0,
+        num_ctx: Optional[int] = None,
+    ):
+        """Invokes LLM stream_generate with optional num_ctx, falling back if num_ctx unsupported."""
+        if num_ctx is not None:
+            try:
+                yield from self.llm.stream_generate(prompt, system=system, temperature=temperature, num_ctx=num_ctx)
+                return
+            except TypeError:
+                pass
+        yield from self.llm.stream_generate(prompt, system=system, temperature=temperature)
+
     def retrieve(self, query: str, top_k: int = 5, file_filter: Optional[str] = None, trace: Optional[Any] = None) -> List[Tuple[CodeChunk, float]]:
         """Retrieves top-K matches using Hybrid Search (RRF) or pure Dense Vector Search."""
         import re
@@ -581,19 +612,28 @@ class QueryEngine:
         if self.hybrid_search and self.lexical_index is not None and len(self.lexical_index) > 0:
             candidate_k = max(top_k * 4, 20, len(store_chunks) if allowed_ids else 20)
             t0 = time.perf_counter()
-            query_vec = self.embedder.embed([effective_query])[0]
-            t_embed = (time.perf_counter() - t0) * 1000
+            dense_results = []
+            try:
+                query_vec = self.embedder.embed([effective_query])[0]
+                t_embed = (time.perf_counter() - t0) * 1000
+
+                t0 = time.perf_counter()
+                dense_results = self.store.search(query_vec, top_k=candidate_k)
+                if allowed_ids is not None:
+                    dense_results = [(c, s) for c, s in dense_results if c.chunk_id in allowed_ids]
+                t_dense = (time.perf_counter() - t0) * 1000
+            except Exception as e:
+                t_embed = 0.0
+                t_dense = 0.0
+                dense_results = []
 
             t0 = time.perf_counter()
-            dense_results = self.store.search(query_vec, top_k=candidate_k)
-            if allowed_ids is not None:
-                dense_results = [(c, s) for c, s in dense_results if c.chunk_id in allowed_ids]
-            t_dense = (time.perf_counter() - t0) * 1000
-
-            t0 = time.perf_counter()
-            bm25_results = self.lexical_index.search(effective_query, top_k=candidate_k)
-            if allowed_ids is not None:
-                bm25_results = [(c, s) for c, s in bm25_results if c.chunk_id in allowed_ids]
+            try:
+                bm25_results = self.lexical_index.search(effective_query, top_k=candidate_k)
+                if allowed_ids is not None:
+                    bm25_results = [(c, s) for c, s in bm25_results if c.chunk_id in allowed_ids]
+            except Exception:
+                bm25_results = []
             t_bm25 = (time.perf_counter() - t0) * 1000
 
             t0 = time.perf_counter()
@@ -691,19 +731,28 @@ class QueryEngine:
         if self.hybrid_search and self.lexical_index is not None and len(self.lexical_index) > 0:
             candidate_k = max(top_k * 4, 20, len(store_chunks) if allowed_ids else 20)
             t0 = time.perf_counter()
-            query_vec = self.embedder.embed([effective_query])[0]
-            t_embed = (time.perf_counter() - t0) * 1000
+            dense_results = []
+            try:
+                query_vec = self.embedder.embed([effective_query])[0]
+                t_embed = (time.perf_counter() - t0) * 1000
+
+                t0 = time.perf_counter()
+                dense_results = self.store.search(query_vec, top_k=candidate_k)
+                if allowed_ids is not None:
+                    dense_results = [(c, s) for c, s in dense_results if c.chunk_id in allowed_ids]
+                t_dense = (time.perf_counter() - t0) * 1000
+            except Exception:
+                t_embed = 0.0
+                t_dense = 0.0
+                dense_results = []
 
             t0 = time.perf_counter()
-            dense_results = self.store.search(query_vec, top_k=candidate_k)
-            if allowed_ids is not None:
-                dense_results = [(c, s) for c, s in dense_results if c.chunk_id in allowed_ids]
-            t_dense = (time.perf_counter() - t0) * 1000
-
-            t0 = time.perf_counter()
-            bm25_results = self.lexical_index.search(effective_query, top_k=candidate_k)
-            if allowed_ids is not None:
-                bm25_results = [(c, s) for c, s in bm25_results if c.chunk_id in allowed_ids]
+            try:
+                bm25_results = self.lexical_index.search(effective_query, top_k=candidate_k)
+                if allowed_ids is not None:
+                    bm25_results = [(c, s) for c, s in bm25_results if c.chunk_id in allowed_ids]
+            except Exception:
+                bm25_results = []
             t_bm25 = (time.perf_counter() - t0) * 1000
 
             t0 = time.perf_counter()
@@ -1067,8 +1116,9 @@ class QueryEngine:
                     f.write(debug_content)
                 print(f"[DEBUG] Runtime prompt written to {debug_path} (estimated {estimated_tokens} tokens)")
             
+            effective_num_ctx = min(8192, max(2048, int(max_token_budget * 1.5)))
             t_llm0 = time.perf_counter()
-            runtime_answer = self.llm.generate(runtime_prompt, system=self.system_prompt, temperature=0.0)
+            runtime_answer = self._call_llm_generate(runtime_prompt, system=self.system_prompt, temperature=0.0, num_ctx=effective_num_ctx)
             
             if DEBUG_PROMPT:
                 runtime_debug_path = os.path.join(settings.STORAGE_DIR, "last_runtime_llm_output.txt")
@@ -1099,6 +1149,7 @@ class QueryEngine:
                 "CRITICAL: Only report bugs that exist in the code. Quote the exact line from the code.\n\n"
             )
         else:
+            effective_num_ctx = min(8192, max(2048, int(max_token_budget * 1.5)))
             anti_hallucination = (
                 "Answer the question directly based on the provided repository context. "
                 "Cite file paths and line numbers accurately. Do not invent or assume behavior not shown in the context.\n\n"
@@ -1128,7 +1179,7 @@ class QueryEngine:
                 f.write(debug_content)
             print(f"[DEBUG] Prompt written to {debug_path} (estimated {estimated_tokens} tokens)")
         
-        answer = self.llm.generate(prompt, system=system_prompt_to_use, temperature=0.0)
+        answer = self._call_llm_generate(prompt, system=system_prompt_to_use, temperature=0.0, num_ctx=effective_num_ctx)
 
         # Anti-hallucination filter for bug queries
         if is_bug_query:
@@ -1265,7 +1316,8 @@ class QueryEngine:
             runtime_context = file_scope_note + f"Repository context:\n\n{context}"
             runtime_prompt = "\n\n".join([history_str, runtime_errors_prompt, runtime_context, f"Question: {question}\n\nAnswer:"])
             
-            runtime_answer = self.llm.generate(runtime_prompt, system=self.system_prompt, temperature=0.0)
+            effective_num_ctx = min(8192, max(2048, int(max_token_budget * 1.5)))
+            runtime_answer = self._call_llm_generate(runtime_prompt, system=self.system_prompt, temperature=0.0, num_ctx=effective_num_ctx)
             runtime_findings = self._parse_runtime_errors(runtime_answer, expanded_results)
             
             # Second pass: Per-function analysis for semantic bugs
@@ -1284,6 +1336,7 @@ class QueryEngine:
             )
             system_prompt_to_use = self.system_prompt
         else:
+            effective_num_ctx = min(8192, max(2048, int(max_token_budget * 1.5)))
             anti_hallucination = (
                 "Answer the question directly based on the provided repository context. "
                 "Cite file paths and line numbers accurately. Do not invent or assume behavior not shown in the context.\n\n"
@@ -1301,7 +1354,7 @@ class QueryEngine:
         accumulated_tokens = []
 
         import re
-        for token in self.llm.stream_generate(prompt, system=system_prompt_to_use, temperature=0.0):
+        for token in self._call_llm_stream_generate(prompt, system=system_prompt_to_use, temperature=0.0, num_ctx=effective_num_ctx):
             if not is_bug_query:
                 curr_text = "".join(accumulated_tokens) + token
                 drift_match = re.search(r'(?:###\s*Analysis|\bMATCH\b|\bMISMATCH\b)', curr_text)
@@ -1619,6 +1672,30 @@ class QueryEngine:
                 if not found:
                     unverified_symbols.add(sym)
 
+        # 4. Check cited line numbers against indexed AST chunk bounds
+        out_of_bounds_citations = set()
+        line_matches = re.findall(
+            r'\b([a-zA-Z0-9_\-\.\/\\]+\.(?:py|js|ts|tsx|jsx|java|c|cpp|h|go|rs))\b(?::L?|:\s*lines?\s*|,\s*lines?\s*|:\s*)(\d+)(?:-(\d+))?',
+            answer_body,
+            re.IGNORECASE
+        )
+        for cited_file, start_str, end_str in line_matches:
+            cited_norm = cited_file.replace("\\", "/").lower()
+            cited_base = os.path.basename(cited_norm)
+            matching_chunks = [
+                c for c in store_chunks
+                if c.file_path.replace("\\", "/").lower() == cited_norm or os.path.basename(c.file_path).lower() == cited_base
+            ]
+            if matching_chunks:
+                file_max_line = max(c.end_line for c in matching_chunks)
+                start_l = int(start_str)
+                end_l = int(end_str) if end_str else start_l
+                if start_l > file_max_line + 5 or end_l > file_max_line + 5 or start_l < 1:
+                    citation_text = f"{cited_file}:{start_l}{'-' + str(end_l) if end_str else ''}"
+                    out_of_bounds_citations.add(f"{citation_text} (exceeds file boundary of {file_max_line} lines)")
+
+        self.last_out_of_bounds_citations = sorted(list(out_of_bounds_citations))
+
         processed_answer = answer
         if append_to_answer:
             if sources_str and "Sources:" not in processed_answer:
@@ -1629,5 +1706,7 @@ class QueryEngine:
                 processed_answer = processed_answer.rstrip() + f"\n\n[Unverified file path(s): {', '.join(sorted(unverified_files))}]"
             if unverified_symbols:
                 processed_answer = processed_answer.rstrip() + f"\n\n[Unverified names: {', '.join(sorted(unverified_symbols))}]"
+            if out_of_bounds_citations:
+                processed_answer = processed_answer.rstrip() + f"\n\n[Out-of-bounds citation(s): {', '.join(sorted(out_of_bounds_citations))}]"
 
         return processed_answer, sorted(list(unverified_files)), sorted(list(unverified_symbols))

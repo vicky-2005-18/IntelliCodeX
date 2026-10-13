@@ -1,0 +1,39 @@
+name: IntelliCodeX Continuous Integration Pipeline
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  code-intelligence-gate:
+    name: Code Intelligence & Security Gate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest pytest-cov bandit
+
+      - name: Run IntelliCodeX Headless CI Ingestion & Security Scan
+        run: |
+          python cli.py . --backend tfidf --ci
+
+      - name: Run Automated Test Suite
+        run: |
+          python -m pytest -q

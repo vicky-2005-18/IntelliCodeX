@@ -48,6 +48,11 @@ class FaissVectorStore:
             ivf = faiss.IndexIVFFlat(quantizer, self.dim, nlist, faiss.METRIC_INNER_PRODUCT)
             ivf.train(all_vecs)
             ivf.add(all_vecs)
+            if hasattr(ivf, "make_direct_map"):
+                try:
+                    ivf.make_direct_map()
+                except Exception:
+                    pass
             ivf.nprobe = min(32, nlist)  # search 32 cells for accuracy/speed balance
             self.index = ivf
         except Exception:
@@ -99,6 +104,11 @@ class FaissVectorStore:
         if not os.path.exists(abs_path):
             raise FileNotFoundError(f"FAISS index file not found at '{abs_path}'")
         index = faiss.read_index(abs_path)
+        if hasattr(index, "make_direct_map"):
+            try:
+                index.make_direct_map()
+            except Exception:
+                pass
         store = cls(dim=index.d)
         store.index = index
         if chunks is not None:

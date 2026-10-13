@@ -65,3 +65,54 @@ def test_commit_approved_changes_not_git():
         success, msg = commit_approved_changes(tmp_dir, ["foo.py"], "test commit")
         assert not success
         assert "Not a Git repository" in msg
+
+
+def test_commit_approved_changes_empty_list():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        os.makedirs(os.path.join(tmp_dir, ".git"))
+        success, msg = commit_approved_changes(tmp_dir, [], "test commit")
+        assert not success
+        assert "No files specified" in msg
+
+
+def test_commit_approved_changes_preserves_unrelated_staged_files():
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        # Initialize Git repo
+        subprocess.run(["git", "init"], cwd=tmp_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "TestUser"], cwd=tmp_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dir, check=True, capture_output=True)
+
+        # Baseline commit
+        init_file = os.path.join(tmp_dir, "init.py")
+        with open(init_file, "w") as f:
+            f.write("# initial code\n")
+        subprocess.run(["git", "add", "init.py"], cwd=tmp_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_dir, check=True, capture_output=True)
+
+        # User has an unrelated file already staged
+        unrelated_file = os.path.join(tmp_dir, "unrelated.txt")
+        with open(unrelated_file, "w") as f:
+            f.write("user work in progress\n")
+        subprocess.run(["git", "add", "unrelated.txt"], cwd=tmp_dir, check=True, capture_output=True)
+
+        # IntelliCodeX creates an approved patched file
+        approved_file = os.path.join(tmp_dir, "approved_fix.py")
+        with open(approved_file, "w") as f:
+            f.write("def fix():\n    return True\n")
+
+        # Run commit_approved_changes for ONLY approved_fix.py
+        ok, msg = commit_approved_changes(tmp_dir, ["approved_fix.py"], "applied patch for approved_fix")
+        assert ok is True
+        assert "Created local Git commit for 1 file(s)" in msg
+
+        # Verify ONLY approved_fix.py was committed
+        show_res = subprocess.run(["git", "show", "--name-only", "--format="], cwd=tmp_dir, capture_output=True, text=True, check=True)
+        files_in_commit = [line.strip() for line in show_res.stdout.splitlines() if line.strip()]
+        assert files_in_commit == ["approved_fix.py"]
+        assert "unrelated.txt" not in files_in_commit
+
+        # Verify unrelated.txt is STILL staged in working directory
+        status_res = subprocess.run(["git", "status", "--porcelain"], cwd=tmp_dir, capture_output=True, text=True, check=True)
+        assert "A  unrelated.txt" in status_res.stdout
+

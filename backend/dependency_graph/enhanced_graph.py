@@ -9,6 +9,7 @@ import re
 from typing import List, Dict, Any, Set, Tuple
 import networkx as nx
 from core.parser import SourceFile
+from core.dependency_graph import resolve_import_to_file
 
 
 class EnhancedDependencyGraph:
@@ -43,21 +44,31 @@ class EnhancedDependencyGraph:
         except SyntaxError:
             return
 
-        # 1. Imports
+        # 1. Imports (static, relative, and dynamic)
         for node in ast.walk(tree):
             targets = []
             if isinstance(node, ast.Import):
                 targets = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                targets = [node.module]
+            elif isinstance(node, ast.ImportFrom):
+                prefix = "." * node.level
+                if node.module:
+                    targets.append(f"{prefix}{node.module}")
+                elif node.level > 0:
+                    for alias in node.names:
+                        targets.append(f"{prefix}{alias.name}")
+            elif isinstance(node, ast.Call):
+                # Dynamic imports
+                if (isinstance(node.func, ast.Attribute) and node.func.attr == "import_module") or \
+                   (isinstance(node.func, ast.Name) and node.func.id == "__import__"):
+                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                        targets.append(node.args[0].value)
 
             for t in targets:
-                target_rel = t.replace(".", os.sep) + ".py"
-                is_internal = target_rel in file_map
-                if is_internal:
+                target_rel = resolve_import_to_file(sf.rel_path, t, file_map)
+                if target_rel and target_rel in file_map:
                     self.graph.add_edge(sf.rel_path, target_rel, relationship="imports", internal=True)
                 else:
-                    ext_node = f"ext:{t.split('.')[0]}"
+                    ext_node = f"ext:{t.lstrip('.').split('.')[0]}"
                     if not self.graph.has_node(ext_node):
                         self.graph.add_node(ext_node, type="external", language="python", label=ext_node, external=True)
                     self.graph.add_edge(sf.rel_path, ext_node, relationship="external_import", internal=False)

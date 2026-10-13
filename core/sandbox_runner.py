@@ -476,12 +476,25 @@ class SandboxRunner:
                 env = self._build_sandbox_environment(sandbox_dir)
 
                 # 5. Execute based on sandbox mode
-                if self.sandbox_mode == "docker":
+                effective_sandbox_mode = self.sandbox_mode
+                if effective_sandbox_mode == "docker":
                     if not self._check_docker_available():
+                        if not self.allow_local_sandbox:
+                            elapsed = time.perf_counter() - t_start
+                            return SandboxTestResult(
+                                success=False,
+                                exit_code=-8,
+                                stdout="",
+                                stderr="Docker mode requested but Docker is unavailable, and local sandbox execution is disabled for security (ALLOW_LOCAL_SANDBOX=false).",
+                                duration_seconds=elapsed,
+                                framework=framework or "unknown",
+                                error_message="Docker unavailable and local sandbox disabled: set ALLOW_LOCAL_SANDBOX=true to allow fallback.",
+                                traceback_summary="Security: Docker unavailable and ALLOW_LOCAL_SANDBOX=false",
+                            )
                         logger.warning("Docker mode requested but Docker not available, falling back to local mode")
-                        self.sandbox_mode = "local"
+                        effective_sandbox_mode = "local"
 
-                if self.sandbox_mode == "docker":
+                if effective_sandbox_mode == "docker":
                     exit_code, stdout, stderr, docker_error = self._run_with_docker(
                         cmd, sandbox_dir, effective_timeout
                     )

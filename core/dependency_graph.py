@@ -38,8 +38,27 @@ def extract_file_imports(sf: SourceFile) -> List[str]:
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         imports.add(alias.name)
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    imports.add(node.module)
+                elif isinstance(node, ast.ImportFrom):
+                    prefix = "." * node.level
+                    if node.module:
+                        mod = f"{prefix}{node.module}"
+                        imports.add(mod)
+                        for alias in node.names:
+                            imports.add(f"{mod}.{alias.name}")
+                    elif node.level > 0:
+                        for alias in node.names:
+                            imports.add(f"{prefix}{alias.name}")
+                elif isinstance(node, ast.Call):
+                    # Dynamic import resolution: importlib.import_module and __import__
+                    is_dynamic = False
+                    if isinstance(node.func, ast.Attribute) and node.func.attr == "import_module":
+                        is_dynamic = True
+                    elif isinstance(node.func, ast.Name) and node.func.id == "__import__":
+                        is_dynamic = True
+                    if is_dynamic and node.args:
+                        arg0 = node.args[0]
+                        if isinstance(arg0, ast.Constant) and isinstance(arg0.value, str):
+                            imports.add(arg0.value)
         except SyntaxError:
             pass
 
@@ -99,6 +118,31 @@ def resolve_import_to_file(source_rel_path: str, import_str: str, all_files: Dic
             index_cand = f"{combined}/index{ext}".replace("//", "/")
             if index_cand in all_files:
                 return index_cand
+
+    # Python dot-relative imports: e.g. .utils, ..core.parser, .models
+    if normalized_import.startswith("."):
+        dot_count = len(normalized_import) - len(normalized_import.lstrip("."))
+        sub_path = normalized_import[dot_count:]
+        sub_rel = sub_path.replace(".", "/") if sub_path else ""
+
+        curr_dir = source_dir
+        for _ in range(dot_count - 1):
+            curr_dir = os.path.dirname(curr_dir)
+
+        if sub_rel:
+            cand_base = os.path.normpath(os.path.join(curr_dir, sub_rel)).replace("\\", "/")
+        else:
+            cand_base = os.path.normpath(curr_dir).replace("\\", "/")
+
+        for ext in ["", ".py", "/__init__.py"]:
+            cand = (cand_base + ext).replace("//", "/")
+            if cand in all_files:
+                return cand
+        # Also try parent package if sub_rel was from .module import symbol
+        if "/" in cand_base:
+            parent_cand = os.path.dirname(cand_base) + ".py"
+            if parent_cand in all_files:
+                return parent_cand
 
     header_name = os.path.basename(normalized_import)
     for rel_path in all_files:

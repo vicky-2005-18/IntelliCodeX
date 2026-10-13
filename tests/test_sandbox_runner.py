@@ -194,3 +194,180 @@ def test_docker_sandbox_command_and_fallback():
     assert isinstance(result, SandboxTestResult)
     assert result.exit_code in [0, -1, -6, -7, -8, 1]
 
+
+class MockMultiTurnLLM:
+    """Mock LLM simulating an agent that generates a failing fix on Turn 1 and fixes it on Turn 2."""
+    def __init__(self, fixes):
+        self.fixes = fixes
+        self.call_count = 0
+        self.prompts_received = []
+
+    def generate(self, prompt: str, system: str = "", temperature: float = 0.0) -> str:
+        self.prompts_received.append(prompt)
+        response = self.fixes[min(self.call_count, len(self.fixes) - 1)]
+        self.call_count += 1
+        return response
+
+
+def test_autonomous_multi_turn_repair_loop_success():
+    """
+    REQ-FUT-02: Verifies closed-loop multi-turn repair loop in sandbox.
+    Turn 1 generates a candidate that fails the test.
+    Turn 2 receives the test failure traceback, refines the patch, and passes the test.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        calc_file = "calc.py"
+        test_file = "test_calc.py"
+
+        # Initial buggy implementation
+        with open(os.path.join(tmpdir, calc_file), "w", encoding="utf-8") as f:
+            f.write("def divide(a, b):\n    return a // b\n")
+
+        # Test requiring division by zero to return 0
+        with open(os.path.join(tmpdir, test_file), "w", encoding="utf-8") as f:
+            f.write(
+                "from calc import divide\n"
+                "assert divide(10, 2) == 5\n"
+                "assert divide(10, 0) == 0, 'ZeroDivision not handled'\n"
+                "print('CALC TESTS PASSED')\n"
+            )
+
+        # Mock LLM:
+        # Turn 1: Flawed patch that still fails divide by zero
+        # Turn 2: Refined patch that handles divide by zero
+        turn1_response = (
+            "```python\n"
+            "def divide(a, b):\n    return int(a / b)\n"
+            "```\n"
+            "Simplified division."
+        )
+        turn2_response = (
+            "```python\n"
+            "def divide(a, b):\n    if b == 0:\n        return 0\n    return a // b\n"
+            "```\n"
+            "Added zero guard to handle ZeroDivisionError."
+        )
+        mock_llm = MockMultiTurnLLM([turn1_response, turn2_response])
+
+        chunk = CodeChunk(
+            chunk_id="calc.py::divide",
+            file_path=calc_file,
+            language="python",
+            kind="function",
+            name="divide",
+            start_line=1,
+            end_line=2,
+            code="def divide(a, b):\n    return a // b\n",
+        )
+        embedder = TfidfEmbedder(dim=16)
+        vecs = embedder.embed([chunk.as_embedding_text()])
+        store = FaissVectorStore(dim=vecs.shape[1])
+        store.add([chunk], vecs)
+
+        engine = PatchEngine(
+            store=store,
+            embedder=embedder,
+            llm=mock_llm,
+            repo_path=tmpdir,
+            is_admin=True,
+            allow_local_sandbox=True,
+        )
+
+        test_cmd = [sys.executable, test_file]
+        patch_record = engine.generate_and_verify_patch(
+            repo_id="test_repo",
+            error_report="ZeroDivisionError: integer division or modulo by zero in divide",
+            target_file=calc_file,
+            test_command=test_cmd,
+            max_iterations=3,
+        )
+
+        # Verifications
+        assert mock_llm.call_count == 2
+        assert patch_record["status"] == "verified"
+        assert patch_record["sandbox_validation"]["verified"] is True
+        assert patch_record["sandbox_validation"]["test_status"] == "passed"
+        assert patch_record["sandbox_validation"]["iterations_count"] == 2
+
+        # Verify iteration history
+        history = patch_record["sandbox_validation"]["iteration_history"]
+        assert len(history) == 2
+        assert history[0]["turn"] == 1
+        assert history[0]["test_passed"] is False
+        assert history[1]["turn"] == 2
+        assert history[1]["test_passed"] is True
+
+        # Verify Turn 2 prompt included test failure feedback
+        turn2_prompt = mock_llm.prompts_received[1]
+        assert "Previous Failed Patch Candidate" in turn2_prompt
+        assert "Test Traceback / Output" in turn2_prompt
+
+
+def test_autonomous_multi_turn_repair_loop_exhausts_max_iterations():
+    """
+    REQ-FUT-02: Verifies that when candidate patches continuously fail,
+    the repair loop terminates at max_iterations without infinite loops.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        calc_file = "calc.py"
+        test_file = "test_calc.py"
+
+        with open(os.path.join(tmpdir, calc_file), "w", encoding="utf-8") as f:
+            f.write("def divide(a, b):\n    return a // b\n")
+
+        with open(os.path.join(tmpdir, test_file), "w", encoding="utf-8") as f:
+            f.write(
+                "from calc import divide\n"
+                "assert False, 'Always fail test'\n"
+            )
+
+        failing_response = (
+            "```python\n"
+            "def divide(a, b):\n    return 42\n"
+            "```\n"
+            "Failing attempt."
+        )
+        mock_llm = MockMultiTurnLLM([failing_response])
+
+        chunk = CodeChunk(
+            chunk_id="calc.py::divide",
+            file_path=calc_file,
+            language="python",
+            kind="function",
+            name="divide",
+            start_line=1,
+            end_line=2,
+            code="def divide(a, b):\n    return a // b\n",
+        )
+        embedder = TfidfEmbedder(dim=16)
+        vecs = embedder.embed([chunk.as_embedding_text()])
+        store = FaissVectorStore(dim=vecs.shape[1])
+        store.add([chunk], vecs)
+
+        engine = PatchEngine(
+            store=store,
+            embedder=embedder,
+            llm=mock_llm,
+            repo_path=tmpdir,
+            is_admin=True,
+            allow_local_sandbox=True,
+        )
+
+        test_cmd = [sys.executable, test_file]
+        patch_record = engine.generate_and_verify_patch(
+            repo_id="test_repo",
+            error_report="AssertionError: Always fail test",
+            target_file=calc_file,
+            test_command=test_cmd,
+            max_iterations=3,
+        )
+
+        # Loop must stop at max_iterations (3)
+        assert mock_llm.call_count == 3
+        assert patch_record["status"] == "pending"
+        assert patch_record["sandbox_validation"]["verified"] is False
+        assert patch_record["sandbox_validation"]["test_status"] == "failed"
+        assert patch_record["sandbox_validation"]["iterations_count"] == 3
+        assert len(patch_record["sandbox_validation"]["iteration_history"]) == 3
+        assert all(h["test_passed"] is False for h in patch_record["sandbox_validation"]["iteration_history"])
+

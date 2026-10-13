@@ -69,6 +69,8 @@ def ingest_repository(
 
     repo_id = get_repo_id(repo_path)
     backend_name = "ollama" if embedder.__class__.__name__ == "OllamaEmbedder" else "tfidf"
+    current_dim = getattr(embedder, "dim", 0)
+    current_model_name = getattr(embedder, "model", backend_name)
     expected_graph_version = 1 if legacy_call_graph else GRAPH_FORMAT_VERSION
     expected_skip_overloads = 1 if skip_overload_stubs else 0
 
@@ -79,6 +81,8 @@ def ingest_repository(
             if cached_data is not None:
                 meta, cached_chunks, cached_store = cached_data
                 cached_backend = meta.get("backend")
+                cached_dim = meta.get("embedding_dim") or (cached_store.dim if cached_store else None)
+                cached_model = meta.get("model_name") or ""
                 cached_graph_version = meta.get("graph_version", 1)
                 cached_skip = meta.get("skip_overloads", 1)
 
@@ -95,6 +99,12 @@ def ingest_repository(
 
                 invariants_ok = (unique_cids and sqlite_row_count == faiss_ntotal == in_mem_count)
 
+                dim_matches = (cached_dim is None or cached_dim == current_dim or (cached_store and cached_store.dim == current_dim))
+                model_matches = (not cached_model or not current_model_name or cached_model == current_model_name)
+                backend_matches = (cached_backend == backend_name)
+                graph_matches = (cached_graph_version == expected_graph_version)
+                skip_matches = (cached_skip == expected_skip_overloads)
+
                 if not invariants_ok:
                     msg = (
                         f"[!] Cache integrity check failed for '{repo_path}': "
@@ -104,10 +114,15 @@ def ingest_repository(
                     )
                     logger.warning(msg)
                     print(msg)
-                # Only reuse cached vectors if backend model, graph format version, and overload settings all match
-                elif (cached_backend == backend_name and
-                      cached_graph_version == expected_graph_version and
-                      cached_skip == expected_skip_overloads):
+                elif not (backend_matches and dim_matches and model_matches and graph_matches and skip_matches):
+                    msg = (
+                        f"[*] Cache invalidated for '{repo_path}': configuration changed "
+                        f"(backend: {cached_backend} vs {backend_name}, dim: {cached_dim} vs {current_dim}, "
+                        f"model: '{cached_model}' vs '{current_model_name}'). Performing clean re-index..."
+                    )
+                    logger.info(msg)
+                    print(msg)
+                else:
                     # Case A: 100% unchanged -> zero computation reload
                     if not delta.has_changes():
                         logger.info(f"[*] Loaded 100% cached index for '{repo_path}' ({len(cached_chunks)} chunks).")
@@ -138,14 +153,15 @@ def ingest_repository(
                     logger.info(f"[*] Incremental update for '{repo_path}': +{len(delta.added)} added, ~{len(delta.modified)} modified, -{len(delta.deleted)} deleted")
                     stale_files = set(delta.deleted + [sf.rel_path for sf in delta.modified])
 
-                    # Extract retained chunks and reconstruct their vectors from FAISS
+                    # Extract retained chunks and reconstruct their vectors from FAISS safely
                     retained_chunks = []
                     retained_vec_list = []
                     for idx, c in enumerate(cached_chunks):
                         if c.file_path not in stale_files and idx < cached_store.index.ntotal:
-                            retained_chunks.append(c)
-                            vec = cached_store.index.reconstruct(idx)
-                            retained_vec_list.append(vec)
+                            vec = cached_store.get_vector(idx)
+                            if vec is not None:
+                                retained_chunks.append(c)
+                                retained_vec_list.append(vec)
 
                     # Chunk changed/added files
                     changed_files = delta.added + delta.modified
@@ -191,7 +207,18 @@ def ingest_repository(
                     ast_chunks_count = sum(1 for c in all_chunks if c.kind in ("function", "class", "method", "interface", "enum", "type", "struct", "section"))
 
                     if save_to_disk:
-                        save_index(repo_path, backend_name, source_files, all_chunks, store, db_path=db_path, graph_version=expected_graph_version, skip_overload_stubs=skip_overload_stubs)
+                        save_index(
+                            repo_path,
+                            backend_name,
+                            source_files,
+                            all_chunks,
+                            store,
+                            db_path=db_path,
+                            graph_version=expected_graph_version,
+                            skip_overload_stubs=skip_overload_stubs,
+                            embedding_dim=current_dim,
+                            model_name=current_model_name,
+                        )
 
                     lex_idx = BM25Index(all_chunks)
                     elapsed = time.perf_counter() - start_t
@@ -225,7 +252,18 @@ def ingest_repository(
     store.add(chunks, vectors)
 
     if save_to_disk:
-        save_index(repo_path, backend_name, source_files, chunks, store, db_path=db_path, graph_version=expected_graph_version, skip_overload_stubs=skip_overload_stubs)
+        save_index(
+            repo_path,
+            backend_name,
+            source_files,
+            chunks,
+            store,
+            db_path=db_path,
+            graph_version=expected_graph_version,
+            skip_overload_stubs=skip_overload_stubs,
+            embedding_dim=current_dim,
+            model_name=current_model_name,
+        )
 
     lex_idx = BM25Index(chunks)
     elapsed = time.perf_counter() - start_t

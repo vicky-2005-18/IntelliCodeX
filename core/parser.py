@@ -49,14 +49,16 @@ LANGUAGE_BY_EXT = {
     ".sh": "bash",
 }
 
-# Directories to always skip during repository walking (build artifacts, dependencies, tests, docs)
-IGNORE_DIRS = {
+# Directories to skip during repository walking (build artifacts, virtual environments, cache, vendor dependencies)
+DEFAULT_IGNORE_DIRS = {
     ".git", "__pycache__", "node_modules", "venv", ".venv",
     "dist", "build", ".idea", ".vscode", "target", "egg-info",
     ".repos", ".storage", "coverage", ".next", "out", "vendor",
-    ".pytest_cache", ".cache", "bin", "obj",
-    "tests", "test", "docs", "doc", "documentation", "locale", "translations", "fixtures", "site-packages",
+    ".pytest_cache", ".cache", "bin", "obj", "site-packages",
 }
+
+# Default ignored directories (tests and docs are included by default for full repository understanding)
+IGNORE_DIRS = DEFAULT_IGNORE_DIRS
 
 # Binary and non-text file extensions to skip
 IGNORE_EXTENSIONS = {
@@ -117,20 +119,32 @@ def is_ignored_by_gitignore(rel_path: str, gitignore_patterns: List[str]) -> boo
     return False
 
 
-def walk_repository(repo_root: str) -> List[SourceFile]:
+def walk_repository(
+    repo_root: str,
+    ignore_dirs: Optional[Set[str]] = None,
+    exclude_tests: bool = False,
+    exclude_docs: bool = False,
+) -> List[SourceFile]:
     """
     Walks repo_root recursively and returns a list of all recognized, non-ignored source files
     populated with language detection and tree-sitter availability metadata.
+    Includes tests and documentation by default for holistic repository understanding.
     """
     repo_root = os.path.abspath(repo_root)
     files: List[SourceFile] = []
     gitignore_patterns = load_gitignore_patterns(repo_root)
 
+    effective_ignore_dirs = set(ignore_dirs if ignore_dirs is not None else DEFAULT_IGNORE_DIRS)
+    if exclude_tests:
+        effective_ignore_dirs.update({"tests", "test", "fixtures"})
+    if exclude_docs:
+        effective_ignore_dirs.update({"docs", "doc", "documentation"})
+
     for dirpath, dirnames, filenames in os.walk(repo_root):
         # Filter out ignored directory names in-place
         dirnames[:] = [
             d for d in dirnames 
-            if d not in IGNORE_DIRS and not is_ignored_by_gitignore(
+            if d not in effective_ignore_dirs and not is_ignored_by_gitignore(
                 os.path.relpath(os.path.join(dirpath, d), repo_root), gitignore_patterns
             )
         ]

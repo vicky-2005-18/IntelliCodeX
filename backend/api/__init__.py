@@ -11,3 +11,6 @@ from backend.api.analytics import router as analytics_router
 from backend.api.docs import router as docs_router
 from backend.api.review import router as review_router
 from backend.api.query import router as query_router
+from backend.api.concurrency import router as concurrency_router, gpu_manager
+from backend.api.multi_repo import router as multi_repo_router
+from backend.api.org_memory import router as org_memory_router

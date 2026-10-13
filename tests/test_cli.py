@@ -333,4 +333,52 @@ def test_validate_git_url_cli():
         validate_git_url("file:///etc/passwd")
 
 
+def test_cli_type_annotations_valid():
+    """Verify that all type annotations across cli.py resolve cleanly without NameError."""
+    import typing
+    import cli
+
+    for attr_name in ["execute_explain_command", "create_components", "render_retrieval_trace"]:
+        fn = getattr(cli, attr_name, None)
+        assert fn is not None
+        hints = typing.get_type_hints(fn)
+        assert isinstance(hints, dict)
+
+    assert hasattr(cli, "RemoteClient")
+    hints_rc = typing.get_type_hints(cli.RemoteClient.ask)
+    assert isinstance(hints_rc, dict)
+
+
+def test_cli_headless_ci_mode_success(capsys):
+    """REQ-FUT-04: Test non-interactive CI/CD headless execution returning exit code 0."""
+    with patch("sys.argv", ["cli.py", "sample_repo", "--backend", "tfidf", "--ci"]):
+        ret = main()
+        assert ret == 0
+
+    captured = capsys.readouterr()
+    assert "[CI Mode]" in captured.out
+    assert "CI Status              : PASSED" in captured.out
+
+
+def test_cli_headless_ci_mode_with_batch_query(capsys):
+    """REQ-FUT-04: Test non-interactive CI mode with batch query."""
+    with patch("sys.argv", ["cli.py", "sample_repo", "--backend", "tfidf", "--ci", "-q", "where is login?"]):
+        ret = main()
+        assert ret == 0
+
+    captured = capsys.readouterr()
+    assert "Executing Batch Query" in captured.out
+    assert "Answer" in captured.out
+
+
+def test_cli_headless_ci_mode_empty_repo_failure(capsys):
+    """REQ-FUT-04: Test non-interactive CI mode fails with exit code 1 when no files found."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as empty_dir:
+        with patch("sys.argv", ["cli.py", empty_dir, "--backend", "tfidf", "--ci"]):
+            ret = main()
+            assert ret == 1
+
+    captured = capsys.readouterr()
+    assert "Error ingesting repository" in captured.out
 

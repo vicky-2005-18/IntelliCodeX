@@ -80,6 +80,26 @@ def is_ignored_path(path: str, repo_root: str) -> bool:
     return False
 
 
+def is_ignored_directory(path: str, repo_root: str) -> bool:
+    """Checks if a directory should be ignored (e.g. .git, .venv, node_modules)."""
+    try:
+        rel = os.path.relpath(path, repo_root)
+    except ValueError:
+        rel = path
+
+    parts = [p.lower() for p in rel.replace("\\", "/").split("/") if p]
+    if not parts:
+        return False
+
+    for part in parts:
+        if part in IGNORE_DIRS:
+            return True
+        if part.startswith(".") and part not in (".", ".."):
+            return True
+
+    return False
+
+
 class IncrementalIndexer:
     """
     Performs batch-level incremental synchronization between an existing
@@ -109,12 +129,14 @@ class IncrementalIndexer:
             if previous_file_hashes.get(sf.rel_path) != h:
                 changed_files.append(sf)
 
-        if not changed_files:
+        deleted_paths = set(previous_file_hashes.keys()) - set(current_hashes.keys())
+
+        if not changed_files and not deleted_paths:
             return existing_store, current_hashes, 0
 
-        # Remove old chunks of modified files from store
-        changed_paths = {sf.rel_path for sf in changed_files}
-        remaining_chunks = [c for c in existing_store.chunks if c.file_path not in changed_paths]
+        # Remove old chunks of modified and deleted files from store
+        stale_paths = {sf.rel_path for sf in changed_files} | deleted_paths
+        remaining_chunks = [c for c in existing_store.chunks if c.file_path not in stale_paths]
 
         # Re-chunk modified files
         new_chunks: List[CodeChunk] = []
@@ -125,12 +147,15 @@ class IncrementalIndexer:
 
         # Re-embed updated chunk corpus
         texts = [c.as_embedding_text() for c in all_chunks]
-        vectors = self.embedder.embed(texts)
+        if all_chunks:
+            vectors = self.embedder.embed(texts)
+            new_store = FaissVectorStore(dim=vectors.shape[1])
+            new_store.add(all_chunks, vectors)
+        else:
+            dim = getattr(self.embedder, "dim", 128)
+            new_store = FaissVectorStore(dim=dim)
 
-        new_store = FaissVectorStore(dim=vectors.shape[1])
-        new_store.add(all_chunks, vectors)
-
-        return new_store, current_hashes, len(changed_files)
+        return new_store, current_hashes, len(changed_files) + len(deleted_paths)
 
 
 class RepositoryEventHandler(FileSystemEventHandler):
@@ -184,16 +209,52 @@ class RepositoryEventHandler(FileSystemEventHandler):
     def on_created(self, event):
         if not getattr(event, "is_directory", False):
             self._handle_event(event.src_path)
+        else:
+            self._handle_directory_created(getattr(event, "src_path", ""))
 
     def on_deleted(self, event):
         if not getattr(event, "is_directory", False):
             self._handle_event(event.src_path)
+        else:
+            self._handle_directory_deleted(getattr(event, "src_path", ""))
 
     def on_moved(self, event):
         if not getattr(event, "is_directory", False):
             self._handle_event(event.src_path)
             if hasattr(event, "dest_path"):
                 self._handle_event(event.dest_path)
+        else:
+            self._handle_directory_moved(getattr(event, "src_path", ""), getattr(event, "dest_path", None))
+
+    def _handle_directory_created(self, dir_path: str):
+        if not dir_path or is_ignored_directory(dir_path, self.repo_root):
+            return
+        if os.path.isdir(dir_path):
+            try:
+                for root, _, files in os.walk(dir_path):
+                    for f in files:
+                        p = os.path.join(root, f)
+                        if not is_ignored_path(p, self.repo_root):
+                            self._handle_event(p)
+            except Exception:
+                pass
+
+    def _handle_directory_deleted(self, dir_path: str):
+        if not dir_path or is_ignored_directory(dir_path, self.repo_root):
+            return
+        with self._lock:
+            self.pending_changes.add(os.path.abspath(dir_path))
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(self.debounce_delay, self._dispatch)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _handle_directory_moved(self, src_path: str, dest_path: Optional[str]):
+        if dest_path:
+            self._handle_directory_created(dest_path)
+        if src_path:
+            self._handle_directory_deleted(src_path)
 
     def cancel_pending(self):
         """Cancels any pending timer and flushes state."""

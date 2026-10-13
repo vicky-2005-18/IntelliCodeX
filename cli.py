@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import time
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import requests
 
 # Ensure console output handles unicode without crashing on Windows cp1252
@@ -251,6 +252,9 @@ Available Commands:
   deps:<filepath>        - View direct & reverse dependencies for <filepath> (e.g. 'deps:pkg/db.py')
   callers:<func>         - Find all function call sites calling <func> (e.g. 'callers:fetch_user')
   top / centrality       - Show top central files and critical functions (PageRank score)
+  arch / cycles          - Analyze circular dependencies & high-coupling bottleneck modules
+  why:<query>            - Query historical design decisions and commit rationale (e.g. 'why:FAISS')
+  adrs                   - List all Architectural Decision Records (ADRs) found in repo
   repos / list-repos     - List all already-added repositories and switch by number
   repo <path_or_url>     - Switch/clone active repository (e.g. 'repo https://github.com/user/repo')
   repo <number>          - Switch to a previously added repo by its list number (e.g. 'repo 2')
@@ -1419,6 +1423,9 @@ class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
         ("search:", "Fast retrieval-only search (no LLM, instant results)"),
         ("info:", "Show indexed file details: size, chunk count, centrality"),
         ("export:", "Save last AI answer to a Markdown file"),
+        ("why:", "Query historical design decisions and commit rationale (e.g. 'why:FAISS')"),
+        ("adrs", "List all Architectural Decision Records (ADRs) found in repo"),
+        ("learned", "Show self-improving agent few-shot repair memory and statistics"),
         ("status", "Show full system status at a glance"),
         ("version", "Show IntelliCodeX version"),
         ("@", "Scope query to a specific file (one-shot)"),
@@ -1670,8 +1677,16 @@ def main():
                         help="Check status of Git background re-indexing hooks")
     parser.add_argument("--remove-hooks", action="store_true",
                         help="Uninstall Git background re-indexing hooks")
+    parser.add_argument("--ci", action="store_true", default=False,
+                        help="Run in headless CI/CD pipeline mode (non-interactive, exit code 0 on success, 1 on failure)")
+    parser.add_argument("--repos", type=str, default=None,
+                        help="Comma-separated repository paths for federated multi-repo analysis (REQ-FUT-08)")
     parser.add_argument("-v", "--version", action="version", version=f"IntelliCodeX CLI v{VERSION}")
     args = parser.parse_args()
+
+    if args.ci:
+        args.no_tui = True
+        args.tui = False
 
     if args.benchmark:
         target = resolve_repo_path(args.repo_path, full_history=args.full_history)
@@ -1762,6 +1777,60 @@ def main():
         repeat_penalty=args.repeat_penalty,
     )
 
+    # Multi-Repository Workspace Mode (REQ-FUT-08)
+    if args.repos:
+        from core.multi_repo import MultiRepoWorkspace
+        repo_paths = [r.strip() for r in args.repos.split(",") if r.strip()]
+        workspace = MultiRepoWorkspace(workspace_id="cli-multi-repo", embedder=embedder)
+        print(f"[*] Initializing Multi-Repository Workspace for {len(repo_paths)} repositories...")
+        for r_p in repo_paths:
+            try:
+                resolved_rp = resolve_repo_path(r_p, full_history=args.full_history)
+                r_id = os.path.basename(resolved_rp.rstrip("/\\")) or resolved_rp
+                workspace.add_repository(repo_id=r_id, repo_path=resolved_rp)
+                print(f"  + Attached [{r_id}]: {resolved_rp}")
+            except Exception as e_repo:
+                print(f"  [!] Failed to attach repository '{r_p}': {e_repo}")
+
+        print(f"[*] Total federated chunks: {len(workspace.namespaced_chunks)}")
+        print(f"[*] Discovered microservice contracts: {len(workspace.contracts)}")
+        for c in workspace.contracts:
+            print(f"  - [{c.consumer_repo}] -> [{c.producer_repo}]: {c.endpoint_or_symbol} ({c.producer_file})")
+
+        if args.query:
+            res = workspace.ask(args.query, llm=llm)
+            render_markdown_panel(res.get("answer", ""), title="Multi-Repository Answer")
+            if res.get("retrieved_chunks"):
+                cits = [c["citation"] for c in res["retrieved_chunks"]]
+                print(f"Sources: {', '.join(cits)}")
+            return 0
+
+        # Interactive loop for multi-repo
+        print("\nMulti-Repository IntelliCodeX session ready. Type query, 'contracts', or 'exit'.\n")
+        while True:
+            try:
+                q = input("multi-repo>> ").strip()
+                if not q:
+                    continue
+                if q.lower() in ("exit", "quit", "q"):
+                    print("[*] Exiting Multi-Repository Session.")
+                    return 0
+                if q.lower() in ("contracts", "contracts:list"):
+                    print(f"[*] Discovered contracts ({len(workspace.contracts)}):")
+                    for c in workspace.contracts:
+                        print(f"  - {c.consumer_repo} -> {c.producer_repo}: {c.endpoint_or_symbol} (Producer: {c.producer_file}:{c.producer_line})")
+                    continue
+                res = workspace.ask(q, llm=llm)
+                render_markdown_panel(res.get("answer", ""), title="Multi-Repository Answer")
+                if res.get("retrieved_chunks"):
+                    cits = [c["citation"] for c in res["retrieved_chunks"]]
+                    print(f"Sources: {', '.join(cits)}")
+            except (KeyboardInterrupt, EOFError):
+                print("\n[*] Exiting Multi-Repository Session.")
+                return 0
+            except Exception as e:
+                print(f"[!] Error: {e}\n")
+
     skip_overload_stubs = not args.include_overloads
     try:
         current_path = resolve_repo_path(args.repo_path, full_history=args.full_history)
@@ -1812,6 +1881,17 @@ def main():
             render_index_stats(result, embedder)
             return 0
 
+        if bq.lower() in ("arch", "cycles", "optimize", "architecture"):
+            from core.architecture_optimizer import ArchitectureOptimizer
+            optimizer = ArchitectureOptimizer()
+            arch_report = optimizer.analyze(
+                dep_graph=result.graph,
+                source_files=getattr(result, "source_files", None),
+                llm=llm,
+            )
+            render_markdown_panel(arch_report.format_markdown(), title="Architecture Optimization Report")
+            return 0
+
         if bq.lower().startswith("explain:") or bq.lower().startswith("explain "):
             execute_explain_command(engine, result, bq, active_file_filter=None)
             return 0
@@ -1850,6 +1930,41 @@ def main():
 
         render_markdown_panel(response['answer'], title="Answer")
         print(f"[*] [Time Consumed]: {format_time_consumed(total_batch)} (Retrieval: {format_time_consumed(response.get('retrieval_seconds', 0.0))}, Generation: {format_time_consumed(response.get('llm_seconds', 0.0))})\n")
+        return 0
+
+    # Headless CI Pipeline Gate (REQ-FUT-04)
+    if args.ci:
+        print("\n[*] [CI Mode] Running Automated Quality, AST Indexing & Security Verification...")
+        ci_failures = []
+        if result.num_files == 0:
+            ci_failures.append("No ingestible source files found in target repository.")
+        if result.num_chunks == 0:
+            ci_failures.append("Zero AST/code chunks generated during ingestion.")
+
+        # Static security audit
+        try:
+            from core.security_scanner import run_bandit_scan
+            sec_res = run_bandit_scan(current_path)
+            high_sev = sec_res.get("metrics", {}).get("high_severity", 0)
+            if high_sev > 0:
+                ci_failures.append(f"Security Gate Failed: {high_sev} HIGH severity vulnerability/vulnerabilities detected.")
+        except Exception as e:
+            logger.warning(f"CI security scan skipped: {e}")
+
+        print("=" * 65)
+        print(f"CI Target              : {current_path}")
+        print(f"Total Files Ingested   : {result.num_files}")
+        print(f"Total Chunks Extracted : {result.num_chunks}")
+        print(f"AST Chunks Count       : {getattr(result, 'ast_chunks_count', 0)} ({getattr(result, 'ast_ratio_percent', 0)}%)")
+        print(f"Ingestion Duration     : {elapsed:.2f}s")
+        if ci_failures:
+            print(f"CI Status              : FAILED")
+            for f in ci_failures:
+                print(f"  [!] {f}")
+            print("=" * 65)
+            return 1
+        print("CI Status              : PASSED")
+        print("=" * 65)
         return 0
 
     def on_auto_reindex(new_result, changed_paths, elapsed_s):
@@ -2022,6 +2137,59 @@ def main():
             top_syms = get_top_central_symbols(call_g, top_n=5) if call_g else None
             render_centrality_tables(top_files, top_syms)
             print(f"[*] [Time Consumed]: Centrality computed in {format_time_consumed(time.perf_counter() - t_top)}\n")
+            continue
+
+        if query.lower() in ("arch", "cycles", "optimize", "architecture"):
+            t_arch = time.perf_counter()
+            from core.architecture_optimizer import ArchitectureOptimizer
+            optimizer = ArchitectureOptimizer()
+            arch_report = optimizer.analyze(
+                dep_graph=result.graph,
+                source_files=getattr(result, "source_files", None),
+                llm=llm,
+            )
+            render_markdown_panel(arch_report.format_markdown(), title="Architecture Optimization Report")
+            print(f"[*] [Time Consumed]: Architecture analysis in {format_time_consumed(time.perf_counter() - t_arch)}\n")
+            continue
+
+        if query.lower().startswith("why:") or query.lower().startswith("org:") or query.lower().startswith("history:"):
+            target_q = query.split(":", 1)[1].strip()
+            if not target_q:
+                print("[!] Please provide a question (e.g. 'why:did we choose FAISS?').\n")
+                continue
+            t_org = time.perf_counter()
+            from core.org_memory import OrgMemoryStore
+            org_store = OrgMemoryStore(repo_id=os.path.basename(current_path), embedder=embedder)
+            org_store.ingest_repository(current_path)
+            res = org_store.ask(target_q, llm=llm)
+            render_markdown_panel(res.get("answer", ""), title="Organizational Memory Rationale")
+            if res.get("citations"):
+                print(f"Historical Citations: {', '.join(res['citations'])}")
+            print(f"[*] [Time Consumed]: Org memory query in {format_time_consumed(time.perf_counter() - t_org)}\n")
+            continue
+
+        if query.lower() in ("adrs", "adr", "decisions"):
+            from core.org_memory import ADRMiner
+            found_adrs = ADRMiner.mine_adrs(current_path)
+            if not found_adrs:
+                print("[*] No Architectural Decision Records (ADRs) found in repository.\n")
+            else:
+                print(f"[*] Found {len(found_adrs)} Architectural Decision Record(s):")
+                for a in found_adrs:
+                    print(f"  - [{a.metadata.get('status', 'Accepted')}] {a.title} ({a.metadata.get('file_path', '')})")
+                print()
+            continue
+
+        if query.lower() in ("learned", "experiences", "memory:repairs"):
+            from core.self_improving import global_experience_bank
+            stats = global_experience_bank.get_stats()
+            print(f"[*] Self-Improving Agent Memory Bank (REQ-FUT-10):")
+            print(f"  - Total Learned Experiences: {stats['total_experiences']}")
+            print(f"  - Total Successful Fixes: {stats['total_successful_repairs']}")
+            print("  - Learned Error Patterns:")
+            for et, count in stats["error_types_breakdown"].items():
+                print(f"    * {et}: {count} verified pattern(s)")
+            print()
             continue
 
         if query.lower().startswith("backend "):

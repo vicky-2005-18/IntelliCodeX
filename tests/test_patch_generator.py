@@ -253,4 +253,179 @@ def test_patch_synthesis_benchmark():
         assert pass_rate >= 0.8
 
 
+def test_multilanguage_tree_sitter_syntax_validation():
+    """Verifies REQ-CORE-15 Tree-sitter AST pre-validation across JS, Go, and Rust."""
+    from backend.patch_generator.patch_validator import validate_syntax
 
+    # JavaScript
+    valid_js = "function add(a, b) { return a + b; }"
+    invalid_js = "function add(a, b) { return a + ; }"
+    assert validate_syntax(valid_js, "javascript")["valid"] is True
+    assert validate_syntax(invalid_js, "javascript")["valid"] is False
+
+    # Go
+    valid_go = "package main\nfunc main() {\n\tprintln(\"ok\")\n}"
+    invalid_go = "package main\nfunc main( {\n"
+    assert validate_syntax(valid_go, "go")["valid"] is True
+    assert validate_syntax(invalid_go, "go")["valid"] is False
+
+    # Rust
+    valid_rust = "fn calc(x: i32) -> i32 { x + 1 }"
+    invalid_rust = "fn calc(x: i32) -> { }"
+    assert validate_syntax(valid_rust, "rust")["valid"] is True
+    assert validate_syntax(invalid_rust, "rust")["valid"] is False
+
+
+def test_search_replace_block_parsing():
+    """Verifies REQ-CORE-15 search/replace block pattern parsing."""
+    from backend.patch_generator.llm_parser import parse_search_replace_blocks, extract_code_and_explanation
+
+    response = (
+        "Here is the targeted fix for the nil pointer exception:\n\n"
+        "<<<<<<< SEARCH\n"
+        "def process(item):\n"
+        "    return item.value\n"
+        "=======\n"
+        "def process(item):\n"
+        "    if item is None:\n"
+        "        return None\n"
+        "    return item.value\n"
+        ">>>>>>> REPLACE\n\n"
+        "This guards against NoneType operands."
+    )
+
+    blocks = parse_search_replace_blocks(response)
+    assert len(blocks) == 1
+    assert "return item.value" in blocks[0][0]
+    assert "if item is None:" in blocks[0][1]
+
+    code, explanation = extract_code_and_explanation(response)
+    assert "if item is None:" in code
+    assert "This guards against NoneType operands" in explanation
+
+
+def test_concurrent_modification_conflict_detection():
+    """Verifies REQ-CORE-17 atomic code integration detects concurrent file modifications on disk."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = "service.py"
+        abs_path = os.path.join(tmpdir, file_path)
+        original_content = "def serve():\n    return 'v1'\n"
+        with open(abs_path, "w", encoding="utf-8") as f:
+            f.write(original_content)
+
+        embedder = TfidfEmbedder(dim=16)
+        chunk = CodeChunk(
+            chunk_id="service.py::serve",
+            file_path=file_path,
+            language="python",
+            kind="function",
+            name="serve",
+            start_line=1,
+            end_line=2,
+            code=original_content,
+        )
+        vecs = embedder.embed([chunk.as_embedding_text()])
+        store = FaissVectorStore(dim=vecs.shape[1])
+        store.add([chunk], vecs)
+
+        engine = PatchEngine(store, embedder, llm=None, repo_path=tmpdir)
+        patch_rec = engine.generate_patch("test_repo", "Improve serve function", file_path)
+        assert patch_rec["status"] == "pending"
+
+        # Simulate concurrent external edit on disk after patch generation
+        with open(abs_path, "w", encoding="utf-8") as f:
+            f.write("def serve():\n    # Modified by developer concurrently\n    return 'v2_in_flight'\n")
+
+        # Applying patch without force MUST detect conflict and refuse to overwrite
+        ok, msg = engine.apply_patch(patch_rec, approved_by="alice", force=False)
+        assert ok is False
+        assert "Conflict detected" in msg
+
+        # Ensure modified file on disk was preserved untouched
+        with open(abs_path, "r", encoding="utf-8") as f:
+            assert "v2_in_flight" in f.read()
+
+        # Applying with force=True overrides conflict when developer confirms
+        ok_force, msg_force = engine.apply_patch(patch_rec, approved_by="alice", force=True)
+        assert ok_force is True
+        assert "Successfully applied patch" in msg_force
+
+        # Ensure .bak backup was created alongside target file
+        backups = [f for f in os.listdir(tmpdir) if f.startswith("service.py.bak")]
+        assert len(backups) > 0
+
+
+def test_patch_generation_api_with_sandbox_options():
+    """Verifies FastAPI /patches/generate endpoint passes sandbox verification parameters and records owner_id."""
+    from fastapi.testclient import TestClient
+    from backend.main import app
+    from backend.auth import User, create_access_token
+    from backend.database import db_manager
+
+    test_user = User(id="test_patch_user", username="patchdev", email="patchdev@test.com", role="developer")
+    db_manager.insert("users", {
+        "id": test_user.id,
+        "username": test_user.username,
+        "email": test_user.email,
+        "role": test_user.role,
+        "hashed_password": "dummy",
+    })
+    token = create_access_token(test_user)
+    client = TestClient(app)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_file = os.path.join(tmpdir, "main.py")
+        with open(test_file, "w", encoding="utf-8") as f:
+            f.write("def run():\n    return 'initial'\n")
+
+        embedder = TfidfEmbedder(dim=16)
+        chunk = CodeChunk(
+            chunk_id="main.py::run",
+            file_path="main.py",
+            language="python",
+            kind="function",
+            name="run",
+            start_line=1,
+            end_line=2,
+            code="def run():\n    return 'initial'\n",
+        )
+        vecs = embedder.embed([chunk.as_embedding_text()])
+        store = FaissVectorStore(dim=vecs.shape[1])
+        store.add([chunk], vecs)
+
+        repo_id = "test_api_patch_repo"
+        db_manager.insert("repositories", {
+            "repo_id": repo_id,
+            "owner_id": test_user.id,
+            "repo_path": tmpdir,
+            "indexed_files": ["main.py"],
+            "created_at": 123456789.0,
+        })
+        from backend.api.repos import ACTIVE_REPOS
+        from rag.query_engine import QueryEngine
+        ACTIVE_REPOS[repo_id] = {
+            "store": store,
+            "embedder": embedder,
+            "graph": None,
+            "engine": QueryEngine(store, embedder, llm=None),
+            "meta": {"repo_id": repo_id, "repo_path": tmpdir, "owner_id": test_user.id},
+        }
+
+        # Request with verify_in_sandbox=False (standard generation)
+        resp = client.post(
+            "/api/patches/generate",
+            json={
+                "repo_id": repo_id,
+                "error_report": "KeyError in main.py",
+                "target_file": "main.py",
+                "verify_in_sandbox": False,
+                "max_iterations": 2,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["patch_id"] is not None
+        assert data["owner_id"] == test_user.id
+        assert data["target_file"] == "main.py"
+        assert "suggested_patch" in data
