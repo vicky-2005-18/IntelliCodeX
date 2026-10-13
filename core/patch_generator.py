@@ -93,7 +93,12 @@ class PatchEngine:
         self.graph = graph
         self.repo_path = repo_path
         self.default_timeout = default_timeout
-        self.experience_bank = experience_bank or global_experience_bank
+        if experience_bank is False:
+            self.experience_bank = None
+        elif experience_bank is not None:
+            self.experience_bank = experience_bank
+        else:
+            self.experience_bank = global_experience_bank
         self.localizer = BugLocalizer(store, embedder, graph)
         # Initialize sandbox_runner with config if not provided
         if sandbox_runner is None:
@@ -147,17 +152,30 @@ class PatchEngine:
         candidates = localization.get("candidates", [])
 
         if not candidates:
-            return self._failed_patch(
-                repo_id, target_file, "No relevant repository context was found matching the error report."
-            )
+            disk_fallback = self._read_file(target_file) if target_file else None
+            if disk_fallback:
+                candidates = [{
+                    "file_path": target_file,
+                    "snippet": disk_fallback,
+                    "confidence_score": 0.8,
+                }]
+            else:
+                return self._failed_patch(
+                    repo_id, target_file, "No relevant repository context was found matching the error report."
+                )
 
-        top_candidate = candidates[0]
-        file_path = target_file or top_candidate["file_path"]
-        snippet = top_candidate["snippet"]
-        language = self._detect_language(file_path)
-        localization_confidence = top_candidate["confidence_score"]
+        if target_file:
+            matching_candidate = next((c for c in candidates if c.get("file_path") == target_file), None)
+            top_candidate = matching_candidate if matching_candidate else candidates[0]
+        else:
+            top_candidate = candidates[0]
 
+        file_path = target_file or top_candidate.get("file_path", "")
         disk_content = self._read_file(file_path)
+        snippet = disk_content if file_path == target_file and disk_content else top_candidate.get("snippet", "")
+        language = self._detect_language(file_path)
+        localization_confidence = top_candidate.get("confidence_score", 0.5)
+
         full_original = disk_content or snippet
         using_full_file = full_original != snippet
         file_read_from_disk = disk_content is not None
@@ -267,17 +285,30 @@ class PatchEngine:
         candidates = localization.get("candidates", [])
 
         if not candidates:
-            return self._failed_patch(
-                repo_id, target_file, "No relevant repository context was found matching the error report."
-            )
+            disk_fallback = self._read_file(target_file) if target_file else None
+            if disk_fallback:
+                candidates = [{
+                    "file_path": target_file,
+                    "snippet": disk_fallback,
+                    "confidence_score": 0.8,
+                }]
+            else:
+                return self._failed_patch(
+                    repo_id, target_file, "No relevant repository context was found matching the error report."
+                )
 
-        top_candidate = candidates[0]
-        file_path = target_file or top_candidate["file_path"]
-        snippet = top_candidate["snippet"]
-        language = self._detect_language(file_path)
-        localization_confidence = top_candidate["confidence_score"]
+        if target_file:
+            matching_candidate = next((c for c in candidates if c.get("file_path") == target_file), None)
+            top_candidate = matching_candidate if matching_candidate else candidates[0]
+        else:
+            top_candidate = candidates[0]
 
+        file_path = target_file or top_candidate.get("file_path", "")
         disk_content = self._read_file(file_path)
+        snippet = disk_content if file_path == target_file and disk_content else top_candidate.get("snippet", "")
+        language = self._detect_language(file_path)
+        localization_confidence = top_candidate.get("confidence_score", 0.5)
+
         full_original = disk_content or snippet
         using_full_file = full_original != snippet
         file_read_from_disk = disk_content is not None
@@ -503,10 +534,15 @@ class PatchEngine:
                 try:
                     orig_snip = patch_record.get("original_code", "")
                     fix_snip = patch_record.get("snippet_patch") or patch_record.get("suggested_patch", "")
+                    err_type = (
+                        patch_record.get("error_type")
+                        or patch_record.get("localization", {}).get("error_type")
+                        or "UnknownError"
+                    )
                     is_test_verified = patch_record.get("sandbox_validation", {}).get("verified", False)
                     if orig_snip and fix_snip:
                         self.experience_bank.record_success(
-                            error_type=patch_record.get("error_type", "UnknownError"),
+                            error_type=err_type,
                             error_description=patch_record.get("explanation", ""),
                             original_code=orig_snip,
                             fixed_code=fix_snip,

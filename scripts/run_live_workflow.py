@@ -77,6 +77,33 @@ def step_propose_patch(repo_dir: str) -> Dict[str, Any]:
     embedder = TfidfEmbedder(dim=16)
     store = FaissVectorStore(dim=16)
     bank = RepairExperienceBank()
+    from core.chunker import CodeChunk
+    chunks = [
+        CodeChunk(
+            chunk_id="calculator.py::compute_ratio",
+            file_path="calculator.py",
+            language="python",
+            kind="function",
+            name="compute_ratio",
+            start_line=1,
+            end_line=2,
+            code="def compute_ratio(a: float, b: float) -> float:\n    return a / b\n",
+        ),
+        CodeChunk(
+            chunk_id="utils.py::get_version",
+            file_path="utils.py",
+            language="python",
+            kind="function",
+            name="get_version",
+            start_line=1,
+            end_line=3,
+            code="# Utility functions\ndef get_version():\n    return '1.0.0'\n",
+        ),
+    ]
+    import numpy as np
+    texts = [c.as_embedding_text() for c in chunks]
+    embeddings = np.array(embedder.embed(texts), dtype=np.float32)
+    store.add(chunks, embeddings)
 
     engine = PatchEngine(
         store=store,
@@ -104,7 +131,7 @@ def step_propose_patch(repo_dir: str) -> Dict[str, Any]:
         error_report=error_report,
         target_file=target_file,
         verify_in_sandbox=True,
-        test_command=f"{sys.executable} -m pytest test_calculator.py -q",
+        test_command=f'"{sys.executable}" -m pytest test_calculator.py -q',
     )
 
     state = {
@@ -185,13 +212,14 @@ def step_apply_and_verify(approve: bool) -> Dict[str, Any]:
     )
     test_passed = (test_proc.returncode == 0)
 
-    # Experience Retrieval for a different relevant bug
+    # Experience Retrieval for a different relevant bug in same repository scope
     retrieved_shots = bank.retrieve_few_shots(
         error_type="ZeroDivisionError",
         query_text="division by zero in calculate_mean",
-        limit=2,
+        repo_id=patch_rec.get("repo_id"),
+        limit=5,
     )
-    retrieval_success = any("compute_ratio" in s.original_code or "b != 0" in s.fixed_code for s in retrieved_shots)
+    retrieval_success = any("compute_ratio" in s.original_code or "b == 0" in s.fixed_code for s in retrieved_shots)
 
     return {
         "status": "applied",

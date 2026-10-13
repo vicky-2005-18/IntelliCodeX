@@ -59,8 +59,8 @@ def evaluate_condition(
 
     results: List[Dict[str, Any]] = []
 
-    # Experience bank: frozen instance for Condition B, None for Condition A
-    bank = RepairExperienceBank() if use_experiences else None
+    # Experience bank: frozen instance for Condition B, False (disabled) for Condition A
+    bank = RepairExperienceBank() if use_experiences else False
 
     embedder = TfidfEmbedder(dim=16)
     store = FaissVectorStore(dim=16)
