@@ -62,7 +62,7 @@ MAX_OUTPUT_SIZE = 1024 * 1024
 ENV_ALLOWLIST = {
     "PATH", "SYSTEMROOT", "TEMP", "TMP", "COMSPEC", "PATHEXT",
     "LANG", "LC_ALL", "HOME", "USERPROFILE", "PYTHONPATH",
-    "PYTHONDONTWRITEBYTECODE"
+    "PYTHONDONTWRITEBYTECODE", "APPDATA"
 }
 
 # Patterns for sensitive environment variables to block
@@ -249,8 +249,19 @@ class SandboxRunner:
             logger.warning("Failed to kill process tree for pid %d: %s", pid, e)
 
     def _check_docker_available(self) -> bool:
-        """Checks if Docker is available."""
-        return shutil.which("docker") is not None
+        """Checks if Docker CLI is installed and the Docker daemon is responsive."""
+        if shutil.which("docker") is None:
+            return False
+        try:
+            res = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
 
     def _run_with_docker(
         self,
@@ -264,9 +275,25 @@ class SandboxRunner:
         Returns (exit_code, stdout, stderr, error_message).
         """
         if not self._check_docker_available():
-            return None, "", "", "Docker not available"
+            return None, "", "", "Docker not available: daemon is not running"
 
         try:
+            # Sanitize command for Linux container execution:
+            # 1. Replace Windows host Python paths with container Python executable
+            # 2. Normalize Windows backslashes in argument paths to POSIX forward slashes
+            container_cmd = []
+            for idx, arg in enumerate(command):
+                if idx == 0:
+                    base_exe = os.path.basename(arg).lower()
+                    if base_exe in ("python.exe", "python3.exe", "python", "python3") or arg == sys.executable:
+                        container_cmd.append("python")
+                    elif base_exe in ("pytest.exe", "pytest"):
+                        container_cmd.append("pytest")
+                    else:
+                        container_cmd.append(arg)
+                else:
+                    container_cmd.append(arg.replace("\\", "/"))
+
             # Build docker command with security hardening
             docker_cmd = [
                 "docker", "run", "--rm",
@@ -282,7 +309,7 @@ class SandboxRunner:
                 "-v", f"{sandbox_dir}:/work",
                 "-w", "/work",
                 self.docker_image
-            ] + command
+            ] + container_cmd
 
             # Convert to string for shell execution (docker CLI needs shell on Windows)
             if sys.platform == "win32":
@@ -301,6 +328,14 @@ class SandboxRunner:
                     text=True,
                     timeout=timeout
                 )
+
+            # Check for infrastructure communication error from Docker CLI
+            if result.returncode != 0 and (
+                "error during connect" in (result.stderr or "").lower()
+                or "cannot connect to the docker daemon" in (result.stderr or "").lower()
+                or "daemon is not running" in (result.stderr or "").lower()
+            ):
+                return result.returncode, result.stdout, result.stderr, f"Docker daemon communication error: {result.stderr.strip()}"
 
             return result.returncode, result.stdout, result.stderr, None
 
@@ -479,8 +514,8 @@ class SandboxRunner:
                 effective_sandbox_mode = self.sandbox_mode
                 if effective_sandbox_mode == "docker":
                     if not self._check_docker_available():
+                        elapsed = time.perf_counter() - t_start
                         if not self.allow_local_sandbox:
-                            elapsed = time.perf_counter() - t_start
                             return SandboxTestResult(
                                 success=False,
                                 exit_code=-8,
@@ -491,8 +526,17 @@ class SandboxRunner:
                                 error_message="Docker unavailable and local sandbox disabled: set ALLOW_LOCAL_SANDBOX=true to allow fallback.",
                                 traceback_summary="Security: Docker unavailable and ALLOW_LOCAL_SANDBOX=false",
                             )
-                        logger.warning("Docker mode requested but Docker not available, falling back to local mode")
-                        effective_sandbox_mode = "local"
+                        # Explicit Docker mode requested: do NOT silently fall back to local execution
+                        return SandboxTestResult(
+                            success=False,
+                            exit_code=-8,
+                            stdout="",
+                            stderr="Docker mode requested but Docker daemon is unavailable: Docker Desktop is not running or Linux daemon is disconnected. Live container validation is blocked.",
+                            duration_seconds=elapsed,
+                            framework=framework or "unknown",
+                            error_message="Docker mode requested but Docker daemon is unavailable: Docker Desktop / Linux daemon is not running. Live container validation is blocked.",
+                            traceback_summary="Infrastructure: Docker daemon unavailable",
+                        )
 
                 if effective_sandbox_mode == "docker":
                     exit_code, stdout, stderr, docker_error = self._run_with_docker(
@@ -707,14 +751,15 @@ class SandboxRunner:
         if test_command:
             return test_command
 
-        # Default for Python: run pytest or unittest with sys.executable
+        # Default for Python: run pytest or unittest with container/host python executable
+        py_exec = "python" if self.sandbox_mode == "docker" else sys.executable
         if framework == "pytest":
             # Attempt to target tests matching the target file if obvious, or full suite
             target_base = os.path.splitext(os.path.basename(target_file))[0]
             specific_test = os.path.join(sandbox_dir, "tests", f"test_{target_base}.py")
             if os.path.isfile(specific_test):
-                return [sys.executable, "-m", "pytest", f"tests/test_{target_base}.py", "-v", "--tb=short", "-p", "no:cacheprovider"]
-            return [sys.executable, "-m", "pytest", "-v", "--tb=short", "-p", "no:cacheprovider"]
+                return [py_exec, "-m", "pytest", f"tests/test_{target_base}.py", "-v", "--tb=short", "-p", "no:cacheprovider"]
+            return [py_exec, "-m", "pytest", "-v", "--tb=short", "-p", "no:cacheprovider"]
 
         if framework == "npm":
             # Use npx or npm from PATH
@@ -722,8 +767,8 @@ class SandboxRunner:
                 return ["npx", "npm", "test"]
             return ["npm", "test"]
 
-        # Default fallback: python unittest discover with sys.executable
-        return [sys.executable, "-m", "unittest", "discover", "-s", ".", "-p", "test*.py"]
+        # Default fallback: python unittest discover with container/host python executable
+        return [py_exec, "-m", "unittest", "discover", "-s", ".", "-p", "test*.py"]
 
     def _parse_pytest_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Extracts passed/failed counts, assertion messages, and traceback highlights from pytest output."""

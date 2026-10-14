@@ -54,7 +54,7 @@
 | ID | Requirement Name | PDF Source | Implementation Files | Current Evidence | Remaining Work | Dependencies | Acceptance Criteria | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **REQ-FUT-01** | Multi-Language Support | p. 7, §VIII-B | `core/tree_sitter_chunker.py` | `tests/test_tree_sitter_chunker.py` (9 languages) | Expand cross-language symbol resolution | REQ-CORE-03 | Extracts AST chunks across Python, JS, TS, Java, C, C++, Go, Rust | **Verified** |
-| **REQ-FUT-02** | Autonomous Repair Loop | p. 7, §VIII-B | `core/patch_generator.py`, `backend/patch_generator/patch_engine.py`, `core/sandbox_runner.py`, `backend/api/patches.py` | `tests/test_sandbox_runner.py` (11/11 passed), `tests/test_patch_generator.py` (14/14 passed) | None | REQ-CORE-15, REQ-CORE-17 | Multi-turn repair loop (up to 3 iterations) using test failure stack trace, assertions, and execution output feedback in isolated sandbox | **Verified** |
+| **REQ-FUT-02** | Autonomous Repair Loop & Sandbox Execution | p. 7, §VIII-B | `core/patch_generator.py`, `backend/patch_generator/patch_engine.py`, `core/sandbox_runner.py`, `backend/api/patches.py` | `tests/test_sandbox_runner.py` (11/11 passed), `tests/test_sandbox_hardening.py` (20/20 passed), `tests/test_docker_sandbox_workflow.py` (10/10 passed) | Live Docker container execution is Blocked pending user launch of Docker Desktop (daemon offline). Local execution verified with environment variable filtering, path traversal defense, process tree termination, and clear non-silent Docker failure. | REQ-CORE-15, REQ-CORE-17 | Multi-turn repair loop (up to 3 iterations) using test failure stack trace, assertions, and execution output feedback; clear non-silent failure when Docker is offline; no Windows host path leaks into container commands. | **Verified (Local Sandbox) / Blocked (Live Container)** |
 | **REQ-FUT-03** | Continuous Repo Monitoring | p. 7, §VIII-B | `core/watcher.py`, `backend/services/incremental_indexer.py` | `tests/test_file_watcher.py` (8/8 passed) | None | REQ-CORE-07, REQ-CORE-08 | Live watchdog filesystem events trigger debounced reindex (<200ms) with full directory move, rename, and batch deletion handling | **Verified** |
 | **REQ-FUT-04** | CI/CD Pipeline Integration | p. 7, §VIII-B | `cli.py`, `.github/workflows/intellicodex.yml` | `tests/test_cli.py` (27/27 passed including headless `--ci` mode) | None | REQ-CORE-19 | Non-interactive execution returning standard exit codes (0/1), reusable GitHub Actions CI/CD workflow | **Verified** |
 | **REQ-FUT-05** | Security Vulnerability Scan | p. 7, §VIII-B | `backend/analytics/security_scanner.py` | `tests/test_security_scanner.py` passes | Expand rule coverage beyond Bandit AST patterns | REQ-CORE-03, REQ-CORE-15 | Flags security vulnerabilities with LLM remediation diffs | **Verified** |
@@ -63,4 +63,39 @@
 | **REQ-FUT-08** | Multi-Repository Reasoning | p. 7, §VIII-B | `core/multi_repo.py`, `backend/api/multi_repo.py`, `cli.py` | `tests/test_multi_repo.py` (6/6 passed) | None | REQ-CORE-07, REQ-CORE-08 | Answers cross-repo queries with `[repo_id:file:lines]` citations and discovers shared microservice HTTP API contracts across repositories | **Verified** |
 | **REQ-FUT-09** | Distributed Org Memory | p. 7, §VIII-B | `core/org_memory.py`, `backend/api/org_memory.py`, `cli.py` | `tests/test_org_memory.py` (5/5 passed) | None | REQ-CORE-07, REQ-CORE-10 | Historical Git commit and ADR vector store answering historical architectural decisions and code change rationale with citations | **Verified** |
 | **REQ-FUT-10** | Self-Improving Agents | p. 7, §VIII-B | `core/self_improving.py`, `core/patch_generator.py`, `backend/api/patches.py`, `cli.py` | `tests/test_self_improving.py` (11/11 passed covering provenance, idempotency, reverted invalidation, restart persistence, concurrency, multi-tenant privacy boundaries, and validation); 20-case held-out benchmark (`tests/benchmark_self_improving.py`) evaluated live on Ollama `qwen2.5-coder:3b`: Zero-shot pass rate 6/20 (30.0%, 14 regressions) vs Few-shot pass rate 8/20 (40.0%, 12 regressions); live end-to-end workflow verified with developer review gate, git dirty changes preservation, and tenant-scoped retrieval. | Domain-specific semantic regression failures still occur on 12/20 cases without multi-turn sandbox refinement; Docker container execution remains Blocked/Unavailable while Docker daemon is offline (fallback to verified local sandbox). | REQ-CORE-16, REQ-CORE-15 | Dynamic in-context few-shot learning with persistent RepairExperienceBank, automatic learning on sandbox test pass and developer approval, tenant isolation, and /api/patches/experiences API | **Verified** |
+
+---
+
+## 3. Sandbox Execution & Verified Isolation Boundary
+
+### A. Actual Docker Runtime State
+- **Docker CLI**: Docker version 29.8.0, build `c5eb6ec`, installed at `C:\Users\vikas\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe`.
+- **Docker Engine API**: **Disconnected**. Named pipe `//./pipe/dockerDesktopLinuxEngine` returned `The system cannot find the file specified`.
+- **WSL Status**: `docker-desktop` distro state is `Stopped`.
+- **Live Container Validation Status**: **Blocked** until Docker Desktop is manually started in an interactive user session.
+- **Previous Subprocess Runs Classification**: Previous test runs executed as **local execution** on the host, **not verified container isolation**.
+
+### B. Fail-Safe Behavior & Absence of Silent Fallback
+- `_check_docker_available()` now executes `docker info` with a 2-second timeout rather than checking `shutil.which("docker")`.
+- When `sandbox_mode == "docker"` is requested and the daemon is offline, `SandboxRunner.run_tests_with_patch` immediately returns `SandboxTestResult(success=False, exit_code=-8)` explaining that the Docker daemon is unavailable and live container validation is blocked. It **never silently executes arbitrary code locally on the host**.
+
+### C. Container Command Normalization
+- Host Windows executable paths (`C:\Program Files\Python314\python.exe`, `pytest.exe`) are mapped to Linux container binary names (`python`, `pytest`).
+- Windows path backslashes (`\`) are normalized to POSIX forward slashes (`/`).
+- Resolves container commands using Linux environment paths rather than host system paths.
+
+### D. Verified Isolation Boundary (Tested & Specified)
+| Control Dimension | Container Specification (When Docker Running) | Local Sandbox Execution (When Running Locally) |
+| :--- | :--- | :--- |
+| **Network Access** | `--network none` (Hard isolated, zero outbound/inbound traffic) | Shared host loopback (no explicit firewalling) |
+| **User Privileges** | Non-root `UID 1000:GID 1000` via `--user 1000:1000` | Host user account privileges (`vikas`) |
+| **Root Filesystem** | `--read-only` root filesystem | Host filesystem (OS ACLs apply) |
+| **Writable Storage** | `--tmpfs /tmp:rw,noexec,nosuid,size=64m`, `-v {sandbox_dir}:/work` | Isolated temporary directory (`tempfile.TemporaryDirectory`) |
+| **Host Exposure** | Only disposable copy of target repo mounted into `/work`; external files unmounted | Strict path traversal rejection (`resolve_within`, `exit_code=-3`) |
+| **Resource Limits** | `--memory 512m`, `--cpus 1.0`, `--cap-drop ALL`, `--security-opt no-new-privileges` | Wall-clock timeout with recursive `psutil` process-tree termination |
+| **Environment** | Minimal container image environment | Strict allowlist: `PATH`, `SYSTEMROOT`, `TEMP`, `APPDATA`, etc. Sensitive patterns (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`) stripped |
+| **Cleanup** | Container destroyed via `--rm` immediately on exit | Python context manager / temp directory rmtree cleanup |
+
+> **Security Boundary Disclaimer**: Container isolation restricts unauthorized disk access, network egress, and CPU/memory exhaustion under standard Linux container guarantees. It does not provide hardware-isolated VM hypervisor security (such as microVMs or Kata containers).
+
 

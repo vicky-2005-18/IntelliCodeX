@@ -240,8 +240,8 @@ time.sleep(100)
 
 
 def test_docker_mode_fallback_without_docker(sample_repo):
-    """Test that Docker mode falls back to local mode with warning when Docker is unavailable."""
-    runner = SandboxRunner(default_timeout=10, sandbox_mode="docker")
+    """Test that requesting Docker mode fails clearly without silently falling back to local execution when Docker daemon is unavailable."""
+    runner = SandboxRunner(default_timeout=10, sandbox_mode="docker", allow_local_sandbox=True, is_admin=True)
 
     # Mock _check_docker_available to return False
     with patch.object(runner, "_check_docker_available", return_value=False):
@@ -253,10 +253,11 @@ def test_docker_mode_fallback_without_docker(sample_repo):
             timeout=10
         )
 
-        # Should fall back to local mode and run
-        # (The test should still run, just with a warning logged)
-        # Check that it didn't fail due to Docker error
-        assert "Docker execution failed" not in result.error_message
+        # Must not silently fall back to local execution; must fail clearly with exit code -8
+        assert result.success is False
+        assert result.exit_code == -8
+        assert "Docker daemon is unavailable" in result.error_message or "Docker unavailable" in result.error_message
+        assert "Live container validation is blocked" in result.stderr
 
 
 def test_docker_mode_fails_safely_when_local_sandbox_disabled(sample_repo):
