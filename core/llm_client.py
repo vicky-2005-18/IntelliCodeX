@@ -85,6 +85,8 @@ class OllamaLLM:
         self.num_predict = int(os.getenv("OLLAMA_NUM_PREDICT", str(num_predict)))
         self.repeat_penalty = float(os.getenv("OLLAMA_REPEAT_PENALTY", str(repeat_penalty)))
         self._lock = _GLOBAL_OLLAMA_THREAD_LOCK
+        self.last_prompt_tokens: Optional[int] = None
+        self.last_completion_tokens: Optional[int] = None
 
     def _acquire_gpu(self):
         """Acquires GPU execution slot via global concurrency manager or fallback thread lock."""
@@ -144,7 +146,10 @@ class OllamaLLM:
                     timeout=300,
                 )
                 resp.raise_for_status()
-                raw_ans = resp.json().get("response", "")
+                data = resp.json()
+                self.last_prompt_tokens = data.get("prompt_eval_count")
+                self.last_completion_tokens = data.get("eval_count")
+                raw_ans = data.get("response", "")
                 return detect_and_abort_repetition_loops(raw_ans)
             except requests.exceptions.Timeout:
                 return "Local Ollama AI generation timed out (exceeded 300s). Try asking a more targeted question."

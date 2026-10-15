@@ -9,13 +9,19 @@ Examples:
     python cli.py https://github.com/vicky-2005-18/TB --backend ollama
 """
 import argparse
+import atexit
 import os
 import re
 import subprocess
 import sys
 import time
+import tempfile
+import shutil
+import logging
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import requests
+
+logger = logging.getLogger(__name__)
 
 # Ensure console output handles unicode without crashing on Windows cp1252
 if hasattr(sys.stdout, "reconfigure"):
@@ -108,12 +114,12 @@ def parse_mention(query: str) -> tuple[str, str]:
         "how does @auth.py work?" -> ("how does work?", "auth.py")
         "what is this?" -> ("what is this?", None)
     """
-    # Match @filename pattern (supports @filename.ext or @filename or @path/to/file.py)
-    # Match word characters, dots, underscores, hyphens, and forward slashes after @
+    # Match @filename pattern (supports @filename.ext, @path/to/file.py, @path\to\file.py)
+    # Match word characters, dots, underscores, hyphens, forward slashes, and backslashes after @
     # Stop at whitespace or punctuation that's not part of a path
-    match = re.search(r'@([\w\-.\/]+)', query)
+    match = re.search(r'@([\w\-.\/\\]+)', query)
     if match:
-        filename = match.group(1)
+        filename = match.group(1).replace("\\", "/")
         # Remove the @mention from the query (use exact match to avoid partial replacements)
         cleaned_query = query.replace(f"@{filename}", "").strip()
         # Clean up extra spaces that might be left
@@ -231,8 +237,16 @@ def resolve_repo_path(repo_target: str, full_history: bool = False) -> str:
         return target_dir
 
     if not os.path.exists(repo_target):
+        # Also check if target matches a known local repo folder in .repos or sample_repo
+        repos_cand = os.path.abspath(os.path.join(".repos", repo_target))
+        if os.path.isdir(repos_cand):
+            return repos_cand
+        sample_cand = os.path.abspath("sample_repo")
+        if repo_target == "sample_repo" and os.path.isdir(sample_cand):
+            return sample_cand
         raise FileNotFoundError(f"Repository path or URL invalid / not found: '{repo_target}'")
     return os.path.abspath(repo_target)
+
 
 
 def print_banner():
@@ -258,6 +272,7 @@ Available Commands:
   repos / list-repos     - List all already-added repositories and switch by number
   repo <path_or_url>     - Switch/clone active repository (e.g. 'repo https://github.com/user/repo')
   repo <number>          - Switch to a previously added repo by its list number (e.g. 'repo 2')
+  repo remove <num|name> - Unregister repository registration (preserves source files & cache)
   backend <ollama|tfidf> - Switch active backend engine dynamically
   persona <name>         - Switch AI persona (general, security, reviewer, refactor, fixer)
   model <model_name>     - Switch active Ollama model (e.g. 'model qwen2.5-coder:7b')
@@ -286,7 +301,7 @@ File Scoping:
     print(help_text)
 
 
-def get_available_repos(current_path: str) -> list:
+def get_available_repos(current_path: str, db_path: Optional[str] = None) -> list:
     """Returns a list of (label, abs_path) tuples for all known local repositories.
 
     Scans:
@@ -298,12 +313,19 @@ def get_available_repos(current_path: str) -> list:
     known: list = []  # list of (label, abs_path)
     seen_paths: set = set()
 
+    unregistered_paths: set = set()
+    try:
+        from core.persistence import get_unregistered_repos
+        unregistered_paths = get_unregistered_repos(db_path=db_path) if db_path else get_unregistered_repos()
+    except Exception:
+        pass
+
     def _add_repo(label: str, raw_path: str):
         if not raw_path or not os.path.isdir(raw_path):
             return
         abs_p = os.path.abspath(raw_path)
         norm_key = os.path.normcase(abs_p)
-        if norm_key in seen_paths:
+        if norm_key in seen_paths or norm_key in unregistered_paths:
             return
         # Filter out pytest temporary directories
         if any(t in norm_key.lower() for t in ["temp", "pytest-of-", "intellicodex_pytest_storage"]):
@@ -323,7 +345,7 @@ def get_available_repos(current_path: str) -> list:
     # 3. Persistent SQLite registry (remembers any repo indexed on your local computer)
     try:
         from core.persistence import get_db_connection
-        conn = get_db_connection()
+        conn = get_db_connection(db_path) if db_path else get_db_connection()
         rows = conn.execute("SELECT repo_path FROM repos ORDER BY last_indexed_at DESC").fetchall()
         for r in rows:
             p = r["repo_path"]
@@ -489,13 +511,127 @@ def render_repos_table(available: list, active_path: str):
             st = "[bold green]ACTIVE ✓[/bold green]" if is_act else "[dim]Available[/dim]"
             table.add_row(str(idx), label, abs_p, st)
         console.print(table)
-        console.print("[dim]Tip: type 'repo <number>' or 'repo <name>' to switch[/dim]\n")
+        console.print("[dim]Tip: type 'repo <number>' or 'repo <name>' to switch | 'repo remove <number|name>' to unregister[/dim]\n")
     else:
         print(f"\n--- Available Repositories ({len(available)}) ---")
         for idx, (label, abs_p) in enumerate(available, start=1):
             active_marker = " (active ✓)" if abs_p == active_abs else ""
             print(f"  [{idx}] {label:<25} {abs_p}{active_marker}")
-        print("\n  Tip: type 'repo <number>' to switch, e.g. 'repo 2'\n")
+        print("\n  Tip: type 'repo <number>' to switch, 'repo remove <number|name>' to unregister\n")
+
+
+def handle_repo_remove(
+    target_arg: str,
+    current_path: str,
+    available_repos: Optional[list] = None,
+    confirm_fn: Optional[Callable[[str], str]] = None,
+    output_fn: Optional[Callable[[str], None]] = None,
+    db_path: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Handles 'repo remove <number|name>' command.
+
+    - Resolves numbers using the exact ordering shown by 'repos'.
+    - Matches names case-insensitively.
+    - Requires disambiguation if duplicate names exist.
+    - Rejects removal if target is the active repository.
+    - Shows exact repository name and full path before confirmation.
+    - Removes registration from persistent repository list (SQLite).
+    - Preserves all source folders, Git history, and index/cache files.
+    """
+    out = output_fn or print
+    target = (target_arg or "").strip().strip("\"'")
+    if not target:
+        msg = "Usage: repo remove <number|name>\nRun 'repos' to view registered repositories."
+        out(f"\n[!] {msg}\n")
+        return False, msg
+
+    available = available_repos if available_repos is not None else get_available_repos(current_path, db_path=db_path)
+    if not available:
+        msg = "No registered repositories found."
+        out(f"\n[!] {msg}\n")
+        return False, msg
+
+    target_entry = None
+    if target.isdigit():
+        idx = int(target) - 1
+        if 0 <= idx < len(available):
+            target_entry = available[idx]
+        else:
+            msg = f"Invalid repository number '{target}'. Valid range is 1 to {len(available)}.\nRun 'repos' to view the list."
+            out(f"\n[!] {msg}\n")
+            return False, msg
+    else:
+        # Match by repository name (case-insensitive)
+        name_matches = [e for e in available if e[0].lower() == target.lower()]
+        if not name_matches:
+            # Fallback: check matching directory basename or matching full path
+            norm_target = os.path.normcase(os.path.abspath(target))
+            name_matches = [
+                e for e in available
+                if os.path.basename(e[1]).lower() == target.lower()
+                or os.path.normcase(os.path.abspath(e[1])) == norm_target
+            ]
+
+        if len(name_matches) == 0:
+            msg = f"Repository '{target}' not found. Run 'repos' to view available repositories."
+            out(f"\n[!] {msg}\n")
+            return False, msg
+        elif len(name_matches) > 1:
+            out(f"\n[!] Multiple repositories named '{target}' found:")
+            for idx, (lbl, p) in enumerate(available, start=1):
+                if (lbl, p) in name_matches:
+                    out(f"    [{idx}] {lbl:<20} {p}")
+            msg = f"Multiple repositories named '{target}' found. Please disambiguate by number using 'repo remove <number>'."
+            out("    Please disambiguate by number using 'repo remove <number>'.\n")
+            return False, msg
+        else:
+            target_entry = name_matches[0]
+
+    selected_name, selected_path = target_entry
+    selected_abs = os.path.abspath(selected_path)
+    active_abs = os.path.abspath(current_path) if current_path else ""
+
+    # Check if target is the active repository
+    if active_abs and os.path.normcase(selected_abs) == os.path.normcase(active_abs):
+        out(f"\n[!] Cannot remove the active repository '{selected_name}'.")
+        out(f"[*] Path: {selected_abs}")
+        msg = f"Cannot remove active repository '{selected_name}'. Please switch to another repository first using 'repo <number|name>' before removing."
+        out("[*] Please switch to another repository first using 'repo <number|name>' before removing.\n")
+        return False, msg
+
+    # Show exact repository name and full path before confirmation
+    out("\nRepository unregister:")
+    out(f"  Name: {selected_name}")
+    out(f"  Path: {selected_abs}")
+
+    prompt_str = f"Are you sure you want to unregister '{selected_name}' ({selected_abs})? [y/N]: "
+    if confirm_fn is None:
+        confirm_fn = input
+
+    try:
+        confirm_ans = confirm_fn(prompt_str)
+    except (KeyboardInterrupt, EOFError):
+        msg = "Repository unregister cancelled."
+        out(f"\n[*] {msg}\n")
+        return False, msg
+
+    if not confirm_ans or confirm_ans.strip().lower() not in ("y", "yes"):
+        msg = "Repository unregister cancelled."
+        out(f"[*] {msg}\n")
+        return False, msg
+
+    # Unregister repository
+    from core.persistence import unregister_repo
+    if db_path:
+        unregister_repo(selected_abs, db_path=db_path)
+    else:
+        unregister_repo(selected_abs)
+
+    msg = f"Successfully unregistered repository '{selected_name}'."
+    out(f"\n[✓] {msg}")
+    out(f"[*] Source files, Git history, and index cache at '{selected_abs}' remain untouched.\n")
+    return True, msg
+
 
 
 def render_hooks_table(st_dict: dict, target_path: str):
@@ -517,17 +653,32 @@ def render_hooks_table(st_dict: dict, target_path: str):
 
 
 def render_patch_card(patch_rec: dict, fix_time: float):
-    """Renders automated patch diagnosis and git diff."""
+    """Renders automated patch diagnosis and git diff, separating execution results from model claims."""
     sb_val = patch_rec.get("sandbox_validation", {})
     sb_status = sb_val.get("test_status", "skipped").upper()
     sb_turns = sb_val.get("iterations_count", 1)
     sb_skipped = sb_val.get("skipped", False)
     time_str = format_time_consumed(fix_time)
     conf = f"{patch_rec.get('confidence_score', 0):.0%}"
+
+    test_res = sb_val.get("test_result") or {}
+    exit_code = test_res.get("exit_code")
+    p_cnt = test_res.get("passed_count", 0)
+    f_cnt = test_res.get("failed_count", 0)
     
+    contract_type = sb_val.get("contract_type", "existing_tests")
+    contract_disclaimer = sb_val.get("contract_disclaimer")
+
     # Show "not verified" message when tests were skipped
     if sb_skipped:
         sb_display = "NOT VERIFIED: NO TESTS RAN"
+    elif sb_status == "PASSED":
+        if contract_type == "ai_generated_proposal":
+            sb_display = f"PASSES GENERATED TESTS ({p_cnt} passed, 0 failed — Exit Code 0, Iterations: {sb_turns})"
+        else:
+            sb_display = f"PASSED ({p_cnt} passed, 0 failed — Exit Code 0, Iterations: {sb_turns})"
+    elif sb_status == "FAILED":
+        sb_display = f"FAILED ({p_cnt} passed, {f_cnt} failed — Exit Code {exit_code}, Iterations: {sb_turns})"
     else:
         sb_display = f"{sb_status} (Iterations: {sb_turns})"
 
@@ -536,12 +687,20 @@ def render_patch_card(patch_rec: dict, fix_time: float):
         info_table = Table.grid(padding=(0, 2))
         info_table.add_column(style="bold cyan", justify="right")
         info_table.add_column(style="white")
-        info_table.add_row("Target File:", patch_rec.get("target_file", "Unknown"))
+        info_table.add_row("Canonical Target:", patch_rec.get("target_file", "Unknown"))
         info_table.add_row("Error Type:", str(patch_rec.get("error_type", "Unknown")))
         info_table.add_row("Confidence:", conf)
-        info_table.add_row("Sandbox Tests:", f"[{status_color}]{sb_display}[/{status_color}]")
+        info_table.add_row("Sandbox Verification:", f"[{status_color}]{sb_display}[/{status_color}]")
+        if contract_type == "ai_generated_proposal":
+            info_table.add_row("Contract Grounding:", "[bold yellow]AI-Generated Test Proposal (disposable contract)[/bold yellow]")
+            if contract_disclaimer:
+                info_table.add_row("Contract Disclaimer:", f"[dim yellow]{contract_disclaimer}[/dim yellow]")
+        if sb_status == "FAILED":
+            info_table.add_row("Verification Verdict:", "[bold red][!] REPAIR FAILED: Automated tests did not pass in Docker sandbox.[/bold red]")
         info_table.add_row("Time Consumed:", time_str)
-        info_table.add_row("Explanation:", patch_rec.get("explanation", ""))
+        info_table.add_row("Model Advisory:", patch_rec.get("explanation", ""))
+        if sb_status == "FAILED":
+            info_table.add_row("Warning:", "[bold red][!] Model advisory claims cannot override failed test execution results.[/bold red]")
 
         console.print(Panel(info_table, title="[bold cyan]INTELLICODEX AUTOMATED CODE PATCH[/bold cyan]", border_style="cyan"))
         render_diff(patch_rec.get("git_diff", ""))
@@ -549,12 +708,19 @@ def render_patch_card(patch_rec: dict, fix_time: float):
         print("\n=======================================================================")
         print("                 INTELLICODEX AUTOMATED CODE PATCH")
         print("=======================================================================")
-        print(f"Target File     : {patch_rec['target_file']}")
+        print(f"Canonical Target: {patch_rec.get('target_file')}")
         print(f"Error Type      : {patch_rec.get('error_type', 'Unknown')}")
         print(f"Confidence      : {conf}")
         print(f"Sandbox Tests   : {sb_display}")
+        if contract_type == "ai_generated_proposal":
+            print("Contract Grounding: AI-Generated Test Proposal (disposable contract)")
+            if contract_disclaimer:
+                print(f"Disclaimer      : {contract_disclaimer}")
+        if sb_status == "FAILED":
+            print("[!] REPAIR FAILED: Automated tests did not pass in Docker sandbox.")
+            print("[!] Model advisory claims cannot override failed test execution results.")
         print(f"Time Consumed   : {time_str}")
-        print(f"Explanation     : {patch_rec['explanation']}")
+        print(f"Model Advisory  : {patch_rec.get('explanation')}")
         print("\n--- Unified Git Diff ---")
         print(patch_rec.get("git_diff", ""))
         print("=======================================================================\n")
@@ -578,6 +744,7 @@ def render_help_panel():
                 ("fix:<error>",     "Diagnose error & generate automated sandbox patch"),
             ]),
             ("Code Analysis", "magenta", [
+                ("graph:<entity>",  "Query knowledge graph for entity attributes, callers & lines"),
                 ("deps:<file>",     "View reverse dependency impact for a file"),
                 ("callers:<func>",  "Find all call sites of a function across the repo"),
                 ("top / centrality","Show PageRank centrality rankings for files & symbols"),
@@ -1372,10 +1539,168 @@ def execute_explain_command(engine, result, raw_input: str, active_file_filter: 
             render_compare_panels(no_rag_ans, elapsed_no_rag, trace.answer or "", elapsed_rag)
 
 
+
+def execute_graph_command(result, query: str):
+    """
+    REQ-FUT-07: Queries the repository knowledge graph from CLI.
+    Supports:
+      graph:<entity>
+      graph:query <entity>
+      graph:path <source> <target> [--directed]
+      graph:entities [type]
+      graph:metadata
+    """
+    from backend.dependency_graph import EnhancedDependencyGraph
+
+    source_files = getattr(result, "source_files", None)
+    if not source_files and hasattr(result, "store") and hasattr(result.store, "chunks"):
+        file_map = {}
+        for c in result.store.chunks:
+            if c.file_path not in file_map:
+                from core.parser import SourceFile
+                file_map[c.file_path] = SourceFile(c.file_path, c.file_path, "", c.language)
+        source_files = list(file_map.values())
+
+    engine = getattr(result, "enhanced_graph_engine", None)
+    if engine is None:
+        engine = EnhancedDependencyGraph()
+        engine.build(source_files or [], call_graph=getattr(result, "call_graph", None))
+        result.enhanced_graph_engine = engine
+
+    args_str = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+
+    if args_str.startswith("path ") or args_str.startswith("path:"):
+        path_args = args_str[5:].strip().split()
+        if len(path_args) < 2:
+            print("[!] Usage: graph:path <source_entity> <target_entity> [--directed]\n")
+            return
+        src, tgt = path_args[0], path_args[1]
+        directed = "--directed" in path_args
+        res = engine.find_path(src, tgt, directed=directed)
+        if not res.get("found"):
+            print(f"[!] {res.get('error', 'Path resolution failed')}\n")
+            return
+        if not res.get("path_exists"):
+            print(f"[*] {res.get('message', 'No path found.')}\n")
+            return
+
+        print(f"\n[*] Shortest Knowledge Graph Path ({'directed' if directed else 'undirected'}): {src} -> {tgt} (length={res['length']})")
+        for idx, node in enumerate(res["path"]):
+            print(f"  [{idx}] {node['id']} ({node['type']}, file={node.get('file_path') or '—'})")
+        if res.get("edges"):
+            print("\n  Connecting Edges:")
+            for e in res["edges"]:
+                line_info = f":{e['line']}" if e.get("line") else ""
+                print(f"    - {e['source']} --[{e['relationship']}]--> {e['target']} ({e.get('source_file') or ''}{line_info})")
+        print()
+        return
+
+    if args_str.lower() in ("metadata", "stats"):
+        meta = engine.get_metadata()
+        print("\n=== Repository Knowledge Graph Metadata ===")
+        print(f"  Total Nodes : {meta['total_nodes']}")
+        print(f"  Total Edges : {meta['total_edges']}")
+        print("  Node Types  :", ", ".join(f"{k}: {v}" for k, v in meta["node_types"].items()))
+        print("  Relationships:", ", ".join(f"{k}: {v}" for k, v in meta["relationship_types"].items()))
+        print("\n  Supported Relationships:")
+        for s in meta["supported_relationships"]:
+            print(f"    - {s['type']}: {s['description']}")
+        print("\n  Unsupported Relationships (Not Statically Inferred):")
+        for u in meta["unsupported_relationships"]:
+            print(f"    - {u['type']}: {u['reason']}")
+        print()
+        return
+
+    if args_str.startswith("entities") or args_str.startswith("list"):
+        parts = args_str.split()
+        ent_type = parts[1] if len(parts) > 1 else None
+        ents = engine.list_entities(entity_type=ent_type, limit=50)
+        print(f"\n[*] Indexed Entities (showing {len(ents)}):")
+        for e in ents:
+            line_str = f" lines {e['start_line']}–{e['end_line']}" if e.get("start_line") else ""
+            print(f"  - [{e['type']}] {e['id']} ({e.get('file_path') or '—'}{line_str})")
+        print()
+        return
+
+    entity_name = args_str
+    if entity_name.startswith("query "):
+        entity_name = entity_name[6:].strip()
+
+    t0 = time.perf_counter()
+    res = engine.query_entity(entity_name, direction="both", depth=1)
+    elapsed = time.perf_counter() - t0
+
+    if not res.get("found"):
+        print(f"\n[!] Entity '{entity_name}' not found in repository knowledge graph.")
+        similar = engine.list_entities(search=entity_name, limit=5)
+        if similar:
+            print("    Did you mean one of these?")
+            for s in similar:
+                print(f"      - {s['id']} ({s['type']})")
+        print()
+        return
+
+    ent = res["entity"]
+    rels = res["relationships"]
+
+    if HAS_RICH and console:
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan", justify="right")
+        grid.add_column(style="white")
+        grid.add_row("Entity ID:", ent["id"])
+        grid.add_row("Symbol Name:", ent["name"])
+        grid.add_row("Entity Type:", f"[bold yellow]{ent['type'].upper()}[/bold yellow]")
+        grid.add_row("Source File:", f"{ent.get('file_path') or '—'}")
+        if ent.get("start_line"):
+            grid.add_row("Line Range:", f"Lines {ent['start_line']} – {ent.get('end_line') or ent['start_line']}")
+        if ent.get("docstring"):
+            grid.add_row("Docstring:", ent["docstring"].strip().splitlines()[0])
+        grid.add_row("Query Time:", format_time_consumed(elapsed))
+
+        console.print(Panel(
+            grid,
+            title=f"[bold bright_blue]Knowledge Graph — {ent['name']}[/bold bright_blue]",
+            border_style="bright_blue",
+        ))
+
+        if rels:
+            t = Table(title=f"Incident Relationships ({len(rels)})", border_style="cyan")
+            t.add_column("Dir", style="bold yellow", width=8)
+            t.add_column("Relationship", style="bold green", width=18)
+            t.add_column("Related Symbol", style="cyan")
+            t.add_column("Type", style="dim", width=10)
+            t.add_column("Source File & Line", style="magenta")
+
+            for r in rels:
+                direction_arrow = "OUT ->" if r["direction"] == "outgoing" else "IN  <-"
+                related_sym = r["target_name"] if r["direction"] == "outgoing" else r["source_name"]
+                related_type = r["target_type"] if r["direction"] == "outgoing" else r["source_type"]
+                line_str = f"{r.get('source_file') or ''}:{r.get('line') or ''}" if r.get("line") else (r.get("source_file") or "—")
+                t.add_row(direction_arrow, r["relationship"], related_sym, related_type, line_str)
+            console.print(t)
+        else:
+            console.print("[dim yellow]No incident relationships found for this entity.[/dim yellow]")
+        print()
+    else:
+        print(f"\n=== Knowledge Graph: {ent['name']} ({ent['type']}) ===")
+        print(f"  ID         : {ent['id']}")
+        print(f"  File       : {ent.get('file_path') or '—'}")
+        if ent.get("start_line"):
+            print(f"  Lines      : {ent['start_line']} - {ent.get('end_line')}")
+        print(f"  Relationships ({len(rels)}):")
+        for r in rels:
+            arrow = "->" if r["direction"] == "outgoing" else "<-"
+            rel_sym = r["target_name"] if r["direction"] == "outgoing" else r["source_name"]
+            line_str = f" (line {r['line']})" if r.get("line") else ""
+            print(f"    {arrow} [{r['relationship']}] {rel_sym}{line_str}")
+        print()
+
+
 class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
     """Context-aware autocompleter for commands, files, symbols, and settings."""
 
     COMMANDS = [
+        ("graph:", "Query repository knowledge graph entity, relationships, or paths (e.g. 'graph:Calculator')"),
         ("explain:", "Inspect RAG retrieval, augmented prompt & fusion provenance"),
         ("chunks:", "Inspect index chunks and vector previews for a file"),
         ("index-stats", "Show comprehensive index statistics across the repository"),
@@ -1391,6 +1716,7 @@ class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
         ("centrality", "Show PageRank centrality rankings"),
         ("repos", "List all known local & cloned repositories"),
         ("list-repos", "List all known repositories"),
+        ("repo remove ", "Unregister repository from persistent list by number or name"),
         ("repo ", "Switch active repository by path, URL, or number"),
         ("backend ", "Switch backend engine (ollama | tfidf)"),
         ("persona ", "Switch AI persona (general, security, reviewer, refactor, fixer)"),
@@ -1533,9 +1859,24 @@ class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
                     yield Completion(b, start_position=-len(arg), display=b, display_meta="Backend")
             return
 
+        # 6a. Parameter completion: repo remove <name_or_number>
+        if stripped.startswith("repo remove "):
+            arg = stripped[len("repo remove "):]
+            if self.get_repos_fn:
+                repos = self.get_repos_fn() or []
+                for idx, (lbl, p) in enumerate(repos, start=1):
+                    s_idx = str(idx)
+                    if s_idx.startswith(arg):
+                        yield Completion(s_idx, start_position=-len(arg), display=f"[{s_idx}] {lbl}", display_meta="Repo Number")
+                    if lbl.lower().startswith(arg.lower()):
+                        yield Completion(lbl, start_position=-len(arg), display=lbl, display_meta="Repo Name")
+            return
+
         # 6. Parameter completion: repo <name_or_number>
         if stripped.startswith("repo "):
             arg = stripped[len("repo "):]
+            if "remove".startswith(arg.lower()):
+                yield Completion("remove ", start_position=-len(arg), display="remove <number|name>", display_meta="Unregister repository")
             if self.get_repos_fn:
                 repos = self.get_repos_fn() or []
                 for idx, (lbl, p) in enumerate(repos, start=1):
@@ -1635,6 +1976,667 @@ class RemoteClient:
         return resp.json()
 
 
+# Standard CI/CD Pipeline Exit Codes (REQ-FUT-04)
+EXIT_SUCCESS = 0
+EXIT_VERIFICATION_FAILURE = 1
+EXIT_INFRA_OR_CONFIG_ERROR = 2
+
+
+def apply_unified_diff(
+    original_text: str,
+    diff_text: str,
+    expected_target_file: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Applies a single-file unified diff to original text with strict format validation.
+
+    Guarantees (REQ-FUT-04 / REQ-FUT-05):
+    1. Distinguishes input formats explicitly:
+       - If diff syntax (diff --git, ---, +++, @@) is absent, treats as valid full replacement code.
+       - If diff syntax is present, strictly parses as unified diff.
+    2. Rejects malformed diffs (missing hunks, invalid hunk headers, truncated lines).
+    3. Rejects mismatched context and deletion lines explicitly (does NOT silently skip or corrupt).
+    4. Rejects unexpected target paths if expected_target_file is supplied and headers do not match.
+    5. NEVER silently reinterprets a failed unified diff as full replacement code.
+
+    Returns:
+        (patched_text, None) on success.
+        (None, error_reason) on failure.
+    """
+    if diff_text is None:
+        return None, "Diff content is None"
+
+    # 1. Distinguish input formats
+    has_diff_markers = bool(re.search(r"^(?:diff --git|--- |\+\+\+ |@@\s+-\d+)", diff_text, re.MULTILINE))
+    if not has_diff_markers:
+        # Documented valid usage: plain replacement content
+        return diff_text, None
+
+    # 2. Check header target path if expected_target_file is given
+    if expected_target_file:
+        m_plus = re.search(r"^\+\+\+\s+(?:[b/]|/)*(.*?)(?:\t|\n|$)", diff_text, re.MULTILINE)
+        m_minus = re.search(r"^---\s+(?:[a/]|/)*(.*?)(?:\t|\n|$)", diff_text, re.MULTILINE)
+        header_target = None
+        if m_plus and m_plus.group(1).strip() not in ("/dev/null", "null", ""):
+            header_target = m_plus.group(1).strip()
+        elif m_minus and m_minus.group(1).strip() not in ("/dev/null", "null", ""):
+            header_target = m_minus.group(1).strip()
+
+        if header_target:
+            norm_header = os.path.normpath(header_target).replace("\\", "/")
+            norm_expected = os.path.normpath(expected_target_file).replace("\\", "/")
+            if (
+                norm_header != norm_expected
+                and not norm_expected.endswith("/" + norm_header)
+                and not norm_header.endswith("/" + norm_expected)
+                and os.path.basename(norm_header) != os.path.basename(norm_expected)
+            ):
+                return None, f"Diff target path '{header_target}' does not match expected target file '{expected_target_file}'"
+
+    # 3. Parse hunks
+    diff_lines = diff_text.splitlines(keepends=True)
+    lines = original_text.splitlines(keepends=True) if original_text is not None else []
+
+    # Find first hunk
+    i = 0
+    while i < len(diff_lines) and not diff_lines[i].startswith("@@"):
+        i += 1
+
+    if i >= len(diff_lines):
+        return None, "Malformed unified diff: no hunk headers (@@ -start,count +start,count @@) found"
+
+    out: List[str] = []
+    orig_idx = 0
+
+    while i < len(diff_lines):
+        hunk_header = diff_lines[i]
+        if not hunk_header.startswith("@@"):
+            if not hunk_header.strip():
+                i += 1
+                continue
+            return None, f"Malformed diff: unexpected content outside hunk: '{hunk_header.strip()}'"
+
+        m = re.match(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@", hunk_header)
+        if not m:
+            return None, f"Malformed hunk header syntax: '{hunk_header.strip()}'"
+
+        hunk_start = int(m.group(1))
+        orig_start = max(0, hunk_start - 1)
+
+        if orig_idx > orig_start:
+            return None, f"Malformed diff: overlapping or out-of-order hunk at line {hunk_start}"
+
+        while orig_idx < orig_start and orig_idx < len(lines):
+            out.append(lines[orig_idx])
+            orig_idx += 1
+
+        if orig_idx < orig_start:
+            return None, f"Hunk start line {hunk_start} exceeds original file length ({len(lines)} lines)"
+
+        i += 1
+        while i < len(diff_lines) and not diff_lines[i].startswith("@@"):
+            dline = diff_lines[i]
+            prefix = dline[:1]
+            content = dline[1:]
+
+            if prefix == "+":
+                out.append(content)
+                i += 1
+            elif prefix == "-":
+                if orig_idx >= len(lines):
+                    return None, f"Mismatched context on deletion at line {orig_idx + 1}: expected '{content.rstrip()}', reached EOF"
+                orig_line_clean = lines[orig_idx].rstrip("\r\n")
+                dline_clean = content.rstrip("\r\n")
+                if orig_line_clean != dline_clean:
+                    return None, f"Mismatched context on deletion at line {orig_idx + 1}: expected '{dline_clean}', found '{orig_line_clean}'"
+                orig_idx += 1
+                i += 1
+            elif prefix == " ":
+                if orig_idx >= len(lines):
+                    return None, f"Mismatched context line at line {orig_idx + 1}: expected '{content.rstrip()}', reached EOF"
+                orig_line_clean = lines[orig_idx].rstrip("\r\n")
+                dline_clean = content.rstrip("\r\n")
+                if orig_line_clean != dline_clean:
+                    return None, f"Mismatched context line at line {orig_idx + 1}: expected '{dline_clean}', found '{orig_line_clean}'"
+                out.append(lines[orig_idx])
+                orig_idx += 1
+                i += 1
+            elif dline.startswith("\\"):
+                # e.g. \ No newline at end of file
+                i += 1
+            elif dline in ("\n", "\r\n"):
+                if orig_idx >= len(lines):
+                    return None, f"Mismatched context empty line at line {orig_idx + 1}: reached EOF"
+                orig_line_clean = lines[orig_idx].rstrip("\r\n")
+                if orig_line_clean != "":
+                    return None, f"Mismatched context empty line at line {orig_idx + 1}: found '{orig_line_clean}'"
+                out.append(lines[orig_idx])
+                orig_idx += 1
+                i += 1
+            else:
+                return None, f"Malformed diff line in hunk: '{dline.rstrip()}'"
+
+    while orig_idx < len(lines):
+        out.append(lines[orig_idx])
+        orig_idx += 1
+
+    return "".join(out), None
+
+
+def _apply_diff_to_text(original_text: str, diff_text: str, expected_target_file: Optional[str] = None) -> Optional[str]:
+    """
+    Applies a single-file unified diff to original text.
+    Returns the patched text on success, or None if the diff cannot be applied cleanly.
+    """
+    patched, err = apply_unified_diff(original_text, diff_text, expected_target_file=expected_target_file)
+    if err:
+        logger.warning(f"Diff application failed: {err}")
+    return patched
+
+
+def _sanitize_report_data(obj: Any) -> Any:
+    """Recursively scrub tokens, secrets, credentials, and passwords from report data."""
+    if isinstance(obj, str):
+        # Scrub Bearer tokens
+        s = re.sub(r'Bearer\s+[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_=]+(?:\.[A-Za-z0-9\-_.+/=]+)?', 'Bearer [REDACTED_TOKEN]', obj)
+        # Scrub URI passwords: e.g. postgresql://user:password@host:port/db
+        s = re.sub(r'(://[^:\s]+:)([^@\s]+)(@)', r'\1[REDACTED_SECRET]\3', s)
+        # Scrub explicit key/secret assignments
+        s = re.sub(r'(api[_-]?key|secret|password|token)\s*[:=]\s*["\']?[^"\'\s]+["\']?', r'\1: [REDACTED_SECRET]', s, flags=re.IGNORECASE)
+        return s
+    elif isinstance(obj, dict):
+        return {k: _sanitize_report_data(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_report_data(v) for v in obj]
+    return obj
+
+
+def _write_ci_report(
+    output_path: Optional[str] = None,
+    status: str = "success",
+    exit_code: int = 0,
+    repo_path: str = "",
+    analysis: Optional[Dict[str, Any]] = None,
+    patch_verification: Optional[Dict[str, Any]] = None,
+    failures: Optional[List[str]] = None,
+    error_message: Optional[str] = None,
+    sandbox_mode: Optional[str] = None,
+    patch_report: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Writes a machine-readable JSON execution and verification report with sanitized diagnostics (REQ-FUT-04)."""
+    if not output_path:
+        return
+    import json
+    import datetime
+
+    pv = patch_verification or patch_report or {"tested": False}
+    canonical_status = "success" if status in ("passed", "success") else status
+    report: Dict[str, Any] = {
+        "status": canonical_status,
+        "ci_status": canonical_status,
+        "exit_code": exit_code,
+        "pipeline_exit_code": exit_code,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "repo_path": os.path.abspath(repo_path) if repo_path else "",
+        "analysis": analysis or {},
+        "patch_verification": pv,
+        "failures": failures or ([] if not error_message else [error_message]),
+    }
+    if error_message and not pv.get("tested"):
+        report["error_message"] = error_message
+    if sandbox_mode and pv.get("tested"):
+        report["patch_verification"]["sandbox_mode"] = sandbox_mode
+
+    # Sanitize any credentials or sensitive tokens from report
+    sanitized_report = _sanitize_report_data(report)
+
+    try:
+        out_dir = os.path.dirname(os.path.abspath(output_path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(sanitized_report, f, indent=2, default=str)
+    except Exception as exc:
+        logger.warning(f"Failed to write CI report to '{output_path}': {exc}")
+
+
+def _render_ci_summary(
+    repo_path: str,
+    analysis: Dict[str, Any],
+    patch_report: Dict[str, Any],
+    failures: List[str],
+    status: str,
+    exit_code: int,
+) -> None:
+    """Renders human-readable summary of CI pipeline execution to console."""
+    print("=" * 65)
+    print(f"CI Target Repository   : {repo_path}")
+    print(f"Total Files Ingested   : {analysis.get('num_files', 0)}")
+    print(f"Total Chunks Extracted : {analysis.get('num_chunks', 0)}")
+    print(f"AST Chunks Count       : {analysis.get('ast_chunks_count', 0)} ({analysis.get('ast_ratio_percent', 0.0)}%)")
+    sec_info = analysis.get("security_scan", {})
+    sec_status = sec_info.get("status", "unknown").upper()
+    sec_thresh = sec_info.get("severity_threshold", "HIGH")
+    sec_pol = sec_info.get("security_policy", "strict").upper()
+    sec_cnt = sec_info.get("metrics", {}).get("total_findings", 0) if "metrics" in sec_info else sec_info.get("total_findings", 0)
+    print(f"Security Scan Status   : {sec_status} (Policy: {sec_pol}, Threshold: {sec_thresh}, Findings: {sec_cnt})")
+    if patch_report.get("tested"):
+        print("-" * 65)
+        print(f"Candidate Target File  : {patch_report.get('target_file')}")
+        print(f"Candidate Snapshot     : {patch_report.get('candidate_snapshot', 'patched_disposable_snapshot')}")
+        print(f"Language Runtime       : {patch_report.get('runtime')}")
+        print(f"Sandbox Mode           : {patch_report.get('sandbox_mode')} ({patch_report.get('docker_image')})")
+        print(f"Test Framework         : {patch_report.get('framework')}")
+        counts = patch_report.get("test_counts", {})
+        print(f"Tests Passed / Failed  : {counts.get('passed', 0)} passed / {counts.get('failed', 0)} failed ({counts.get('skipped', 0)} skipped)")
+        print(f"Behavioral Test Status : {str(patch_report.get('behavioral_status', 'N/A')).upper()} (Verified: {'YES' if patch_report.get('behavioral_verified') else 'NO'})")
+        print(f"Security Policy Gate   : {str(patch_report.get('security_policy', 'strict')).upper()} (Coverage: {str(patch_report.get('security_coverage', 'unknown')).upper()})")
+        print(f"Patch Security Status  : {str(patch_report.get('security_status', 'N/A')).upper()} (Approved: {'YES' if patch_report.get('security_approved') else 'NO'}, Failing Findings: {patch_report.get('failing_findings_count', 0)})")
+        print(f"Overall Patch Gate     : {'PASSED (Verified Repair)' if patch_report.get('verified') else 'FAILED (Unverified / Policy Rejection)'}")
+        print(f"Candidate Outcome      : {patch_report.get('outcome', 'unknown')}")
+    print("=" * 65)
+    if failures:
+        print(f"CI Execution Status    : {status.upper()} (Exit Code: {exit_code})")
+        print("CI Status              : FAILED")
+        for f in failures:
+            print(f"  [!] {f}")
+    else:
+        print(f"CI Execution Status    : PASSED (Exit Code: 0)")
+        print("CI Status              : PASSED")
+    print("=" * 65 + "\n")
+
+
+def run_ci_pipeline(
+    repo_path: str,
+    result: Any,
+    elapsed_seconds: float,
+    patch_file: Optional[str] = None,
+    target_file: Optional[str] = None,
+    runtime: Optional[str] = None,
+    sandbox_mode: str = "docker",
+    docker_image: str = "intellicodex-sandbox:latest",
+    output_json: Optional[str] = None,
+    patch: Optional[str] = None,
+    patch_content: Optional[str] = None,
+    security_threshold: str = "HIGH",
+    security_policy: str = "strict",
+) -> int:
+    """
+    Non-interactive pipeline entry point for CI/CD environments (REQ-FUT-04 / REQ-FUT-05).
+
+    Performs:
+    1. Static repository quality verification (file count, chunk extraction ratio, multi-layer security scan).
+    2. Optional candidate-patch testing inside isolated Docker sandbox on a disposable clone.
+    3. Candidate-patch security gate verification on disposable snapshot.
+    4. Produces machine-readable JSON report and human-readable summary.
+    5. Returns standard exit codes:
+       - 0: Success (all gates and patch tests passed)
+       - 1: Verification / Quality Failure (tests failed, security issues, zero tests, unverified repair)
+       - 2: Configuration / Infrastructure Error (missing files, Docker offline, invalid arguments, scanner crash)
+    """
+    print("\n" + "=" * 65)
+    print("[*] [CI Mode] IntelliCodeX Non-Interactive Pipeline Gate (REQ-FUT-04 / REQ-FUT-05)")
+    print("=" * 65)
+
+    ci_failures: List[str] = []
+    exit_code = EXIT_SUCCESS
+    status = "passed"
+    sec_policy_clean = (security_policy or "strict").lower().strip()
+
+    # 1. Static Repository Quality Checks
+    num_files = getattr(result, "num_files", 0)
+    num_chunks = getattr(result, "num_chunks", 0)
+    ast_chunks = getattr(result, "ast_chunks_count", 0)
+    ast_ratio = getattr(result, "ast_ratio_percent", None)
+    if ast_ratio is None or (ast_ratio == 0.0 and ast_chunks > 0 and num_chunks > 0):
+        ast_ratio = round((ast_chunks / num_chunks * 100.0), 2)
+    elif ast_ratio is None:
+        ast_ratio = 0.0
+
+    if num_files == 0:
+        ci_failures.append("No ingestible source files found in target repository.")
+    if num_chunks == 0:
+        ci_failures.append("Zero AST/code chunks generated during ingestion.")
+
+    try:
+        from core.security_scanner import run_security_scan
+        sec_res = run_security_scan(
+            repo_path,
+            repo_root=repo_path,
+            severity_threshold=security_threshold,
+            security_policy=sec_policy_clean,
+        )
+        if sec_res.get("status") == "error":
+            ci_failures.append(f"Security Scanner Infrastructure Error: {sec_res.get('error')}")
+            exit_code = EXIT_INFRA_OR_CONFIG_ERROR
+            status = "error"
+        elif sec_res.get("status") == "failed":
+            ci_failures.append(
+                f"Repository Security Gate Failed: {sec_res.get('failing_findings_count', 0)} finding(s) met or exceeded severity threshold '{security_threshold.upper()}'."
+            )
+        elif sec_res.get("status") == "incomplete":
+            ci_failures.append(f"Repository Security Gate Incomplete: {sec_res.get('coverage_warning')}")
+    except Exception as e:
+        logger.warning(f"CI security scan error: {e}")
+        sec_res = {
+            "status": "error",
+            "passed": False,
+            "error": str(e),
+            "security_policy": sec_policy_clean,
+            "severity_threshold": security_threshold.upper(),
+            "target": repo_path,
+            "metrics": {"total_findings": 0, "high_severity": 0, "medium_severity": 0, "low_severity": 0},
+            "findings": [],
+        }
+        ci_failures.append(f"Security Scanner Infrastructure Error: {e}")
+        exit_code = EXIT_INFRA_OR_CONFIG_ERROR
+        status = "error"
+
+    analysis_report = {
+        "num_files": num_files,
+        "num_chunks": num_chunks,
+        "ast_chunks_count": ast_chunks,
+        "ast_ratio_percent": ast_ratio,
+        "ingestion_duration_seconds": round(elapsed_seconds, 3),
+        "security_scan": sec_res,
+    }
+
+    patch_report: Dict[str, Any] = {"tested": False}
+
+    # 2. Candidate Patch Verification (if specified)
+    raw_patch = patch_content if patch_content is not None else (patch if patch is not None else patch_file)
+    if raw_patch is not None:
+        patch_report["tested"] = True
+        patch_report["sandbox_mode"] = sandbox_mode
+        patch_report["docker_image"] = docker_image
+
+        patch_str = None
+        if os.path.isfile(raw_patch):
+            try:
+                with open(raw_patch, "r", encoding="utf-8", errors="replace") as pf:
+                    patch_str = pf.read()
+            except Exception as exc:
+                msg = f"Failed to read patch file '{raw_patch}': {exc}"
+                ci_failures.append(msg)
+                exit_code = EXIT_INFRA_OR_CONFIG_ERROR
+                status = "error"
+                patch_report["verified"] = False
+                patch_report["outcome"] = "error"
+                patch_report["error_message"] = msg
+                _write_ci_report(output_json, status, exit_code, repo_path, analysis_report, patch_report, ci_failures)
+                _render_ci_summary(repo_path, analysis_report, patch_report, ci_failures, status, exit_code)
+                return exit_code
+        else:
+            if patch_file and not os.path.isfile(patch_file) and "\n" not in patch_file:
+                msg = f"Candidate patch file not found: '{patch_file}'"
+                ci_failures.append(msg)
+                exit_code = EXIT_INFRA_OR_CONFIG_ERROR
+                status = "error"
+                patch_report["verified"] = False
+                patch_report["outcome"] = "error"
+                patch_report["error_message"] = msg
+                _write_ci_report(output_json, status, exit_code, repo_path, analysis_report, patch_report, ci_failures)
+                _render_ci_summary(repo_path, analysis_report, patch_report, ci_failures, status, exit_code)
+                return exit_code
+            patch_str = raw_patch
+
+        patch_content = patch_str
+
+        # Resolve target file
+        resolved_target = target_file
+        if not resolved_target:
+            diff_match = re.search(r"^\+\+\+\s+[b/]*(.*?)(?:\t|\n|$)", patch_content, re.MULTILINE)
+            if not diff_match:
+                diff_match = re.search(r"^---\s+[a/]*(.*?)(?:\t|\n|$)", patch_content, re.MULTILINE)
+            if diff_match:
+                resolved_target = diff_match.group(1).strip()
+
+        if not resolved_target:
+            msg = "Missing required --target-file for candidate patch (could not infer from patch content)."
+            ci_failures.append(msg)
+            exit_code = EXIT_INFRA_OR_CONFIG_ERROR
+            status = "error"
+            patch_report["verified"] = False
+            patch_report["outcome"] = "error"
+            patch_report["error_message"] = msg
+            _write_ci_report(output_json, status, exit_code, repo_path, analysis_report, patch_report, ci_failures)
+            _render_ci_summary(repo_path, analysis_report, patch_report, ci_failures, status, exit_code)
+            return exit_code
+
+        from core.canonical_path import resolve_canonical_target_path
+        canon_tgt, disambig_err = resolve_canonical_target_path(repo_path, resolved_target)
+        if disambig_err:
+            ci_failures.append(disambig_err)
+            exit_code = EXIT_INFRA_OR_CONFIG_ERROR
+            status = "error"
+            patch_report["verified"] = False
+            patch_report["outcome"] = "error"
+            patch_report["error_message"] = disambig_err
+            _write_ci_report(output_json, status, exit_code, repo_path, analysis_report, patch_report, ci_failures)
+            _render_ci_summary(repo_path, analysis_report, patch_report, ci_failures, status, exit_code)
+            return exit_code
+        resolved_target = canon_tgt
+
+        target_abs = os.path.join(repo_path, resolved_target)
+        if not os.path.isfile(target_abs):
+            msg = f"Target file '{resolved_target}' not found in repository."
+            ci_failures.append(msg)
+            exit_code = EXIT_INFRA_OR_CONFIG_ERROR
+            status = "error"
+            patch_report["verified"] = False
+            patch_report["outcome"] = "error"
+            patch_report["error_message"] = msg
+            _write_ci_report(output_json, status, exit_code, repo_path, analysis_report, patch_report, ci_failures)
+            _render_ci_summary(repo_path, analysis_report, patch_report, ci_failures, status, exit_code)
+            return exit_code
+
+        # Detect diff format vs replacement code explicitly
+        has_diff_markers = bool(re.search(r"^(?:diff --git|--- |\+\+\+ |@@\s+-\d+)", patch_content, re.MULTILINE))
+        if has_diff_markers:
+            with open(target_abs, "r", encoding="utf-8", errors="replace") as tf:
+                orig_code = tf.read()
+            patched_code, diff_err = apply_unified_diff(orig_code, patch_content, expected_target_file=resolved_target)
+            if patched_code is None:
+                msg = f"Failed to cleanly apply candidate diff: {diff_err}"
+                ci_failures.append(msg)
+                exit_code = EXIT_VERIFICATION_FAILURE
+                status = "failed"
+                patch_report["verified"] = False
+                patch_report["outcome"] = "failed"
+                patch_report["error_message"] = msg
+                _write_ci_report(output_json, status, exit_code, repo_path, analysis_report, patch_report, ci_failures)
+                _render_ci_summary(repo_path, analysis_report, patch_report, ci_failures, status, exit_code)
+                return exit_code
+        else:
+            patched_code = patch_content
+
+        # 2a. Candidate Security Gate: scan the patched disposable snapshot
+        patch_report["candidate_snapshot"] = "patched_disposable_snapshot"
+        with tempfile.TemporaryDirectory(prefix="cand_snapshot_") as snap_dir:
+            snap_repo = os.path.join(snap_dir, "repo")
+            shutil.copytree(
+                repo_path,
+                snap_repo,
+                ignore=shutil.ignore_patterns(".git", "__pycache__", "node_modules", "target", "build", ".pytest_cache"),
+            )
+            snap_target_abs = os.path.join(snap_repo, resolved_target)
+            os.makedirs(os.path.dirname(snap_target_abs), exist_ok=True)
+            with open(snap_target_abs, "w", encoding="utf-8") as sf:
+                sf.write(patched_code)
+
+            from core.security_scanner import run_security_scan
+            try:
+                cand_sec_res = run_security_scan(
+                    snap_repo,
+                    repo_root=snap_repo,
+                    severity_threshold=security_threshold,
+                    security_policy=sec_policy_clean,
+                )
+            except Exception as sec_exc:
+                cand_sec_res = {
+                    "status": "error",
+                    "passed": False,
+                    "error": str(sec_exc),
+                    "security_policy": sec_policy_clean,
+                    "severity_threshold": security_threshold.upper(),
+                    "target": snap_repo,
+                    "coverage_status": "error",
+                    "incomplete_coverage": True,
+                    "coverage_warning": f"Candidate scanner infrastructure error: {sec_exc}",
+                    "metrics": {"total_findings": 0, "high_severity": 0, "medium_severity": 0, "low_severity": 0},
+                    "findings": [],
+                }
+
+        patch_report["security_scan"] = cand_sec_res
+        cand_sec_status = cand_sec_res.get("status", "error")
+        patch_report["security_status"] = cand_sec_status
+        patch_report["security_coverage"] = cand_sec_res.get("coverage_status", "unknown")
+        patch_report["security_policy"] = sec_policy_clean
+        cand_sec_approved = bool(cand_sec_status == "passed")
+        patch_report["security_approved"] = cand_sec_approved
+        patch_report["failing_findings_count"] = cand_sec_res.get("failing_findings_count", 0)
+
+        if cand_sec_status == "error":
+            msg = f"Candidate security scanner infrastructure error: {cand_sec_res.get('error', 'Scanner error')}"
+            ci_failures.append(msg)
+            exit_code = EXIT_INFRA_OR_CONFIG_ERROR
+            status = "error"
+            patch_report["behavioral_status"] = "untested"
+            patch_report["behavioral_verified"] = False
+            patch_report["verified"] = False
+            patch_report["overall_policy"] = "failed"
+            patch_report["outcome"] = "error"
+            patch_report["error_message"] = msg
+            _write_ci_report(output_json, status, exit_code, repo_path, analysis_report, patch_report, ci_failures)
+            _render_ci_summary(repo_path, analysis_report, patch_report, ci_failures, status, exit_code)
+            return exit_code
+        elif cand_sec_status == "failed":
+            ci_failures.append(
+                f"Candidate patch rejected by Security Gate: {cand_sec_res.get('failing_findings_count', 0)} finding(s) met or exceeded severity threshold '{security_threshold.upper()}'."
+            )
+        elif cand_sec_status == "incomplete":
+            ci_failures.append(
+                f"Candidate patch Security Gate Incomplete: {cand_sec_res.get('coverage_warning')}"
+            )
+
+        from core.sandbox_runner import SandboxRunner
+        effective_runtime = (runtime.lower() if runtime else SandboxRunner.detect_runtime(repo_path, resolved_target))
+        patch_report["target_file"] = resolved_target
+        patch_report["runtime"] = effective_runtime
+
+        if sandbox_mode == "docker" and not SandboxRunner._check_docker_available():
+            msg = "Infrastructure Error: Docker daemon is not running or unavailable for requested docker sandbox."
+            ci_failures.append(msg)
+            exit_code = EXIT_INFRA_OR_CONFIG_ERROR
+            status = "error"
+            patch_report["behavioral_status"] = "error"
+            patch_report["behavioral_verified"] = False
+            patch_report["verified"] = False
+            patch_report["overall_policy"] = "failed"
+            patch_report["outcome"] = "error"
+            patch_report["error_message"] = msg
+            _write_ci_report(output_json, status, exit_code, repo_path, analysis_report, patch_report, ci_failures)
+            _render_ci_summary(repo_path, analysis_report, patch_report, ci_failures, status, exit_code)
+            return exit_code
+
+        runner = SandboxRunner(sandbox_mode=sandbox_mode, docker_image=docker_image, is_admin=True)
+        test_res = runner.run_tests_with_patch(
+            repo_path=repo_path,
+            target_file=resolved_target,
+            patched_code=patched_code,
+            runtime=effective_runtime,
+        )
+
+        patch_report["framework"] = getattr(test_res, "framework", "unknown")
+        patch_report["duration_seconds"] = round(getattr(test_res, "duration_seconds", 0.0), 3)
+        patch_report["test_counts"] = {
+            "passed": getattr(test_res, "passed_count", 0),
+            "failed": getattr(test_res, "failed_count", 0),
+            "skipped": getattr(test_res, "skipped_count", 0),
+            "total": getattr(test_res, "total_count", 0),
+        }
+        patch_report["passed_tests"] = getattr(test_res, "passed_tests", [])
+        patch_report["failed_tests"] = getattr(test_res, "failed_tests", [])
+        patch_report["assertion_errors"] = [
+            re.sub(r"(token|secret|password|key)=\S+", r"\1=[REDACTED]", err, flags=re.IGNORECASE)[:250]
+            for err in getattr(test_res, "assertion_errors", [])
+        ][:5]
+
+        # Check infrastructure crash codes (-2: validation, -3: path traversal, -6: proc error, -8: docker offline)
+        if test_res.exit_code in (-2, -3, -6, -8):
+            msg = f"Sandbox execution infrastructure error ({test_res.exit_code}): {test_res.error_message}"
+            ci_failures.append(msg)
+            exit_code = EXIT_INFRA_OR_CONFIG_ERROR
+            status = "error"
+            patch_report["behavioral_status"] = "error"
+            patch_report["behavioral_verified"] = False
+            patch_report["verified"] = False
+            patch_report["overall_policy"] = "failed"
+            patch_report["outcome"] = "error"
+            patch_report["error_message"] = msg
+        else:
+            tests_passed_count = getattr(test_res, "passed_count", 0)
+            tests_failed_count = getattr(test_res, "failed_count", 0)
+            tests_skipped = bool(getattr(test_res, "skipped", False) or (getattr(test_res, "skipped_count", 0) > 0 and tests_passed_count == 0))
+
+            behavioral_verified = bool(
+                test_res.success
+                and not tests_skipped
+                and tests_passed_count > 0
+                and tests_failed_count == 0
+            )
+            if behavioral_verified:
+                behavioral_status = "passed"
+            elif tests_failed_count > 0 or (not test_res.success and not tests_skipped):
+                behavioral_status = "failed"
+            elif tests_skipped or tests_passed_count == 0:
+                behavioral_status = "skipped"
+            else:
+                behavioral_status = "failed"
+
+            patch_report["behavioral_status"] = behavioral_status
+            patch_report["behavioral_verified"] = behavioral_verified
+
+            is_verified = bool(behavioral_verified and cand_sec_approved)
+            patch_report["verified"] = is_verified
+            patch_report["overall_policy"] = "passed" if is_verified else "failed"
+
+            if is_verified:
+                patch_report["outcome"] = "passed"
+            elif behavioral_status == "failed":
+                patch_report["outcome"] = "behavioral_failed"
+                ci_failures.append(
+                    f"Candidate patch failed verification: {test_res.failed_count} test(s) failed."
+                )
+            elif behavioral_status == "skipped":
+                patch_report["outcome"] = "behavioral_skipped"
+                ci_failures.append(
+                    f"Candidate patch unverified: zero tests executed or all tests skipped/ignored. ({test_res.error_message or 'No runnable tests'})"
+                )
+            elif not cand_sec_approved:
+                if cand_sec_status == "incomplete":
+                    patch_report["outcome"] = "incomplete_coverage"
+                else:
+                    patch_report["outcome"] = "security_rejected"
+            else:
+                patch_report["outcome"] = "failed"
+                ci_failures.append(
+                    "Candidate patch failed verification: test execution was unsuccessful."
+                )
+
+    if exit_code != EXIT_INFRA_OR_CONFIG_ERROR:
+        if ci_failures:
+            status = "failed"
+            exit_code = EXIT_VERIFICATION_FAILURE
+        else:
+            status = "passed"
+            exit_code = EXIT_SUCCESS
+
+    _write_ci_report(output_json, status, exit_code, repo_path, analysis_report, patch_report, ci_failures)
+    _render_ci_summary(repo_path, analysis_report, patch_report, ci_failures, status, exit_code)
+    return exit_code
+
+
 VERSION = "1.0.0"
 
 
@@ -1678,15 +2680,96 @@ def main():
     parser.add_argument("--remove-hooks", action="store_true",
                         help="Uninstall Git background re-indexing hooks")
     parser.add_argument("--ci", action="store_true", default=False,
-                        help="Run in headless CI/CD pipeline mode (non-interactive, exit code 0 on success, 1 on failure)")
+                        help="Run in headless CI/CD pipeline mode (exit codes: 0=success, 1=verification failure, 2=config/infra error)")
+    parser.add_argument("--patch", dest="patch", type=str, default=None,
+                        help="Candidate patch content string or path to verify in isolated sandbox (REQ-FUT-04)")
+    parser.add_argument("--patch-file", dest="patch_file", type=str, default=None,
+                        help="Path to candidate patch file to verify in isolated sandbox (REQ-FUT-04)")
+    parser.add_argument("--target-file", type=str, default=None,
+                        help="Target file within repository that the candidate patch applies to (REQ-FUT-04)")
+    parser.add_argument("--runtime", type=str, default=None,
+                        help="Language runtime for test verification (python, javascript, typescript, java, c, cpp, go, rust)")
+    parser.add_argument("--sandbox", type=str, default="docker", choices=["docker", "local"],
+                        help="Sandbox execution mode (default: docker)")
+    parser.add_argument("--docker-image", type=str, default="intellicodex-sandbox:latest",
+                        help="Docker sandbox image name (default: intellicodex-sandbox:latest)")
+    parser.add_argument("--output-json", "--report-file", dest="output_json", type=str, default=None,
+                        help="Path to write machine-readable JSON execution and verification report")
     parser.add_argument("--repos", type=str, default=None,
                         help="Comma-separated repository paths for federated multi-repo analysis (REQ-FUT-08)")
+    parser.add_argument("--security", action="store_true", default=False,
+                        help="Run static security vulnerability & secret scan on target repository and exit (REQ-FUT-05)")
+    parser.add_argument("--security-threshold", type=str, default="HIGH", choices=["HIGH", "MEDIUM", "LOW", "high", "medium", "low"],
+                        help="Severity threshold for security gate failure (default: HIGH)")
+    parser.add_argument("--security-policy", type=str, default="strict", choices=["strict", "secrets_only", "STRICT", "SECRETS_ONLY"],
+                        help="Security gate policy: 'strict' (default, rejects incomplete AST coverage) or 'secrets_only' (REQ-FUT-05)")
     parser.add_argument("-v", "--version", action="version", version=f"IntelliCodeX CLI v{VERSION}")
     args = parser.parse_args()
 
-    if args.ci:
+    has_patch = bool(args.patch or args.patch_file)
+    if args.ci or has_patch:
         args.no_tui = True
         args.tui = False
+
+        # Input Pre-Validation (REQ-FUT-04)
+        if args.patch_file and not os.path.isfile(args.patch_file):
+            msg = f"Candidate patch file not found: '{args.patch_file}'"
+            print(f"[!] Configuration Error: {msg}")
+            _write_ci_report(
+                args.output_json,
+                status="error",
+                exit_code=EXIT_INFRA_OR_CONFIG_ERROR,
+                repo_path=args.repo_path,
+                error_message=msg,
+                patch_verification={"tested": True, "verified": False, "outcome": "error", "error_message": msg},
+            )
+            return EXIT_INFRA_OR_CONFIG_ERROR
+
+        if args.runtime and args.runtime.lower() not in ("python", "javascript", "typescript", "java", "c", "cpp", "go", "rust"):
+            msg = f"Unsupported runtime: '{args.runtime}'. Supported: python, javascript, typescript, java, c, cpp, go, rust."
+            print(f"[!] Configuration Error: {msg}")
+            _write_ci_report(
+                args.output_json,
+                status="error",
+                exit_code=EXIT_INFRA_OR_CONFIG_ERROR,
+                repo_path=args.repo_path,
+                error_message=msg,
+                patch_verification={"tested": has_patch, "verified": False, "outcome": "error", "error_message": msg},
+            )
+            return EXIT_INFRA_OR_CONFIG_ERROR
+
+        if has_patch and args.sandbox == "docker":
+            from core.sandbox_runner import SandboxRunner
+            if not SandboxRunner._check_docker_available():
+                msg = "Infrastructure Error: Docker daemon is not running or unavailable"
+                print(f"[!] {msg}")
+                _write_ci_report(
+                    args.output_json,
+                    status="error",
+                    exit_code=EXIT_INFRA_OR_CONFIG_ERROR,
+                    repo_path=args.repo_path,
+                    error_message=msg,
+                    sandbox_mode="docker",
+                    patch_verification={"tested": True, "verified": False, "outcome": "error", "error_message": msg, "sandbox_mode": "docker"},
+                )
+                return EXIT_INFRA_OR_CONFIG_ERROR
+
+        is_remote_repo = (
+            args.repo_path.startswith("http://")
+            or args.repo_path.startswith("https://")
+            or args.repo_path.startswith("git@")
+        )
+        if not is_remote_repo and not os.path.exists(args.repo_path):
+            msg = f"Repository path invalid / not found: '{args.repo_path}'"
+            print(f"[!] Configuration Error: {msg}")
+            _write_ci_report(
+                args.output_json,
+                status="error",
+                exit_code=EXIT_INFRA_OR_CONFIG_ERROR,
+                repo_path=args.repo_path,
+                error_message=msg,
+            )
+            return EXIT_INFRA_OR_CONFIG_ERROR
 
     if args.benchmark:
         target = resolve_repo_path(args.repo_path, full_history=args.full_history)
@@ -1704,6 +2787,22 @@ def main():
         print(f"RAM Memory Impact      : {report.memory_used_mb} MB")
         print("=" * 65)
         return 0
+
+    if args.security:
+        target = resolve_repo_path(args.repo_path, full_history=args.full_history)
+        threshold = args.security_threshold.upper()
+        policy = args.security_policy.lower().strip()
+        print(f"\n[*] Running IntelliCodeX Security Vulnerability & Secret Scan on '{target}' (Policy: {policy.upper()}, Threshold: {threshold})...")
+        from core.security_scanner import run_security_scan, format_security_report
+        sec_res = run_security_scan(target, repo_root=target, severity_threshold=threshold, security_policy=policy)
+        report_md = format_security_report(sec_res)
+        print("\n" + report_md + "\n")
+        if args.output_json:
+            sanitized = _sanitize_report_data(sec_res)
+            with open(args.output_json, "w", encoding="utf-8") as jf:
+                json.dump(sanitized, jf, indent=2)
+            print(f"[*] Security scan report written to: {args.output_json}")
+        return 0 if sec_res.get("status") == "passed" else 1
 
     # Handle direct hook CLI flags if requested
     if args.setup_hooks:
@@ -1797,12 +2896,48 @@ def main():
         for c in workspace.contracts:
             print(f"  - [{c.consumer_repo}] -> [{c.producer_repo}]: {c.endpoint_or_symbol} ({c.producer_file})")
 
+        def _render_multi_repo_result(res: dict):
+            render_markdown_panel(res.get("answer", ""), title="Multi-Repository Answer")
+            obs = res.get("observed_facts", {})
+            eps = obs.get("endpoint_definitions", [])
+            calls = obs.get("client_call_sites", [])
+            if eps or calls:
+                print("\n[+] Observed Code Facts:")
+                for ep in eps:
+                    print(f"  - Endpoint: {ep['endpoint']} [{ep['repo_id']}:{ep['file']}:{ep['line']}] (symbol: {ep['symbol']})")
+                for cs in calls:
+                    print(f"  - Client Call: {cs['endpoint_or_pattern']} [{cs['repo_id']}:{cs['file']}:{cs['line']}]")
+            
+            inferred = res.get("inferred_relationships", [])
+            if inferred:
+                print("\n[?] Inferred Cross-Repository Relationships:")
+                for rel in inferred:
+                    print(f"  - {rel['consumer_repo']} -> {rel['producer_repo']}: {rel['endpoint_or_symbol']} (basis: {rel.get('basis', 'candidate')})")
+            
+            impact = res.get("candidate_impact_analysis", {})
+            rev_files = impact.get("candidate_review_files", [])
+            if rev_files:
+                print("\n[*] Candidate Impact Analysis (Files requiring review):")
+                for rf in rev_files:
+                    print(f"  - [{rf['repo_id']}] {rf['file']} ({rf['role']})")
+                if impact.get("disclaimer"):
+                    print(f"  Note: {impact['disclaimer']}")
+
+            chunks = res.get("retrieved_chunks", [])
+            if chunks:
+                print(f"\nSources ({len(chunks)}):")
+                for c in chunks:
+                    print(f"  - {c.get('citation')} (score={c.get('score', 0):.3f})")
+            
+            snaps = res.get("snapshot_info", {})
+            if snaps:
+                snap_strs = [f"{r}: {info.get('snapshot_id', 'unknown')}" for r, info in snaps.items()]
+                print(f"\nFreshness: {', '.join(snap_strs)}")
+            print()
+
         if args.query:
             res = workspace.ask(args.query, llm=llm)
-            render_markdown_panel(res.get("answer", ""), title="Multi-Repository Answer")
-            if res.get("retrieved_chunks"):
-                cits = [c["citation"] for c in res["retrieved_chunks"]]
-                print(f"Sources: {', '.join(cits)}")
+            _render_multi_repo_result(res)
             return 0
 
         # Interactive loop for multi-repo
@@ -1821,10 +2956,7 @@ def main():
                         print(f"  - {c.consumer_repo} -> {c.producer_repo}: {c.endpoint_or_symbol} (Producer: {c.producer_file}:{c.producer_line})")
                     continue
                 res = workspace.ask(q, llm=llm)
-                render_markdown_panel(res.get("answer", ""), title="Multi-Repository Answer")
-                if res.get("retrieved_chunks"):
-                    cits = [c["citation"] for c in res["retrieved_chunks"]]
-                    print(f"Sources: {', '.join(cits)}")
+                _render_multi_repo_result(res)
             except (KeyboardInterrupt, EOFError):
                 print("\n[*] Exiting Multi-Repository Session.")
                 return 0
@@ -1888,12 +3020,18 @@ def main():
                 dep_graph=result.graph,
                 source_files=getattr(result, "source_files", None),
                 llm=llm,
+                repo_id=os.path.basename(current_path),
+                snapshot_id="cli_session",
             )
             render_markdown_panel(arch_report.format_markdown(), title="Architecture Optimization Report")
             return 0
 
         if bq.lower().startswith("explain:") or bq.lower().startswith("explain "):
             execute_explain_command(engine, result, bq, active_file_filter=None)
+            return 0
+
+        if bq.lower().startswith("graph:") or bq.lower().startswith("graph "):
+            execute_graph_command(result, bq)
             return 0
 
         # Parse @mention from batch query as well
@@ -1932,40 +3070,22 @@ def main():
         print(f"[*] [Time Consumed]: {format_time_consumed(total_batch)} (Retrieval: {format_time_consumed(response.get('retrieval_seconds', 0.0))}, Generation: {format_time_consumed(response.get('llm_seconds', 0.0))})\n")
         return 0
 
-    # Headless CI Pipeline Gate (REQ-FUT-04)
-    if args.ci:
-        print("\n[*] [CI Mode] Running Automated Quality, AST Indexing & Security Verification...")
-        ci_failures = []
-        if result.num_files == 0:
-            ci_failures.append("No ingestible source files found in target repository.")
-        if result.num_chunks == 0:
-            ci_failures.append("Zero AST/code chunks generated during ingestion.")
-
-        # Static security audit
-        try:
-            from core.security_scanner import run_bandit_scan
-            sec_res = run_bandit_scan(current_path)
-            high_sev = sec_res.get("metrics", {}).get("high_severity", 0)
-            if high_sev > 0:
-                ci_failures.append(f"Security Gate Failed: {high_sev} HIGH severity vulnerability/vulnerabilities detected.")
-        except Exception as e:
-            logger.warning(f"CI security scan skipped: {e}")
-
-        print("=" * 65)
-        print(f"CI Target              : {current_path}")
-        print(f"Total Files Ingested   : {result.num_files}")
-        print(f"Total Chunks Extracted : {result.num_chunks}")
-        print(f"AST Chunks Count       : {getattr(result, 'ast_chunks_count', 0)} ({getattr(result, 'ast_ratio_percent', 0)}%)")
-        print(f"Ingestion Duration     : {elapsed:.2f}s")
-        if ci_failures:
-            print(f"CI Status              : FAILED")
-            for f in ci_failures:
-                print(f"  [!] {f}")
-            print("=" * 65)
-            return 1
-        print("CI Status              : PASSED")
-        print("=" * 65)
-        return 0
+    # Headless CI Pipeline Gate & Patch Verification (REQ-FUT-04)
+    if args.ci or args.patch or args.patch_file:
+        return run_ci_pipeline(
+            repo_path=current_path,
+            result=result,
+            elapsed_seconds=elapsed,
+            patch=args.patch,
+            patch_file=args.patch_file,
+            target_file=args.target_file,
+            runtime=args.runtime,
+            sandbox_mode=args.sandbox,
+            docker_image=args.docker_image,
+            output_json=args.output_json,
+            security_threshold=args.security_threshold.upper(),
+            security_policy=args.security_policy.lower().strip(),
+        )
 
     def on_auto_reindex(new_result, changed_paths, elapsed_s):
         nonlocal result, engine
@@ -2007,6 +3127,7 @@ def main():
             debounce_delay=0.5,
         )
         if watcher.start():
+            atexit.register(watcher.stop)
             print("[*] Real-Time Watcher: Active (background auto-reindex enabled)")
     except Exception:
         pass
@@ -2147,6 +3268,8 @@ def main():
                 dep_graph=result.graph,
                 source_files=getattr(result, "source_files", None),
                 llm=llm,
+                repo_id=os.path.basename(current_path),
+                snapshot_id="cli_session",
             )
             render_markdown_panel(arch_report.format_markdown(), title="Architecture Optimization Report")
             print(f"[*] [Time Consumed]: Architecture analysis in {format_time_consumed(time.perf_counter() - t_arch)}\n")
@@ -2163,20 +3286,61 @@ def main():
             org_store.ingest_repository(current_path)
             res = org_store.ask(target_q, llm=llm)
             render_markdown_panel(res.get("answer", ""), title="Organizational Memory Rationale")
+            if res.get("retrieved_records"):
+                print("[*] Retrieved Organizational Records:")
+                for rec in res["retrieved_records"]:
+                    print(f"  - {rec.get('citation')} [{rec.get('type')}, status: {rec.get('verification_status')}, scope: {rec.get('scope')}]: {rec.get('title')}")
             if res.get("citations"):
                 print(f"Historical Citations: {', '.join(res['citations'])}")
             print(f"[*] [Time Consumed]: Org memory query in {format_time_consumed(time.perf_counter() - t_org)}\n")
             continue
 
-        if query.lower() in ("adrs", "adr", "decisions"):
-            from core.org_memory import ADRMiner
-            found_adrs = ADRMiner.mine_adrs(current_path)
-            if not found_adrs:
-                print("[*] No Architectural Decision Records (ADRs) found in repository.\n")
+        if query.lower().startswith("decision:") or query.lower().startswith("decision "):
+            raw_dec = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+            if "|" in raw_dec:
+                dec_title, dec_content = [p.strip() for p in raw_dec.split("|", 1)]
             else:
-                print(f"[*] Found {len(found_adrs)} Architectural Decision Record(s):")
-                for a in found_adrs:
-                    print(f"  - [{a.metadata.get('status', 'Accepted')}] {a.title} ({a.metadata.get('file_path', '')})")
+                dec_title = raw_dec
+                dec_content = raw_dec
+
+            if not dec_title:
+                print("[!] Usage: decision: <title> | <rationale and context>\n")
+                continue
+
+            from core.org_memory import OrgMemoryStore
+            r_id = os.path.basename(current_path)
+            org_store = OrgMemoryStore(repo_id=r_id, embedder=embedder)
+            item = org_store.record_decision(
+                title=dec_title,
+                content=dec_content,
+                author="cli_developer",
+                repo_id=r_id,
+                scope="repo_private",
+            )
+            print(f"\n[*] Recorded Developer Decision: {item.citation}")
+            print(f"  - Title: {item.title}")
+            print(f"  - Verification: {item.verification_status} (developer approved)")
+            print(f"  - Scope: {item.scope} (repository private)\n")
+            continue
+
+        if query.lower() in ("adrs", "adr", "decisions"):
+            from core.org_memory import ADRMiner, OrgMemoryStore
+            found_adrs = ADRMiner.mine_adrs(current_path)
+            r_id = os.path.basename(current_path)
+            org_store = OrgMemoryStore(repo_id=r_id, embedder=embedder)
+            custom_decisions = [it for it in org_store.items if it.memory_type == "decision" and it.state == "active"]
+
+            if not found_adrs and not custom_decisions:
+                print("[*] No Architectural Decision Records (ADRs) or recorded decisions found in repository.\n")
+            else:
+                if found_adrs:
+                    print(f"[*] Found {len(found_adrs)} Architectural Decision Record(s):")
+                    for a in found_adrs:
+                        print(f"  - [{a.metadata.get('status', 'Accepted')}] {a.title} ({a.metadata.get('file_path', '')})")
+                if custom_decisions:
+                    print(f"\n[*] Found {len(custom_decisions)} Recorded Decision(s):")
+                    for d in custom_decisions:
+                        print(f"  - {d.citation} [{d.verification_status}]: {d.title}")
                 print()
             continue
 
@@ -2230,6 +3394,18 @@ def main():
             render_repos_table(available, current_path)
             continue
 
+        # --- repo remove <number|name>: unregister repository ---
+        if (query.strip() in ("repo remove", "repo:remove") or
+            query.startswith("repo remove ") or query.startswith("repo:remove ")):
+            if query.startswith("repo remove "):
+                target_arg = query[len("repo remove "):]
+            elif query.startswith("repo:remove "):
+                target_arg = query[len("repo:remove "):]
+            else:
+                target_arg = ""
+            handle_repo_remove(target_arg, current_path, confirm_fn=input)
+            continue
+
         if (query.startswith("repo ") or query.startswith("repo:") or 
             query.startswith("clone ") or query.startswith("repo-clone ") or
             query.startswith("use ") or query.startswith("ingest ") or 
@@ -2265,6 +3441,11 @@ def main():
             print(f"[*] Processing repository target: {target}")
             try:
                 new_path = resolve_repo_path(target, full_history=full_hist)
+                try:
+                    from core.persistence import clear_unregistered_repo
+                    clear_unregistered_repo(new_path)
+                except Exception:
+                    pass
                 print(f"[*] Parsing files and generating embeddings for '{new_path}'...")
                 t_repo = time.perf_counter()
                 new_result = ingest_repository(new_path, embedder, skip_overload_stubs=skip_overload_stubs)
@@ -2479,19 +3660,22 @@ def main():
                 print(f"\n{doc_md}\n")
             continue
 
-        # Security Scanner: security:<file>
+        # Security Scanner: security:<file> (REQ-FUT-05)
         if query.lower().startswith("security:") or query.lower().startswith("security "):
             sec_target = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
-            from core.security_scanner import run_bandit_scan, format_security_report
-            abs_sec = os.path.join(current_path, sec_target) if not os.path.isabs(sec_target) else sec_target
+            from core.security_scanner import run_security_scan, format_security_report
+            if sec_target in ("", ".", "repo", "all"):
+                abs_sec = current_path
+            else:
+                abs_sec = os.path.join(current_path, sec_target) if not os.path.isabs(sec_target) else sec_target
             if not os.path.exists(abs_sec):
                 print(f"[!] Path not found: {sec_target}\n")
                 continue
-            print(f"[*] Running Bandit AST security scan on '{sec_target}'...")
-            sec_result = run_bandit_scan(abs_sec)
+            print(f"[*] Running multi-layer security & secret scan on '{sec_target or '.'}'...")
+            sec_result = run_security_scan(abs_sec, repo_root=current_path, severity_threshold="HIGH")
             sec_report = format_security_report(sec_result, llm=engine.llm)
             if HAS_RICH and console:
-                console.print(Panel(sec_report, title=f"[bold red]Security Scan: {sec_target}[/bold red]", border_style="red"))
+                console.print(Panel(sec_report, title=f"[bold red]Security Scan: {sec_target or '.'}[/bold red]", border_style="red"))
             else:
                 print(f"\n{sec_report}\n")
             continue
@@ -2518,35 +3702,220 @@ def main():
             
             # Handle @file syntax in fix/update commands
             clean_err, mention_f = parse_mention(err_input)
+            from core.canonical_path import resolve_canonical_target_path, discover_relevant_tests
+            all_indexed = [c.file_path for c in result.store.chunks] if hasattr(result, "store") and result.store and hasattr(result.store, "chunks") else None
+
+            # If user didn't use @file but passed a filename or file path directly
+            if not mention_f and err_input:
+                raw_cand = err_input.lstrip("@").strip()
+                c_test, _ = resolve_canonical_target_path(current_path, raw_cand, candidate_files=all_indexed)
+                if c_test:
+                    mention_f = c_test
+                    clean_err = ""
+
+            repair_extra_files = None
+            repair_contract_type = "existing_tests"
+
             if mention_f:
-                if clean_err and clean_err.strip():
-                    err_input = f"File modification instruction for {mention_f}: {clean_err.strip()}"
+                canon_path, disambig_err = resolve_canonical_target_path(current_path, mention_f, candidate_files=all_indexed)
+                if disambig_err:
+                    if HAS_RICH and console:
+                        console.print(f"\n[bold red][!] Target File Error:[/bold red]\n{disambig_err}\n")
+                    else:
+                        print(f"\n[!] Target File Error:\n{disambig_err}\n")
+                    continue
+                mention_f = canon_path
+                print(f"[*] Target resolved to canonical path: '{mention_f}'")
+
+                from core.sandbox_runner import SandboxRunner
+                sb_runner = SandboxRunner(
+                    sandbox_mode=getattr(args, "sandbox", "docker"),
+                    docker_image=getattr(args, "docker_image", "intellicodex-sandbox:latest"),
+                    allow_local_sandbox=True,
+                    is_admin=True,
+                )
+
+                # Discover existing relevant tests for target file
+                discovered_tests = discover_relevant_tests(current_path, mention_f)
+                if not discovered_tests:
+                    from core.test_proposer import TestProposer, format_test_proposal_card
+
+                    msg_no_tests = (
+                        f"[*] No existing tests discovered for '{mention_f}'.\n"
+                        f"[*] Retrieving repository specifications, docstrings, README, and call sites..."
+                    )
+                    if HAS_RICH and console:
+                        console.print(f"\n[bold yellow]{msg_no_tests}[/bold yellow]\n")
+                    else:
+                        print(f"\n{msg_no_tests}\n")
+
+                    proposer = TestProposer()
+                    user_clarif = None
+                    proposal_accepted = False
+                    proposal = None
+
+                    while True:
+                        analysis = proposer.analyze_contract(current_path, mention_f, user_clarification=user_clarif)
+                        if analysis.is_ambiguous:
+                            msg_ambig = f"[!] SPECIFICATION AMBIGUITY DETECTED: {analysis.ambiguity_reason}"
+                            q_str = f"[*] Clarification Needed: {analysis.clarification_question}"
+                            if HAS_RICH and console:
+                                console.print(f"\n[bold red]{msg_ambig}[/bold red]")
+                                console.print(f"[bold cyan]{q_str}[/bold cyan]")
+                                for idx, opt in enumerate(analysis.clarification_options, 1):
+                                    console.print(f"    [yellow][{idx}][/yellow] {opt}")
+                            else:
+                                print(f"\n{msg_ambig}")
+                                print(q_str)
+                                for idx, opt in enumerate(analysis.clarification_options, 1):
+                                    print(f"    [{idx}] {opt}")
+
+                            clarif_prompt = f"Please select option (1-{len(analysis.clarification_options)}) or enter clarification: "
+                            try:
+                                if session is not None and use_tui:
+                                    ans = session.prompt(clarif_prompt).strip()
+                                else:
+                                    ans = input(clarif_prompt).strip()
+                            except (EOFError, KeyboardInterrupt):
+                                ans = ""
+
+                            if ans.isdigit() and 1 <= int(ans) <= len(analysis.clarification_options):
+                                user_clarif = analysis.clarification_options[int(ans) - 1]
+                            else:
+                                user_clarif = ans.strip()
+
+                            if not user_clarif:
+                                msg_abort = "[!] Specification ambiguity unresolved. Aborting to avoid inventing ungrounded assertions."
+                                if HAS_RICH and console:
+                                    console.print(f"\n[bold red]{msg_abort}[/bold red]\n")
+                                else:
+                                    print(f"\n{msg_abort}\n")
+                                break
+                            print(f"[*] Specification clarified as: '{user_clarif}'")
+                            continue
+
+                        # Propose candidate tests and validate inside Docker
+                        print(f"[*] Generating candidate test contract grounded in identified sources...")
+                        proposal = proposer.generate_candidate_tests(current_path, mention_f, analysis, llm=llm)
+                        print(f"[*] Validating candidate tests inside Docker sandbox ({getattr(args, 'docker_image', 'intellicodex-sandbox:latest')})...")
+                        val = proposer.validate_proposed_tests_in_docker(sb_runner, current_path, proposal)
+
+                        card_str = format_test_proposal_card(proposal)
+                        print(card_str)
+                        print("\n--- PROPOSED CANDIDATE TEST CODE (DISPOSABLE STORAGE) ---")
+                        print(proposal.test_code)
+                        print("---------------------------------------------------------\n")
+
+                        if not val.is_runnable or val.harness_errors:
+                            msg_harness = (
+                                f"[!] Proposed tests failed Docker harness validation. "
+                                f"Harness / import errors detected: {', '.join(val.harness_errors)}. "
+                                f"Proposed tests cannot be used as an accepted contract."
+                            )
+                            if HAS_RICH and console:
+                                console.print(f"[bold red]{msg_harness}[/bold red]\n")
+                            else:
+                                print(f"{msg_harness}\n")
+                            break
+
+                        # Review prompt for user
+                        prompt_choice = "Candidate Test Action ([a]ccept & proceed to repair, [r]eject, [c]larify): "
+                        try:
+                            if session is not None and use_tui:
+                                user_act = session.prompt(prompt_choice).strip().lower()
+                            else:
+                                user_act = input(prompt_choice).strip().lower()
+                        except (EOFError, KeyboardInterrupt):
+                            user_act = "r"
+
+                        if user_act in ("c", "clarify"):
+                            c_prompt = "Enter additional contract clarification / specification detail: "
+                            try:
+                                if session is not None and use_tui:
+                                    user_clarif = session.prompt(c_prompt).strip()
+                                else:
+                                    user_clarif = input(c_prompt).strip()
+                            except (EOFError, KeyboardInterrupt):
+                                user_clarif = None
+                            continue
+                        elif user_act in ("a", "accept", "y", "yes"):
+                            proposal_accepted = True
+                            proposal.accepted = True
+                            proposal.frozen = True
+                            print(f"[✓] Candidate test contract accepted and FROZEN at '{proposal.disposable_path}'.")
+                            break
+                        else:
+                            print(f"[*] Candidate test proposal rejected. Proposed tests retained at '{proposal.disposable_path}' without modifying repository.")
+                            break
+
+                    if not proposal_accepted or not proposal:
+                        continue
+
+                    target_dir = os.path.dirname(mention_f)
+                    target_base = os.path.splitext(os.path.basename(mention_f))[0]
+                    rel_test_file = os.path.join(target_dir, f"test_{target_base}.py").replace("\\", "/") if target_dir else f"test_{target_base}.py"
+                    repair_extra_files = {rel_test_file: proposal.test_code}
+                    repair_contract_type = "ai_generated_proposal"
+                    discovered_tests = [f"{rel_test_file} (AI-Generated Proposal)"]
                 else:
-                    err_input = f"Fix all bugs, incorrect operators, and logic errors in {mention_f}"
-            elif err_input.startswith("@"):
-                err_input = err_input.lstrip("@").strip()
-            
-            # If err_input points directly to a file path
-            abs_check = os.path.join(current_path, err_input) if not os.path.isabs(err_input) else err_input
-            if os.path.isfile(abs_check):
-                try:
-                    with open(abs_check, "r", encoding="utf-8", errors="ignore") as f:
-                        file_body = f.read()
-                    err_input = f"Find and fix all bugs in file '{err_input}':\n{file_body[:2000]}"
-                    if not mention_f:
-                        mention_f = err_input
-                except Exception:
-                    pass
+                    print(f"[*] Discovered {len(discovered_tests)} relevant test file(s): {', '.join(discovered_tests)}")
+
+                # Run baseline test suite inside Docker sandbox without requiring user to paste failures
+                print(f"[*] Running baseline test suite inside Docker sandbox for '{mention_f}'...")
+                baseline_res = sb_runner.run_baseline_tests(current_path, mention_f, extra_files=repair_extra_files)
+
+                if baseline_res.success and baseline_res.passed_count > 0 and baseline_res.failed_count == 0:
+                    if not clean_err or not clean_err.strip():
+                        msg_all_pass = (
+                            f"[✓] BASELINE: All {baseline_res.passed_count} discovered tests for '{mention_f}' are currently PASSING in Docker sandbox.\n"
+                            f"[*] No baseline failure detected. If you want to modify functionality, please provide a prompt or failing test specification."
+                        )
+                        if HAS_RICH and console:
+                            console.print(f"\n[bold green]{msg_all_pass}[/bold green]\n")
+                        else:
+                            print(f"\n{msg_all_pass}\n")
+                        continue
+                    else:
+                        err_input = f"File modification instruction for {mention_f}: {clean_err.strip()}"
+                else:
+                    print(f"[*] Baseline test failure captured: {baseline_res.failed_count} failed, {baseline_res.passed_count} passed.")
+                    for ft in baseline_res.failed_tests:
+                        print(f"    - [FAIL] {ft}")
+                    for pt in baseline_res.passed_tests:
+                        print(f"    - [PASS] {pt}")
+
+                    pass_block = "\n".join(f"- {pt}" for pt in baseline_res.passed_tests) if baseline_res.passed_tests else "- None (all tests failing)"
+                    fail_block = "\n".join(f"- {ft}" for ft in baseline_res.failed_tests) if baseline_res.failed_tests else "- Baseline test failure"
+                    assert_block = "\n".join(f"- {ae}" for ae in baseline_res.assertion_errors) if baseline_res.assertion_errors else f"- {baseline_res.error_message or 'Assertion failed'}"
+
+                    err_input = (
+                        f"Baseline test failures detected in Docker sandbox for '{mention_f}':\n"
+                        f"Discovered Test Files: {', '.join(discovered_tests)}\n\n"
+                        f"Failed Tests:\n{fail_block}\n\n"
+                        f"Passing Tests (MUST PRESERVE - DO NOT BREAK):\n{pass_block}\n\n"
+                        f"Assertion Errors:\n{assert_block}\n\n"
+                        f"Test Traceback / Output Details:\n{baseline_res.traceback_summary}\n"
+                    )
+                    if clean_err and clean_err.strip():
+                        err_input += f"\nUser Instruction / Additional Notes: {clean_err.strip()}\n"
+            else:
+                from core.sandbox_runner import SandboxRunner
+                sb_runner = SandboxRunner(
+                    sandbox_mode=getattr(args, "sandbox", "docker"),
+                    docker_image=getattr(args, "docker_image", "intellicodex-sandbox:latest"),
+                    allow_local_sandbox=True,
+                    is_admin=True,
+                )
 
             print("\n[*] Analyzing error report & localizing bug root cause...")
             t_fix = time.perf_counter()
-            # CLI mode: admin=True, allow_local_sandbox=True
             patch_engine = PatchEngine(
                 result.store, 
                 embedder, 
                 llm, 
                 graph=result.graph, 
                 repo_path=current_path,
+                sandbox_runner=sb_runner,
                 is_admin=True,
                 allow_local_sandbox=True
             )
@@ -2561,10 +3930,32 @@ def main():
                 verify_in_sandbox=True,
                 max_iterations=3,
                 progress_callback=_on_fix_progress,
+                extra_files=repair_extra_files,
+                contract_type=repair_contract_type,
             )
             fix_time = time.perf_counter() - t_fix
 
             render_patch_card(patch_rec, fix_time)
+
+            is_verified = patch_rec.get("sandbox_validation", {}).get("verified", False)
+            if not is_verified or patch_rec.get("status") != "verified":
+                failed_tests = patch_rec.get("sandbox_validation", {}).get("test_result", {}).get("failed_tests", [])
+                err_summary = patch_rec.get("sandbox_validation", {}).get("test_result", {}).get("traceback_summary", "")
+                unresolved_msg = (
+                    f"\n[!] REPAIR UNRESOLVED: Candidate patch exhausted all refinement attempts without passing sandbox test verification."
+                )
+                if HAS_RICH and console:
+                    console.print(f"[bold yellow]{unresolved_msg}[/bold yellow]")
+                    if failed_tests:
+                        console.print(f"    [red]Remaining Failing Tests:[/red] {', '.join(failed_tests)}")
+                    if err_summary:
+                        console.print(f"    [dim]Failure Traceback Summary:\n{err_summary[:400]}[/dim]\n")
+                else:
+                    print(unresolved_msg)
+                    if failed_tests:
+                        print(f"    Remaining Failing Tests: {', '.join(failed_tests)}")
+                    if err_summary:
+                        print(f"    Failure Traceback Summary:\n{err_summary[:400]}\n")
 
             if patch_rec["status"] != "failed" and patch_rec.get("git_diff"):
                 target_rel = patch_rec.get("target_file", "")
@@ -2583,6 +3974,7 @@ def main():
                         patched_code=patched_code,
                         explanation=explanation,
                         mode=current_mode,
+                        verification_info=patch_rec.get("sandbox_validation", {}),
                     )
                     prompt_label = "Choose action ([a]pprove & commit, [c]ancel, [u] toggle view): "
                     try:
@@ -2597,6 +3989,19 @@ def main():
                         current_mode = "unified" if current_mode == "side_by_side" else "side_by_side"
                         continue
                     elif action in ("a", "approve", "y", "yes"):
+                        is_verified = patch_rec.get("sandbox_validation", {}).get("verified", False)
+                        test_status = patch_rec.get("sandbox_validation", {}).get("test_status", "unknown")
+                        if not is_verified or patch_rec.get("status") != "verified":
+                            msg_reject = (
+                                f"[!] APPROVAL REJECTED: Candidate patch failed behavioral verification "
+                                f"(status: {test_status}). Normal approval cannot apply an unverified candidate."
+                            )
+                            if HAS_RICH and console:
+                                console.print(f"\n[bold red]{msg_reject}[/bold red]\n")
+                            else:
+                                print(f"\n{msg_reject}\n")
+                            break
+
                         # Staleness conflict detection
                         post_hash = compute_file_sha256(abs_target)
                         if initial_hash and post_hash and initial_hash != post_hash:
@@ -2639,6 +4044,10 @@ def main():
             continue
 
 
+
+        if query.lower().startswith("graph:") or query.lower().startswith("graph "):
+            execute_graph_command(result, query)
+            continue
 
         if query.startswith("deps:") or query.startswith("deps "):
             target = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
@@ -2941,10 +4350,22 @@ def main():
             continue
 
     if watcher:
-        watcher.stop()
+        try:
+            watcher.stop()
+        except Exception:
+            pass
     return 0
 
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nExiting IntelliCodeX CLI. Goodbye!")
+        sys.exit(0)
+    except SystemExit as e:
+        sys.exit(e.code)
+    except Exception as e:
+        sys.stderr.write(f"\n[!] Unexpected fatal error: {e}\n")
+        sys.exit(1)

@@ -9,7 +9,7 @@ import os
 import sys
 import fnmatch
 from dataclasses import dataclass
-from typing import List, Set
+from typing import List, Set, Optional
 
 # Ensure repository root is on sys.path for direct script execution
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

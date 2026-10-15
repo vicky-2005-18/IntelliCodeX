@@ -19,9 +19,22 @@ from core.persistence import (
     DEFAULT_DB_PATH,
     get_db_connection,
 )
+import sys
 from core.lexical_index import BM25Index
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_path_identity(path: str, is_case_insensitive: bool | None = None) -> str:
+    """Normalize file path for cross-platform identity checks.
+
+    Forward-slashes are always standardized. On Windows (or when is_case_insensitive is True),
+    paths are lowercased because NTFS/FAT are case-insensitive. On Linux/POSIX (case-sensitive OS),
+    case is preserved so distinct files such as Utils.py and utils.py remain independent.
+    """
+    p = path.replace("\\", "/")
+    case_insensitive = is_case_insensitive if is_case_insensitive is not None else (sys.platform == "win32")
+    return p.lower() if case_insensitive else p
 
 
 @dataclass
@@ -37,6 +50,13 @@ class IngestedRepository:
     elapsed_seconds: float = 0.0
     indexing_mode: str = "fresh"  # "cached", "incremental", "fresh"
     lexical_index: Any = None
+
+    @property
+    def ast_ratio_percent(self) -> float:
+        """Percentage of total chunks derived from AST parsing (0.0 to 100.0)."""
+        if self.num_chunks > 0:
+            return round((self.ast_chunks_count / self.num_chunks) * 100.0, 2)
+        return 0.0
 
 
 def ingest_repository(
@@ -152,12 +172,13 @@ def ingest_repository(
                     # Case B: Partial changes -> incremental re-indexing
                     logger.info(f"[*] Incremental update for '{repo_path}': +{len(delta.added)} added, ~{len(delta.modified)} modified, -{len(delta.deleted)} deleted")
                     stale_files = set(delta.deleted + [sf.rel_path for sf in delta.modified])
+                    norm_stale_files = {normalize_path_identity(p) for p in stale_files}
 
                     # Extract retained chunks and reconstruct their vectors from FAISS safely
                     retained_chunks = []
                     retained_vec_list = []
                     for idx, c in enumerate(cached_chunks):
-                        if c.file_path not in stale_files and idx < cached_store.index.ntotal:
+                        if normalize_path_identity(c.file_path) not in norm_stale_files and idx < cached_store.index.ntotal:
                             vec = cached_store.get_vector(idx)
                             if vec is not None:
                                 retained_chunks.append(c)

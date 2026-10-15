@@ -1,16 +1,20 @@
-name: IntelliCodeX Continuous Integration Pipeline
+name: IntelliCodeX Continuous Integration & Verification Pipeline
 
-on:
+'on':
   push:
     branches: [ main, master, develop ]
   pull_request:
     branches: [ main, master ]
 
+permissions:
+  contents: read
+
 jobs:
-  code-intelligence-gate:
-    name: Code Intelligence & Security Gate
+  static-analysis-and-unit-tests:
+    name: Unit Tests & Static Analysis
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
 
@@ -30,10 +34,77 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install pytest pytest-cov bandit
 
-      - name: Run IntelliCodeX Headless CI Ingestion & Security Scan
+      - name: Run IntelliCodeX Headless Analysis & Security Scan
         run: |
-          python cli.py . --backend tfidf --ci
+          python cli.py . --backend tfidf --ci --output-json ci-analysis-report-py${{ matrix.python-version }}.json
 
-      - name: Run Automated Test Suite
+      - name: Run Deterministic Unit Tests
         run: |
-          python -m pytest -q
+          python -m pytest tests/test_path_identity.py tests/test_cli.py tests/test_ci_pipeline.py tests/test_parser.py tests/test_tree_sitter_chunker.py tests/test_path_safety.py tests/test_security_scanner.py -v --junitxml=junit-unit-py${{ matrix.python-version }}.xml
+
+      - name: Upload Static Analysis & Unit Test Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-and-analysis-reports-py${{ matrix.python-version }}
+          path: |
+            ci-analysis-report-py${{ matrix.python-version }}.json
+            junit-unit-py${{ matrix.python-version }}.xml
+          if-no-files-found: warn
+
+  docker-sandbox-verification:
+    name: Docker Sandbox Multi-Language Verification Gate
+    runs-on: ubuntu-latest
+    needs: [static-analysis-and-unit-tests]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest pytest-cov
+
+      # Docker build requires outbound network access to fetch official distribution packages & SDKs.
+      # Once built, all candidate test executions run in strictly isolated containers with `--network none`.
+      - name: Build IntelliCodeX Sandbox Docker Image
+        run: |
+          docker build -f Dockerfile.sandbox -t intellicodex-sandbox:latest .
+
+      - name: Run Deterministic CLI Patch Verification Entry Point
+        run: |
+          python cli.py sample_repo --backend tfidf --ci \
+            --target-file utils.py \
+            --patch "def helper():\n    return 'ci_verified'\n" \
+            --runtime python \
+            --sandbox docker \
+            --docker-image intellicodex-sandbox:latest \
+            --output-json ci-patch-verification-report.json
+
+      - name: Run Docker Multi-Language Sandbox Verification Suites
+        run: |
+          python -m pytest tests/test_docker_sandbox_workflow.py \
+            tests/test_js_ts_sandbox.py \
+            tests/test_java_sandbox.py \
+            tests/test_c_cpp_sandbox.py \
+            tests/test_go_sandbox.py \
+            tests/test_rust_sandbox.py \
+            -v --junitxml=junit-docker-sandbox.xml
+
+      - name: Upload Sandbox Verification Report & Diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-verification-artifacts
+          path: |
+            ci-patch-verification-report.json
+            junit-docker-sandbox.xml
+          if-no-files-found: warn

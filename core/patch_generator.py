@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import re
+import tempfile
 import uuid
 import time
 from typing import List, Dict, Any, Optional, Tuple, Callable
@@ -69,6 +70,146 @@ REFINEMENT_SYSTEM_PROMPT = (
 )
 
 
+def extract_behavioral_requirements(
+    error_report: str,
+    test_result: Optional[SandboxTestResult],
+    file_content_or_docstring: str = "",
+    user_instructions: str = "",
+) -> List[str]:
+    """
+    Extracts behavior requirements from relevant tests, documentation, and explicit user instructions.
+    Removes universal assumptions that all functions must preserve input collections,
+    and preserves intentional in-place mutation where specified.
+    """
+    reqs = [
+        "Resolve the failing assertions and test failures shown above.",
+    ]
+    if test_result and test_result.passed_tests:
+        reqs.append(
+            f"Preserve all currently passing tests ({len(test_result.passed_tests)} passing); do NOT break existing behavior."
+        )
+    reqs.append(
+        "Keep interfaces, function signatures, and test fixtures intact without weakening expectations."
+    )
+
+    combined = " ".join([
+        error_report or "",
+        test_result.traceback_summary if test_result else "",
+        " ".join(test_result.failed_tests if test_result else []),
+        " ".join(test_result.passed_tests if test_result else []),
+        " ".join(test_result.assertion_errors if test_result else []),
+        file_content_or_docstring or "",
+        user_instructions or "",
+    ]).lower()
+
+    # 1. Check for intentional in-place mutation signals
+    mutation_signals = [
+        "in-place", "in place", "mutate in place", "mutates the input",
+        "modify in place", "modifies the input", "sort in place", "mutates in-place"
+    ]
+    has_intentional_mutation = any(sig in combined for sig in mutation_signals)
+
+    # 2. Check for immutability / input preservation signals
+    immutability_signals = [
+        "deepcopy", "input_unchanged", "input unchanged", "do not mutate",
+        "preserve input", "immutable", "must not modify input", "original unchanged",
+        "assert intervals == original", "assert x == original"
+    ]
+    has_immutability_check = any(sig in combined for sig in immutability_signals)
+
+    if has_intentional_mutation and not has_immutability_check:
+        reqs.append(
+            "Intentional Mutation: Specifications/documentation specify in-place modification. "
+            "Preserve intentional in-place mutation of the input collection."
+        )
+    elif has_immutability_check:
+        reqs.append(
+            "Input Preservation: Relevant tests or specifications require preserving input collections unchanged "
+            "(e.g. caller verifies deepcopy equality). Avoid mutating input parameters in-place."
+        )
+
+    return reqs
+
+
+def validate_candidate_interface(
+    original_code: str,
+    candidate_code: str,
+    language: str = "python",
+) -> Tuple[bool, Optional[str]]:
+    """
+    Validates that a candidate patch preserves required public interfaces,
+    has valid syntax, and does not substitute test code for target implementation.
+    """
+    if not candidate_code or not candidate_code.strip():
+        return False, "Candidate code is empty."
+
+    if language.lower() in ("python", "py"):
+        import ast
+
+        try:
+            cand_ast = ast.parse(candidate_code)
+        except SyntaxError as e:
+            return False, f"Python syntax error in candidate: {e}"
+        except Exception as e:
+            return False, f"Failed to parse candidate AST: {e}"
+
+        orig_ast = None
+        if original_code and original_code.strip():
+            try:
+                orig_ast = ast.parse(original_code)
+            except Exception:
+                orig_ast = None
+
+        if orig_ast:
+            # Extract top-level public functions and classes from original code
+            orig_funcs = {
+                node.name
+                for node in orig_ast.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and not node.name.startswith("_")
+            }
+            orig_classes = {
+                node.name
+                for node in orig_ast.body
+                if isinstance(node, ast.ClassDef)
+                and not node.name.startswith("_")
+            }
+            orig_public = orig_funcs | orig_classes
+
+            # Extract top-level symbols from candidate
+            cand_funcs = {
+                node.name
+                for node in cand_ast.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            cand_classes = {
+                node.name
+                for node in cand_ast.body
+                if isinstance(node, ast.ClassDef)
+            }
+            cand_public = {n for n in (cand_funcs | cand_classes) if not n.startswith("_")}
+
+            # Check if original was not a test file (no test_* functions)
+            orig_is_test = any(name.startswith("test_") for name in orig_funcs)
+            cand_has_test_funcs = any(name.startswith("test_") for name in cand_funcs)
+
+            # Reject test substitution if original code was implementation
+            if not orig_is_test and cand_has_test_funcs:
+                if not orig_public.issubset(cand_public):
+                    return False, (
+                        "Candidate substitutes test suite functions for target implementation "
+                        f"and fails to preserve required interface: {sorted(orig_public - cand_public)}"
+                    )
+
+            # Check if candidate dropped any required public functions/classes
+            missing_public = orig_public - cand_public
+            if missing_public:
+                return False, f"Candidate dropped required public interface: {sorted(missing_public)}"
+
+    return True, None
+
+
+
 class PatchEngine:
     """
     Context-aware multi-file patch generation engine with closed-loop sandbox test verification.
@@ -86,6 +227,7 @@ class PatchEngine:
         allow_local_sandbox: bool = True,  # CLI mode should pass True
         default_timeout: int = 30,
         experience_bank: Optional[RepairExperienceBank] = None,
+        allow_heuristic_fallback: bool = True,
     ):
         self.store = store
         self.embedder = embedder
@@ -93,6 +235,7 @@ class PatchEngine:
         self.graph = graph
         self.repo_path = repo_path
         self.default_timeout = default_timeout
+        self.allow_heuristic_fallback = allow_heuristic_fallback
         if experience_bank is False:
             self.experience_bank = None
         elif experience_bank is not None:
@@ -165,20 +308,54 @@ class PatchEngine:
                 )
 
         if target_file:
-            matching_candidate = next((c for c in candidates if c.get("file_path") == target_file), None)
-            top_candidate = matching_candidate if matching_candidate else candidates[0]
+            from core.canonical_path import resolve_canonical_target_path
+            all_indexed = [c.file_path for c in self.store.chunks] if hasattr(self, "store") and self.store and hasattr(self.store, "chunks") else None
+            canon_tgt, disambig_err = resolve_canonical_target_path(self.repo_path or ".", target_file, candidate_files=all_indexed)
+            if disambig_err:
+                return self._failed_patch(repo_id, target_file, disambig_err)
+            if canon_tgt:
+                target_file = canon_tgt
+
+            norm_target = target_file.replace("\\", "/").lstrip("./")
+            matching_candidate = next(
+                (c for c in candidates if c.get("file_path", "").replace("\\", "/").lstrip("./") == norm_target),
+                None
+            )
+            disk_content = self._read_file(target_file)
+            if disk_content is None:
+                return self._failed_patch(repo_id, target_file, f"Target file '{target_file}' could not be read from disk.")
+
+            file_path = target_file
+            if matching_candidate and matching_candidate.get("snippet", "") in disk_content:
+                top_candidate = matching_candidate
+                snippet = matching_candidate["snippet"]
+            else:
+                # Target disk content is authoritative. Never use snippets from test files or other candidates.
+                snippet = disk_content
+                top_candidate = {
+                    "file_path": target_file,
+                    "snippet": disk_content,
+                    "confidence_score": 1.0,
+                    "line_number": 1,
+                }
+            full_original = disk_content
+            using_full_file = full_original.strip() != snippet.strip()
+            file_read_from_disk = True
         else:
             top_candidate = candidates[0]
+            file_path = top_candidate.get("file_path", "")
+            disk_content = self._read_file(file_path)
+            cand_snip = top_candidate.get("snippet", "")
+            if cand_snip and disk_content and cand_snip in disk_content:
+                snippet = cand_snip
+            else:
+                snippet = disk_content if disk_content else cand_snip
+            full_original = disk_content or snippet
+            using_full_file = full_original.strip() != snippet.strip()
+            file_read_from_disk = disk_content is not None
 
-        file_path = target_file or top_candidate.get("file_path", "")
-        disk_content = self._read_file(file_path)
-        snippet = disk_content if file_path == target_file and disk_content else top_candidate.get("snippet", "")
         language = self._detect_language(file_path)
         localization_confidence = top_candidate.get("confidence_score", 0.5)
-
-        full_original = disk_content or snippet
-        using_full_file = full_original != snippet
-        file_read_from_disk = disk_content is not None
 
         rag_chunks = self._retrieve_rag_chunks(error_report, file_path, top_k=4)
         rag_context = format_context(rag_chunks) if rag_chunks else ""
@@ -194,8 +371,9 @@ class PatchEngine:
         )
 
         patched_full, diff_original = self._assemble_patched_file(
-            full_original, snippet, suggested_snippet, using_full_file, top_candidate
+            full_original, snippet, suggested_snippet, using_full_file, top_candidate, language=language
         )
+
 
         git_diff = generate_git_diff(diff_original, patched_full, file_path)
 
@@ -298,20 +476,54 @@ class PatchEngine:
                 )
 
         if target_file:
-            matching_candidate = next((c for c in candidates if c.get("file_path") == target_file), None)
-            top_candidate = matching_candidate if matching_candidate else candidates[0]
+            from core.canonical_path import resolve_canonical_target_path
+            all_indexed = [c.file_path for c in self.store.chunks] if hasattr(self, "store") and self.store and hasattr(self.store, "chunks") else None
+            canon_tgt, disambig_err = resolve_canonical_target_path(self.repo_path or ".", target_file, candidate_files=all_indexed)
+            if disambig_err:
+                return self._failed_patch(repo_id, target_file, disambig_err)
+            if canon_tgt:
+                target_file = canon_tgt
+
+            norm_target = target_file.replace("\\", "/").lstrip("./")
+            matching_candidate = next(
+                (c for c in candidates if c.get("file_path", "").replace("\\", "/").lstrip("./") == norm_target),
+                None
+            )
+            disk_content = self._read_file(target_file)
+            if disk_content is None:
+                return self._failed_patch(repo_id, target_file, f"Target file '{target_file}' could not be read from disk.")
+
+            file_path = target_file
+            if matching_candidate and matching_candidate.get("snippet", "") in disk_content:
+                top_candidate = matching_candidate
+                snippet = matching_candidate["snippet"]
+            else:
+                # Target disk content is authoritative. Never use snippets from test files or other candidates.
+                snippet = disk_content
+                top_candidate = {
+                    "file_path": target_file,
+                    "snippet": disk_content,
+                    "confidence_score": 1.0,
+                    "line_number": 1,
+                }
+            full_original = disk_content
+            using_full_file = full_original.strip() != snippet.strip()
+            file_read_from_disk = True
         else:
             top_candidate = candidates[0]
+            file_path = top_candidate.get("file_path", "")
+            disk_content = self._read_file(file_path)
+            cand_snip = top_candidate.get("snippet", "")
+            if cand_snip and disk_content and cand_snip in disk_content:
+                snippet = cand_snip
+            else:
+                snippet = disk_content if disk_content else cand_snip
+            full_original = disk_content or snippet
+            using_full_file = full_original.strip() != snippet.strip()
+            file_read_from_disk = disk_content is not None
 
-        file_path = target_file or top_candidate.get("file_path", "")
-        disk_content = self._read_file(file_path)
-        snippet = disk_content if file_path == target_file and disk_content else top_candidate.get("snippet", "")
         language = self._detect_language(file_path)
         localization_confidence = top_candidate.get("confidence_score", 0.5)
-
-        full_original = disk_content or snippet
-        using_full_file = full_original != snippet
-        file_read_from_disk = disk_content is not None
 
         rag_chunks = self._retrieve_rag_chunks(error_report, file_path, top_k=4)
         rag_context = format_context(rag_chunks) if rag_chunks else ""
@@ -348,8 +560,49 @@ class PatchEngine:
                 )
 
             patched_full, diff_original = self._assemble_patched_file(
-                full_original, snippet, current_snippet, using_full_file, top_candidate
+                full_original, snippet, current_snippet, using_full_file, top_candidate, language=language
             )
+
+            # Pre-flight candidate validation: syntax and interface preservation
+            is_valid_cand, cand_val_err = validate_candidate_interface(
+                full_original, patched_full, language=language
+            )
+            if not is_valid_cand:
+                val_msg = f"Candidate validation rejected: {cand_val_err}"
+                logger.warning("Turn %d rejected by candidate validation: %s", turn, cand_val_err)
+                final_test_result = SandboxTestResult(
+                    success=False,
+                    exit_code=-1,
+                    stdout="",
+                    stderr=val_msg,
+                    duration_seconds=0.0,
+                    framework=language,
+                    passed_count=0,
+                    failed_count=1,
+                    total_count=1,
+                    failed_tests=["candidate_interface_validation"],
+                    assertion_errors=[val_msg],
+                    traceback_summary=val_msg,
+                    error_message=val_msg,
+                )
+                iteration_history.append({
+                    "turn": turn,
+                    "explanation": current_explanation,
+                    "test_passed": False,
+                    "skipped": False,
+                    "exit_code": -1,
+                    "duration": 0.0,
+                    "failed_count": 1,
+                    "passed_count": 0,
+                    "total_count": 1,
+                    "failed_tests": ["candidate_interface_validation"],
+                    "passed_tests": [],
+                    "assertion_errors": [val_msg],
+                    "stdout": "",
+                    "stderr": val_msg,
+                    "candidate_code": patched_full,
+                })
+                continue
 
             # Test candidate patch inside isolated sandbox
             if self.repo_path:
@@ -362,18 +615,31 @@ class PatchEngine:
                     patched_code=patched_full,
                     test_command=test_command,
                     timeout=self.default_timeout,
+                    runtime=language,
+                    extra_files=kwargs.get("extra_files"),
                 )
                 final_test_result = test_res
+
 
                 iteration_history.append({
                     "turn": turn,
                     "explanation": current_explanation,
                     "test_passed": test_res.success,
                     "skipped": test_res.skipped,
+                    "exit_code": test_res.exit_code,
                     "duration": test_res.duration_seconds,
                     "failed_count": test_res.failed_count,
                     "passed_count": test_res.passed_count,
+                    "total_count": test_res.total_count,
+                    "failed_tests": test_res.failed_tests,
+                    "passed_tests": test_res.passed_tests,
                     "assertion_errors": test_res.assertion_errors,
+                    "test_command": getattr(test_res, "test_command", None),
+                    "working_dir": getattr(test_res, "working_dir", None),
+                    "patched_file_path": getattr(test_res, "patched_file_path", file_path),
+                    "stdout": test_res.stdout,
+                    "stderr": test_res.stderr,
+                    "candidate_code": patched_full,
                 })
 
                 if test_res.success or test_res.skipped:
@@ -383,7 +649,7 @@ class PatchEngine:
 
         # Final patch assembly and scoring
         patched_full, diff_original = self._assemble_patched_file(
-            full_original, snippet, current_snippet, using_full_file, top_candidate
+            full_original, snippet, current_snippet, using_full_file, top_candidate, language=language
         )
         git_diff = generate_git_diff(diff_original, patched_full, file_path)
 
@@ -397,6 +663,8 @@ class PatchEngine:
 
         test_passed = final_test_result.success if final_test_result else False
         test_skipped = final_test_result.skipped if final_test_result else True
+        passed_count = final_test_result.passed_count if final_test_result else 0
+        is_truly_verified = bool(test_passed and not test_skipped and passed_count > 0)
 
         base_score = compute_patch_quality_score(
             localization_confidence=localization_confidence,
@@ -406,7 +674,7 @@ class PatchEngine:
             llm_generated=llm_generated,
         )
         # Boost confidence when tests pass in sandbox
-        if test_passed and not test_skipped:
+        if is_truly_verified:
             confidence_score = min(0.99, base_score + 0.15)
         elif not test_passed and not test_skipped:
             confidence_score = max(0.1, base_score - 0.25)
@@ -415,6 +683,7 @@ class PatchEngine:
 
         patch_id = str(uuid.uuid4())
         import hashlib
+        contract_type = kwargs.get("contract_type", "existing_tests")
         patch_record = {
             "patch_id": patch_id,
             "repo_id": repo_id,
@@ -445,22 +714,56 @@ class PatchEngine:
             ],
             "validation": validation,
             "sandbox_validation": {
-                "verified": test_passed and not test_skipped,
+                "verified": is_truly_verified,
                 "skipped": test_skipped,
-                "test_status": "passed" if test_passed else ("skipped" if test_skipped else "failed"),
+                "test_status": "passed" if is_truly_verified else ("skipped" if test_skipped else "failed"),
                 "iterations_count": len(iteration_history) or 1,
                 "iteration_history": iteration_history,
                 "test_result": final_test_result.to_dict() if final_test_result else None,
+                "contract_type": contract_type,
+                "contract_disclaimer": (
+                    "Candidate passes AI-generated proposed test contract. Independently established correctness requires manual human audit."
+                    if contract_type == "ai_generated_proposal" and is_truly_verified else None
+                ),
             },
             "llm_generated": llm_generated,
             "error_type": localization.get("error_type", "UnknownError"),
             "owner_id": owner_id,
-            "status": "verified" if (test_passed and not test_skipped) else "pending",
+            "status": "verified" if is_truly_verified else "pending",
             "created_at": time.time(),
         }
 
+        # Security scan candidate patched code before recording as approved repair
+        cand_sec_status = "unscanned"
+        cand_sec_coverage = "unknown"
+        cand_sec_approved = False
+        cand_sec_findings_cnt = 0
+        try:
+            from core.security_scanner import run_security_scan
+            with tempfile.TemporaryDirectory(prefix="cand_sec_") as tmp_sdir:
+                tmp_file = os.path.join(tmp_sdir, os.path.basename(file_path))
+                with open(tmp_file, "w", encoding="utf-8") as sf:
+                    sf.write(patched_full)
+                cand_sec = run_security_scan(tmp_sdir, repo_root=tmp_sdir, severity_threshold="HIGH")
+                cand_sec_status = cand_sec.get("status", "error")
+                cand_sec_coverage = cand_sec.get("coverage_status", "unknown")
+                cand_sec_policy = cand_sec.get("security_policy", "strict")
+                cand_sec_approved = bool(cand_sec_status == "passed")
+                cand_sec_findings_cnt = cand_sec.get("failing_findings_count", 0)
+        except Exception:
+            pass
+
+        patch_record["security_validation"] = {
+            "security_status": cand_sec_status,
+            "security_coverage": cand_sec_coverage,
+            "security_policy": cand_sec_policy,
+            "security_approved": cand_sec_approved,
+            "failing_findings_count": cand_sec_findings_cnt,
+        }
+
         # Record verified fix in self-improving experience bank (REQ-FUT-10)
-        if test_passed and not test_skipped and self.experience_bank:
+        # CRITICAL: A candidate that failed security checks MUST NEVER be recorded as an approved repair!
+        if is_truly_verified and cand_sec_status != "failed" and self.experience_bank:
             try:
                 self.experience_bank.record_success(
                     error_type=localization.get("error_type", "UnknownError"),
@@ -472,6 +775,10 @@ class PatchEngine:
                     language=language,
                     test_verified=True,
                     developer_approved=False,
+                    security_approved=cand_sec_approved,
+                    security_status=cand_sec_status,
+                    security_coverage=cand_sec_coverage,
+                    security_policy=cand_sec_policy,
                     repo_id=repo_id,
                     event_id=f"sandbox:{repo_id}:{patch_id}",
                 )
@@ -504,6 +811,14 @@ class PatchEngine:
         suggested = patch_record.get("suggested_patch")
         if not target_file or not suggested:
             return False, "Invalid patch record"
+
+        # Approval Gate: Block normal approval from applying unverified / failed candidates
+        if not force:
+            sb_val = patch_record.get("sandbox_validation", {})
+            test_status = sb_val.get("test_status", "")
+            is_verified = sb_val.get("verified", False) or patch_record.get("status") == "verified"
+            if test_status == "failed" or (sb_val and not is_verified and test_status != "skipped"):
+                return False, f"Approval rejected: candidate patch failed test verification (test_status: {test_status or 'unverified'}). Unverified patches cannot be applied."
 
         is_disk_tracked = patch_record.get("file_read_from_disk", patch_record.get("using_full_file", False))
         expected_original = None if force or not is_disk_tracked else patch_record.get("original_code")
@@ -540,6 +855,7 @@ class PatchEngine:
                         or "UnknownError"
                     )
                     is_test_verified = patch_record.get("sandbox_validation", {}).get("verified", False)
+                    sec_val = patch_record.get("security_validation", {})
                     if orig_snip and fix_snip:
                         self.experience_bank.record_success(
                             error_type=err_type,
@@ -551,6 +867,10 @@ class PatchEngine:
                             language=self._detect_language(target_file),
                             test_verified=is_test_verified,
                             developer_approved=True,
+                            security_approved=sec_val.get("security_approved", False),
+                            security_status=sec_val.get("security_status", "unscanned"),
+                            security_coverage=sec_val.get("security_coverage", "unknown"),
+                            security_policy=sec_val.get("security_policy", "unscanned"),
                             repo_id=patch_record.get("repo_id"),
                             event_id=f"approval:{patch_id}",
                         )
@@ -649,8 +969,12 @@ class PatchEngine:
         suggested_snippet: str,
         using_full_file: bool,
         top_candidate: Dict[str, Any],
+        language: str = "python",
     ) -> Tuple[str, str]:
-        """Helper to merge snippet into full file or return snippet directly."""
+        """Helper to merge snippet into full file or return snippet directly.
+        Always returns (patched_full, diff_original) where diff_original is full_original."""
+        diff_original = full_original if full_original else snippet
+
         if using_full_file:
             patched_full = merge_snippet_into_file(
                 full_original,
@@ -658,10 +982,29 @@ class PatchEngine:
                 suggested_snippet,
                 start_line=top_candidate.get("line_number", 1),
             )
-            if patched_full is None:
-                return suggested_snippet, snippet
-            return patched_full, full_original
-        return suggested_snippet, snippet
+            if patched_full is not None:
+                return patched_full, diff_original
+
+            # If snippet merge failed, check if suggested_snippet is a valid full-file replacement
+            is_valid, _ = validate_candidate_interface(full_original, suggested_snippet, language=language)
+            if is_valid:
+                return suggested_snippet, diff_original
+            # Mismatched context / rejected replacement: do NOT corrupt full_original with detached snippet
+            return full_original, diff_original
+        else:
+            if full_original and suggested_snippet and len(suggested_snippet.strip()) < len(full_original.strip()):
+                cand_snip = top_candidate.get("snippet", "")
+                if cand_snip and cand_snip in full_original:
+                    merged = merge_snippet_into_file(
+                        full_original,
+                        cand_snip,
+                        suggested_snippet,
+                        start_line=top_candidate.get("line_number", 1),
+                    )
+                    if merged:
+                        return merged, diff_original
+            return suggested_snippet, diff_original
+
 
     def _read_file(self, file_path: str) -> Optional[str]:
         if not self.repo_path:
@@ -706,18 +1049,22 @@ class PatchEngine:
                 prompt = self._build_llm_prompt(
                     error_report, file_path, snippet, rag_context, localization
                 )
-                llm_response = self.llm.generate(prompt, system=PATCH_SYSTEM_PROMPT, temperature=0.1)
+                temp = getattr(self.llm, "temperature", 0.0)
+                llm_response = self.llm.generate(prompt, system=PATCH_SYSTEM_PROMPT, temperature=temp)
                 code, explanation = extract_code_and_explanation(llm_response)
                 code = strip_language_prefix(code, language)
-                if code and code.strip() != snippet.strip():
+                if code and code.strip():
                     return code, explanation, True
             except Exception:
                 pass
 
-        patched, explanation = self._heuristic_fix(
-            snippet, localization, top_candidate
-        )
-        return patched, explanation, False
+        if not self.llm or getattr(self, "allow_heuristic_fallback", True):
+            patched, explanation = self._heuristic_fix(
+                snippet, localization, top_candidate
+            )
+            return patched, explanation, False
+
+        return snippet, "LLM failed to generate a patch candidate", False
 
     def _refine_fix(
         self,
@@ -740,7 +1087,8 @@ class PatchEngine:
                     test_result=test_result,
                     rag_context=rag_context,
                 )
-                llm_response = self.llm.generate(prompt, system=REFINEMENT_SYSTEM_PROMPT, temperature=0.2)
+                temp = getattr(self.llm, "temperature", 0.0)
+                llm_response = self.llm.generate(prompt, system=REFINEMENT_SYSTEM_PROMPT, temperature=temp)
                 code, explanation = extract_code_and_explanation(llm_response)
                 code = strip_language_prefix(code, language)
                 if code and code.strip():
@@ -774,15 +1122,17 @@ class PatchEngine:
         few_shots_section = f"\n\n{few_shots}" if few_shots else ""
 
         return (
-            f"Bug / Error Report:\n{error_report}\n\n"
+            f"Diagnostic Test / Traceback Evidence:\n{error_report}\n\n"
             f"Error Type: {error_type}\n"
-            f"Target File: {file_path}\n\n"
-            f"Code to fix:\n```{self._detect_language(file_path)}\n{snippet}\n```\n\n"
+            f"Target File to repair: {file_path}\n\n"
+            f"Target Implementation Code to fix:\n```{lang}\n{snippet}\n```\n\n"
             f"Additional repository context:\n{rag_context}"
             f"{few_shots_section}\n\n"
-            f"Generate the corrected version of the code snippet above. "
-            f"Make minimal changes — only fix the bug. "
-            f"Provide the fixed code in a single code block, then explain the fix."
+            f"CRITICAL INSTRUCTIONS:\n"
+            f"1. Generate the corrected implementation for '{file_path}'.\n"
+            f"2. DO NOT output test functions (e.g. def test_*). DO NOT output tests from test suites.\n"
+            f"3. Preserve all existing public functions, classes, and signatures from the target implementation.\n"
+            f"4. Provide the fixed implementation in a single code block, then explain the fix."
         )
 
     def _build_refinement_prompt(
@@ -794,7 +1144,16 @@ class PatchEngine:
         test_result: SandboxTestResult,
         rag_context: str,
     ) -> str:
-        failed_tests_str = ", ".join(test_result.failed_tests) if test_result.failed_tests else "Automated Test Suite"
+        failed_tests_str = "\n".join(f"- {t}" for t in test_result.failed_tests) if test_result.failed_tests else "- Automated Test Failure"
+        
+        passed_tests_section = ""
+        if test_result.passed_tests:
+            passed_tests_list = "\n".join(f"- {t}" for t in test_result.passed_tests)
+            passed_tests_section = (
+                f"Passing Tests (MUST PRESERVE - DO NOT BREAK):\n"
+                f"{passed_tests_list}\n\n"
+            )
+
         if not test_result.assertion_errors and test_result.error_message:
             assertions_str = f"- {test_result.error_message}"
         else:
@@ -802,23 +1161,34 @@ class PatchEngine:
         
         traceback_str = (
             test_result.traceback_summary
-            or (test_result.stderr[-1000:] if test_result.stderr else "")
-            or (test_result.stdout[-1000:] if test_result.stdout else "No output captured.")
+            or (test_result.stderr[-1500:] if test_result.stderr else "")
+            or (test_result.stdout[-1500:] if test_result.stdout else "No output captured.")
         )
 
+        dynamic_reqs = extract_behavioral_requirements(
+            error_report=error_report,
+            test_result=test_result,
+            file_content_or_docstring=snippet,
+        )
+        reqs_str = "\n".join(f"{i+1}. {r}" for i, r in enumerate(dynamic_reqs))
+
         return (
-            f"Bug / Error Report:\n{error_report}\n\n"
-            f"Target File: {file_path}\n\n"
-            f"Original Code:\n```{self._detect_language(file_path)}\n{snippet}\n```\n\n"
+            f"Diagnostic Test / Traceback Evidence:\n{error_report}\n\n"
+            f"Target File to repair: {file_path}\n\n"
+            f"Original Target Implementation:\n```{self._detect_language(file_path)}\n{snippet}\n```\n\n"
             f"Previous Failed Patch Candidate:\n```{self._detect_language(file_path)}\n{current_patch}\n```\n\n"
-            f"Automated Test Failure Summary:\n"
-            f"Failed Tests: {failed_tests_str}\n"
-            f"Assertion Errors:\n{assertions_str}\n\n"
-            f"Test Traceback / Output:\n```\n{traceback_str}\n```\n\n"
+            f"Automated Test / Verification Failure Summary:\n"
+            f"Failed Tests:\n{failed_tests_str}\n\n"
+            f"{passed_tests_section}"
+            f"Assertion / Verification Errors:\n{assertions_str}\n\n"
+            f"Test Traceback / Output Evidence (Diagnostic):\n```\n{traceback_str}\n```\n\n"
+            f"CRITICAL REQUIREMENTS:\n"
+            f"{reqs_str}\n"
+            f"- You are repairing the implementation in '{file_path}'.\n"
+            f"- DO NOT output test functions (def test_*). DO NOT output tests from test suites.\n"
+            f"- Preserve required public interfaces and functions from the original implementation.\n\n"
             f"Additional Repository Context:\n{rag_context}\n\n"
-            f"Please analyze why the previous candidate failed tests and generate a corrected version of the code. "
-            f"Ensure all edge cases and assertions are properly satisfied. "
-            f"Output the corrected code in a single fenced code block, followed by an explanation."
+            f"Generate the corrected implementation in a single fenced code block, followed by an explanation."
         )
 
     def _heuristic_fix(
@@ -894,12 +1264,15 @@ class PatchEngine:
     def _detect_language(file_path: str) -> str:
         ext_map = {
             ".py": "python", ".js": "javascript", ".ts": "typescript",
-            ".java": "java", ".go": "go", ".cpp": "cpp", ".cs": "csharp",
+            ".java": "java", ".go": "go", ".cpp": "cpp", ".cc": "cpp",
+            ".cxx": "cpp", ".hpp": "cpp", ".c": "c", ".cs": "csharp",
             ".rb": "ruby", ".rs": "rust",
         }
         for ext, lang in ext_map.items():
             if file_path.endswith(ext):
                 return lang
+        if file_path.endswith(".h"):
+            return "c"
         return "python"
 
     @staticmethod

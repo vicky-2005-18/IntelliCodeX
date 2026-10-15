@@ -84,6 +84,7 @@ class User(BaseModel):
     username: str
     email: str
     role: str = "developer"  # "admin" | "developer"
+    org_id: str = "default_org"  # Tenant / organization boundary
     created_at: float = Field(default_factory=time.time)
 
 
@@ -139,6 +140,7 @@ def create_access_token(user: User, expires_delta_seconds: Optional[int] = None)
         "username": user.username,
         "email": user.email,
         "role": user.role,
+        "org_id": getattr(user, "org_id", "default_org"),
         "iat": int(now),
         "exp": int(now + expire_seconds),
     }
@@ -208,6 +210,7 @@ def get_current_user(
         username=user_record["username"],
         email=user_record.get("email", ""),
         role=user_record.get("role", "developer"),
+        org_id=user_record.get("org_id", payload.get("org_id", "default_org")),
         created_at=user_record.get("created_at", 0.0),
     )
 

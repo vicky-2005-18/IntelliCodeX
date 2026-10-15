@@ -15,10 +15,27 @@ from backend.api import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    # Clean up all active watcher threads on shutdown
+    from backend.api.repos import ACTIVE_WATCHERS
+    for repo_id, watcher in list(ACTIVE_WATCHERS.items()):
+        try:
+            watcher.stop()
+        except Exception as e:
+            logging.warning(f"Error stopping watcher for '{repo_id}': {e}")
+    ACTIVE_WATCHERS.clear()
+
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
     description="IntelliCodeX AI Repository Analysis and Automated Software Maintenance Framework",
+    lifespan=lifespan,
 )
 
 # Enable CORS for local React development & cross-origin access
@@ -69,6 +86,7 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok", "version": settings.VERSION}
+
 
 
 if __name__ == "__main__":

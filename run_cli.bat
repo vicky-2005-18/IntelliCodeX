@@ -33,5 +33,9 @@ if "%~1"=="" (
     "%PYTHON_EXE%" cli.py %*
 )
 
-echo.
-exit /b 0
+set "CLI_EXIT=!ERRORLEVEL!"
+if not "!CLI_EXIT!"=="0" (
+    echo.
+    echo [ERROR] IntelliCodeX CLI exited with status code !CLI_EXIT!.
+)
+exit /b !CLI_EXIT!

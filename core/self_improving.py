@@ -28,6 +28,10 @@ class RepairExperience:
     language: str = "python"    # Language scope (python, javascript, etc.)
     test_verified: bool = False      # True only if automated sandbox tests passed
     developer_approved: bool = False # True only if human developer explicitly approved
+    security_approved: bool = False  # True only if candidate passed automated security scan
+    security_status: str = "unscanned" # "passed", "failed", "incomplete", "unscanned"
+    security_coverage: str = "unknown" # "full", "partial", "unsupported", "unknown"
+    security_policy: str = "unscanned" # "strict", "secrets_only", "unscanned"
     repo_id: Optional[str] = None    # Repository tenant isolation (None for public golden samples)
     is_public: bool = False          # True for generic golden samples, False for private repo code
     is_active: bool = True           # Can be set to False if reverted or invalidated
@@ -46,11 +50,21 @@ class RepairExperience:
         valid_keys = {
             "experience_id", "error_type", "error_description", "original_code",
             "fixed_code", "explanation", "source", "language", "test_verified",
-            "developer_approved", "repo_id", "is_public", "is_active",
+            "developer_approved", "security_approved", "security_status", "security_coverage",
+            "security_policy", "repo_id", "is_public", "is_active",
             "invalidation_reason", "success_count", "recorded_event_ids",
             "created_at", "tags",
         }
         filtered = {k: v for k, v in data.items() if k in valid_keys}
+        # Backward-compatibility: historical records lack security fields and MUST NOT be retroactively approved
+        if "security_status" not in filtered:
+            filtered["security_status"] = "unscanned"
+        if "security_coverage" not in filtered:
+            filtered["security_coverage"] = "unknown"
+        if "security_policy" not in filtered:
+            filtered["security_policy"] = "unscanned"
+        if "security_approved" not in filtered:
+            filtered["security_approved"] = False
         return cls(**filtered)
 
 
@@ -67,6 +81,10 @@ DEFAULT_GOLDEN_EXPERIENCES = [
         "language": "python",
         "test_verified": True,
         "developer_approved": True,
+        "security_approved": True,
+        "security_status": "passed",
+        "security_coverage": "full",
+        "security_policy": "strict",
         "repo_id": None,
         "is_public": True,
         "is_active": True,
@@ -86,6 +104,10 @@ DEFAULT_GOLDEN_EXPERIENCES = [
         "language": "python",
         "test_verified": True,
         "developer_approved": True,
+        "security_approved": True,
+        "security_status": "passed",
+        "security_coverage": "full",
+        "security_policy": "strict",
         "repo_id": None,
         "is_public": True,
         "is_active": True,
@@ -105,6 +127,10 @@ DEFAULT_GOLDEN_EXPERIENCES = [
         "language": "python",
         "test_verified": True,
         "developer_approved": True,
+        "security_approved": True,
+        "security_status": "passed",
+        "security_coverage": "full",
+        "security_policy": "strict",
         "repo_id": None,
         "is_public": True,
         "is_active": True,
@@ -124,6 +150,10 @@ DEFAULT_GOLDEN_EXPERIENCES = [
         "language": "python",
         "test_verified": True,
         "developer_approved": True,
+        "security_approved": True,
+        "security_status": "passed",
+        "security_coverage": "full",
+        "security_policy": "strict",
         "repo_id": None,
         "is_public": True,
         "is_active": True,
@@ -143,6 +173,9 @@ DEFAULT_GOLDEN_EXPERIENCES = [
         "language": "python",
         "test_verified": True,
         "developer_approved": True,
+        "security_approved": True,
+        "security_status": "passed",
+        "security_coverage": "full",
         "repo_id": None,
         "is_public": True,
         "is_active": True,
@@ -213,6 +246,10 @@ class RepairExperienceBank:
         language: str = "python",
         test_verified: bool = False,
         developer_approved: bool = False,
+        security_approved: Optional[bool] = None,
+        security_status: str = "unscanned",
+        security_coverage: str = "unknown",
+        security_policy: str = "strict",
         repo_id: Optional[str] = None,
         is_public: bool = False,
         event_id: Optional[str] = None,
@@ -227,6 +264,9 @@ class RepairExperienceBank:
             tags = tags or [norm_type.lower()]
             clean_orig = original_code.strip()
             clean_fixed = fixed_code.strip()
+
+            if security_approved is None:
+                security_approved = bool(security_status == "passed")
 
             # Check for existing matching experience in same repo scope
             for exp in self.experiences.values():
@@ -248,6 +288,20 @@ class RepairExperienceBank:
                             exp.test_verified = True
                         if developer_approved:
                             exp.developer_approved = True
+                        # Update security flags: explicit failure revokes approval
+                        if security_status == "failed":
+                            exp.security_status = "failed"
+                            exp.security_approved = False
+                        elif security_status == "passed":
+                            exp.security_status = "passed"
+                            exp.security_approved = True
+                        elif security_status == "incomplete" and exp.security_status != "passed":
+                            exp.security_status = "incomplete"
+                            exp.security_approved = False
+                        if security_coverage != "unknown":
+                            exp.security_coverage = security_coverage
+                        if security_policy != "unscanned":
+                            exp.security_policy = security_policy
                         self._persist()
                         return exp
 
@@ -264,6 +318,10 @@ class RepairExperienceBank:
                 language=language.lower(),
                 test_verified=test_verified,
                 developer_approved=developer_approved,
+                security_approved=security_approved,
+                security_status=security_status,
+                security_coverage=security_coverage,
+                security_policy=security_policy,
                 repo_id=repo_id,
                 is_public=is_public,
                 is_active=True,
@@ -294,6 +352,9 @@ class RepairExperienceBank:
         language: str = "python",
         repo_id: Optional[str] = None,
         include_unverified: bool = False,
+        require_security_approved: bool = False,
+        required_security_policy: Optional[str] = None,
+        require_strict_security: bool = False,
         limit: int = 2,
     ) -> List[RepairExperience]:
         """
@@ -303,6 +364,10 @@ class RepairExperienceBank:
         with self._lock:
             candidates = list(self.experiences.values())
 
+        effective_policy = required_security_policy
+        if require_strict_security and not effective_policy:
+            effective_policy = "strict"
+
         # 1. Privacy filter: public golden samples OR matching repo_id only
         authorized = []
         for e in candidates:
@@ -311,9 +376,22 @@ class RepairExperienceBank:
             # Language match
             if language and e.language and e.language.lower() != language.lower():
                 continue
+            # Never retrieve security-rejected candidates in approved few-shot retrieval
+            if not include_unverified and e.security_status == "failed":
+                continue
             # Verification filter (must be either test_verified, developer_approved, or golden sample)
             if not include_unverified and not (e.test_verified or e.developer_approved or e.source == "golden_sample"):
                 continue
+            # Explicit security approval filter if requested
+            if (require_security_approved or effective_policy) and not (e.security_approved and e.security_status == "passed"):
+                continue
+            # Security policy provenance enforcement: secrets_only cannot satisfy strict retrieval
+            if effective_policy == "strict":
+                if not (e.security_policy == "strict" and e.security_coverage == "full"):
+                    continue
+            elif effective_policy == "secrets_only":
+                if e.security_policy not in ("strict", "secrets_only"):
+                    continue
             # Repo privacy boundary
             if e.is_public or (repo_id and e.repo_id == repo_id) or (not repo_id and not e.repo_id):
                 authorized.append(e)

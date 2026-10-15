@@ -20,7 +20,14 @@ except ImportError:
     FileSystemEventHandler = object
     FileSystemEvent = object
 
-from core.parser import SourceFile, walk_repository, LANGUAGE_BY_EXT, IGNORE_DIRS
+from core.parser import (
+    SourceFile,
+    walk_repository,
+    LANGUAGE_BY_EXT,
+    IGNORE_DIRS,
+    load_gitignore_patterns,
+    is_ignored_by_gitignore,
+)
 from core.chunker import chunk_file, CodeChunk
 from core.vectorstore import FaissVectorStore
 from core.embedder import BaseEmbedder
@@ -52,6 +59,11 @@ def is_ignored_path(path: str, repo_root: str) -> bool:
 
     parts = [p.lower() for p in rel.replace("\\", "/").split("/") if p]
     if not parts:
+        return True
+
+    # Check .gitignore rules if present
+    patterns = load_gitignore_patterns(repo_root)
+    if patterns and is_ignored_by_gitignore(rel, patterns):
         return True
 
     # Ignore directory names matching IGNORE_DIRS or hidden folders
@@ -90,6 +102,10 @@ def is_ignored_directory(path: str, repo_root: str) -> bool:
     parts = [p.lower() for p in rel.replace("\\", "/").split("/") if p]
     if not parts:
         return False
+
+    patterns = load_gitignore_patterns(repo_root)
+    if patterns and is_ignored_by_gitignore(rel, patterns):
+        return True
 
     for part in parts:
         if part in IGNORE_DIRS:
@@ -136,7 +152,8 @@ class IncrementalIndexer:
 
         # Remove old chunks of modified and deleted files from store
         stale_paths = {sf.rel_path for sf in changed_files} | deleted_paths
-        remaining_chunks = [c for c in existing_store.chunks if c.file_path not in stale_paths]
+        norm_stale_paths = {p.replace("\\", "/").lower() for p in stale_paths}
+        remaining_chunks = [c for c in existing_store.chunks if c.file_path.replace("\\", "/").lower() not in norm_stale_paths]
 
         # Re-chunk modified files
         new_chunks: List[CodeChunk] = []

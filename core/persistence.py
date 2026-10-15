@@ -104,6 +104,14 @@ def init_schema(conn: sqlite3.Connection):
             );
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS unregistered_repos (
+                repo_path TEXT PRIMARY KEY,
+                unregistered_at REAL NOT NULL
+            );
+        """)
+
+
 
 def save_repo_metadata(
     conn: sqlite3.Connection,
@@ -120,6 +128,14 @@ def save_repo_metadata(
     """Saves or updates repository metadata, file hashes, and code chunks in SQLite."""
     now = time.time()
     with conn:
+        # Clear unregistered status if this repository path was previously unregistered
+        try:
+            norm_p = os.path.normcase(os.path.abspath(repo_path))
+            conn.execute("DELETE FROM unregistered_repos WHERE repo_path = ?", (norm_p,))
+            conn.execute("DELETE FROM unregistered_repos WHERE repo_path = ?", (os.path.abspath(repo_path),))
+        except Exception:
+            pass
+
         # 1. Update repos table
         conn.execute("""
             INSERT INTO repos (repo_id, repo_path, backend, total_files, total_chunks, last_indexed_at, graph_version, skip_overloads, embedding_dim, model_name)
@@ -229,6 +245,94 @@ def get_repo_id(repo_path: str) -> str:
     path_hash = hashlib.md5(os.path.abspath(clean_path).encode("utf-8")).hexdigest()[:8]
     clean_base = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in base)
     return f"{clean_base}_{path_hash}"
+
+
+def unregister_repo(repo_path: str, db_path: str = DEFAULT_DB_PATH) -> bool:
+    """Removes a repository's registration from the persistent registry without deleting source files, Git history, or cache."""
+    abs_p = os.path.abspath(repo_path)
+    norm_p = os.path.normcase(abs_p)
+    repo_id = get_repo_id(abs_p)
+    conn = get_db_connection(db_path)
+    try:
+        init_schema(conn)
+        with conn:
+            # Delete from repos table matching either repo_id or normalized path
+            rows = conn.execute("SELECT repo_id, repo_path FROM repos").fetchall()
+            for r in rows:
+                r_id = r["repo_id"] if isinstance(r, sqlite3.Row) else r[0]
+                r_p = r["repo_path"] if isinstance(r, sqlite3.Row) else r[1]
+                if r_id == repo_id or (r_p and os.path.normcase(os.path.abspath(r_p)) == norm_p):
+                    conn.execute("DELETE FROM repos WHERE repo_id = ?", (r_id,))
+            
+            # Record in unregistered_repos table so scanning mechanisms (like .repos/ or sample_repo) also omit it
+            conn.execute(
+                "INSERT OR REPLACE INTO unregistered_repos (repo_path, unregistered_at) VALUES (?, ?)",
+                (norm_p, time.time()),
+            )
+        return True
+    finally:
+        conn.close()
+
+
+def clear_unregistered_repo(repo_path: str, db_path: str = DEFAULT_DB_PATH) -> None:
+    """Clears a repository's unregistered state so that re-adding/indexing it will register it again."""
+    abs_p = os.path.abspath(repo_path)
+    norm_p = os.path.normcase(abs_p)
+    conn = get_db_connection(db_path)
+    try:
+        init_schema(conn)
+        with conn:
+            conn.execute("DELETE FROM unregistered_repos WHERE repo_path = ?", (norm_p,))
+            conn.execute("DELETE FROM unregistered_repos WHERE repo_path = ?", (abs_p,))
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def get_unregistered_repos(db_path: str = DEFAULT_DB_PATH) -> set:
+    """Returns a set of normalized absolute paths of unregistered repositories."""
+    conn = get_db_connection(db_path)
+    unregistered = set()
+    try:
+        init_schema(conn)
+        rows = conn.execute("SELECT repo_path FROM unregistered_repos").fetchall()
+        for r in rows:
+            p = r["repo_path"] if isinstance(r, sqlite3.Row) else r[0]
+            if p:
+                unregistered.add(os.path.normcase(os.path.abspath(p)))
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return unregistered
+
+
+def is_repo_unregistered(repo_path: str, db_path: str = DEFAULT_DB_PATH) -> bool:
+    """Checks if a repository path has been explicitly unregistered."""
+    if not os.path.exists(db_path):
+        return False
+    abs_p = os.path.abspath(repo_path)
+    norm_p = os.path.normcase(abs_p)
+    conn = get_db_connection(db_path)
+    try:
+        init_schema(conn)
+        row = conn.execute(
+            "SELECT 1 FROM unregistered_repos WHERE repo_path = ? OR repo_path = ?",
+            (norm_p, abs_p),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
 
 
 def get_faiss_index_path(repo_id: str, storage_dir: str = ".storage") -> str:

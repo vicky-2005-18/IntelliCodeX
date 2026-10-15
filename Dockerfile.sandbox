@@ -1,11 +1,36 @@
 FROM python:3.11-slim
 
-# Install minimal dependencies for sandbox test execution
-# NOTE: Project-specific dependencies (numpy, scikit-learn, tree-sitter parsers, etc.)
-# must be added by the user based on the repository being tested.
+# Install minimal dependencies for multi-language sandbox test execution (Python, Node.js, TypeScript, Java 21, C/C++ GCC/CMake, Go)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    nodejs \
+    npm \
+    openjdk-21-jdk-headless \
+    gcc \
+    g++ \
+    cmake \
+    make \
+    ninja-build \
+    golang-go \
+    rustc \
+    cargo \
+    curl \
+    && npm install -g typescript @types/node \
+    && curl -sSL https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/1.10.2/junit-platform-console-standalone-1.10.2.jar -o /usr/local/lib/junit-platform-console-standalone.jar \
+    && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
+
+ENV NODE_PATH="/usr/local/lib/node_modules"
+ENV JUNIT_PLATFORM_JAR="/usr/local/lib/junit-platform-console-standalone.jar"
+ENV GOCACHE="/tmp/go-cache"
+ENV GOPATH="/tmp/go-path"
+ENV GOPROXY="off"
+ENV GOTOOLCHAIN="local"
+ENV GONOSUMDB="*"
+ENV CGO_ENABLED="0"
+ENV CARGO_NET_OFFLINE="true"
+ENV CARGO_TERM_COLOR="never"
+ENV CARGO_HOME="/tmp/cargo-home"
 
 RUN pip install --no-cache-dir pytest
 

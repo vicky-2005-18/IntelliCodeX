@@ -9,8 +9,11 @@ import ast
 import os
 import sys
 import re
+import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 # Ensure repository root is on sys.path for direct script execution
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -93,7 +96,8 @@ def chunk_python_file(sf: SourceFile, skip_overload_stubs: bool = True) -> List[
     chunks: List[CodeChunk] = []
     try:
         tree = ast.parse(sf.content, filename=sf.rel_path)
-    except SyntaxError:
+    except SyntaxError as e:
+        logger.warning(f"Syntax error in '{sf.rel_path}': {e}. Falling back to windowed chunking.")
         return _windowed_chunks(sf)
 
     imports = _extract_imports(tree)
@@ -289,6 +293,8 @@ def chunk_file(sf: SourceFile, skip_overload_stubs: bool = True) -> List[CodeChu
     if sf.has_tree_sitter and sf.language in ts_supported:
         ts_chunks = extract_tree_sitter_chunks(sf.content, sf.rel_path, sf.language)
         if ts_chunks:
+            from core.dependency_graph import extract_file_imports
+            file_imports = extract_file_imports(sf)
             return [
                 CodeChunk(
                     chunk_id=c["chunk_id"],
@@ -299,6 +305,7 @@ def chunk_file(sf: SourceFile, skip_overload_stubs: bool = True) -> List[CodeChu
                     start_line=c["start_line"],
                     end_line=c["end_line"],
                     code=c["code"],
+                    imports=file_imports,
                 )
                 for c in ts_chunks
             ]

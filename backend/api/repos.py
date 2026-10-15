@@ -13,13 +13,14 @@ from core.safe_paths import resolve_within
 from backend.services.llm_factory import create_embedder, create_llm
 from backend.auth import User, get_current_user
 from backend.database import db_manager, save_vector_store, load_vector_store
-from backend.services import GitService, IncrementalIndexer
+from backend.services import GitService, IncrementalIndexer, RepositoryWatcher
 from backend.config import settings
 
 router = APIRouter(prefix="/repos", tags=["Repositories"], dependencies=[Depends(get_current_user)])
 
 # Active repository cache: repo_id -> dict
 ACTIVE_REPOS: Dict[str, Dict[str, Any]] = {}
+ACTIVE_WATCHERS: Dict[str, Any] = {}
 
 REPO_ID_REGEX = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -413,6 +414,13 @@ def delete_repo(repo_id: str, current_user: User = Depends(get_current_user)):
             detail="Only administrators can delete other users' repositories.",
         )
 
+    watcher = ACTIVE_WATCHERS.pop(valid_id, None)
+    if watcher:
+        try:
+            watcher.stop()
+        except Exception:
+            pass
+
     ACTIVE_REPOS.pop(valid_id, None)
     db_manager.delete("repositories", {"repo_id": valid_id})
     return {"message": f"Repository '{valid_id}' deleted successfully", "repo_id": valid_id}
@@ -447,4 +455,72 @@ def sync_incremental(repo_id: str, current_user: User = Depends(get_current_user
         "repo_id": repo_id,
         "files_reindexed": count,
         "total_chunks": len(new_store.chunks),
+    }
+
+
+@router.post("/{repo_id}/watch/start")
+def start_repo_watcher(repo_id: str, current_user: User = Depends(get_current_user)):
+    """Starts background filesystem monitoring for a repository."""
+    valid_id = validate_repo_id(repo_id)
+    repo_data = get_repo_for_user(valid_id, current_user)
+    repo_path = repo_data["meta"]["repo_path"]
+    embedder = repo_data["embedder"]
+
+    if valid_id in ACTIVE_WATCHERS and ACTIVE_WATCHERS[valid_id].is_alive():
+        return {"repo_id": valid_id, "active": True, "message": "Watcher already running", "repo_path": repo_path}
+
+    def on_live_reindex(new_result, changed_paths, elapsed):
+        if valid_id in ACTIVE_REPOS:
+            ACTIVE_REPOS[valid_id]["store"] = new_result.store
+            ACTIVE_REPOS[valid_id]["dep_graph"] = new_result.graph
+            ACTIVE_REPOS[valid_id]["call_graph"] = getattr(new_result, "call_graph", None)
+            ACTIVE_REPOS[valid_id]["lexical_index"] = getattr(new_result, "lexical_index", None)
+            from rag.query_engine import QueryEngine
+            ACTIVE_REPOS[valid_id]["engine"] = QueryEngine(
+                new_result.store,
+                embedder,
+                getattr(ACTIVE_REPOS[valid_id].get("engine"), "llm", None),
+                dep_graph=new_result.graph,
+                call_graph=getattr(new_result, "call_graph", None),
+                lexical_index=getattr(new_result, "lexical_index", None),
+                hybrid_search=True,
+                repo_path=repo_path,
+            )
+
+    watcher = RepositoryWatcher(
+        repo_path=repo_path,
+        embedder=embedder,
+        on_reindex=on_live_reindex,
+        debounce_delay=0.5,
+    )
+    if watcher.start():
+        ACTIVE_WATCHERS[valid_id] = watcher
+        return {"repo_id": valid_id, "active": True, "message": f"Started watcher on '{repo_path}'", "repo_path": repo_path}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to start watcher (watchdog unavailable or filesystem error)")
+
+
+@router.post("/{repo_id}/watch/stop")
+def stop_repo_watcher(repo_id: str, current_user: User = Depends(get_current_user)):
+    """Stops background filesystem monitoring for a repository."""
+    valid_id = validate_repo_id(repo_id)
+    get_repo_for_user(valid_id, current_user)
+
+    watcher = ACTIVE_WATCHERS.pop(valid_id, None)
+    if watcher:
+        watcher.stop()
+        return {"repo_id": valid_id, "active": False, "message": "Watcher stopped"}
+    return {"repo_id": valid_id, "active": False, "message": "Watcher was not running"}
+
+
+@router.get("/{repo_id}/watch/status")
+def get_repo_watcher_status(repo_id: str, current_user: User = Depends(get_current_user)):
+    """Returns the current monitoring status for a repository."""
+    valid_id = validate_repo_id(repo_id)
+    repo_data = get_repo_for_user(valid_id, current_user)
+    is_active = valid_id in ACTIVE_WATCHERS and ACTIVE_WATCHERS[valid_id].is_alive()
+    return {
+        "repo_id": valid_id,
+        "active": is_active,
+        "repo_path": repo_data["meta"]["repo_path"],
     }

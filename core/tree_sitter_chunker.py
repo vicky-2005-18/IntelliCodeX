@@ -358,6 +358,8 @@ def extract_tree_sitter_chunks(content: str, rel_path: str, lang: str) -> List[d
         tree = parser.parse(source_bytes)
         if not tree.root_node:
             return []
+        if tree.root_node.has_error:
+            logger.warning(f"Syntax error detected in '{rel_path}' [{lang}] during Tree-Sitter AST parsing; extracting partial valid nodes.")
 
         if lang in ("javascript", "typescript", "tsx"):
             return _extract_js_ts_chunks(tree.root_node, source_lines, source_bytes, rel_path, lang)

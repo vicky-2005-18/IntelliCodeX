@@ -386,3 +386,249 @@ def test_language_and_token_budget_boundaries():
         # 50 tokens ~ 200 chars limit on demonstration body
         assert len(prompt) < 1000
 
+
+def test_retrieval_invariants_rejects_failed_skipped_timedout_invalidated_and_infra_errors():
+    """Requirement 7: Verify that failed, skipped, timed-out, invalidated, and infrastructure-error experiences cannot be retrieved."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        storage_file = os.path.join(tmp_dir, "repairs.json")
+        bank = RepairExperienceBank(storage_path=storage_file)
+
+        # 1. Direct retrieval tests on bank: unverified or unapproved experiences
+        bank.record_success(
+            error_type="KeyError",
+            error_description="Failed test run should not be demonstration",
+            original_code="bad_code_failed()",
+            fixed_code="still_bad()",
+            explanation="Did not pass",
+            source="sandbox_fail",
+            test_verified=False,
+            developer_approved=False,
+            is_public=True,
+        )
+        bank.record_success(
+            error_type="KeyError",
+            error_description="Skipped test run should not be demonstration",
+            original_code="bad_code_skipped()",
+            fixed_code="skipped_fix()",
+            explanation="Skipped tests",
+            source="sandbox_skipped",
+            test_verified=False,
+            developer_approved=False,
+            is_public=True,
+        )
+        bank.record_success(
+            error_type="KeyError",
+            error_description="Timed out container run should not be demonstration",
+            original_code="bad_code_timeout()",
+            fixed_code="timed_out_fix()",
+            explanation="Timed out",
+            source="sandbox_timeout",
+            test_verified=False,
+            developer_approved=False,
+            is_public=True,
+        )
+        bank.record_success(
+            error_type="KeyError",
+            error_description="Docker infrastructure error should not be demonstration",
+            original_code="bad_code_infra()",
+            fixed_code="infra_error_fix()",
+            explanation="Docker failed",
+            source="docker_infra_error",
+            test_verified=False,
+            developer_approved=False,
+            is_public=True,
+        )
+
+        # Retrieve for KeyError: none of the unverified / failed records may be returned
+        shots = bank.retrieve_few_shots(error_type="KeyError", limit=10)
+        for s in shots:
+            assert s.test_verified or s.developer_approved or s.source == "golden_sample"
+            assert s.source not in ("sandbox_fail", "sandbox_skipped", "sandbox_timeout", "docker_infra_error")
+            assert "bad_code" not in s.original_code
+
+        # 2. Invalidation test: an approved fix is invalidated and must immediately be excluded
+        valid_exp = bank.record_success(
+            error_type="KeyError",
+            error_description="Approved fix later found defective",
+            original_code="broken_code()",
+            fixed_code="reverted_fix()",
+            explanation="Reverted",
+            source="developer_approval",
+            test_verified=True,
+            developer_approved=True,
+            is_public=True,
+        )
+        # Before invalidation: retrieved
+        before = bank.retrieve_few_shots(error_type="KeyError", limit=10)
+        assert any(e.experience_id == valid_exp.experience_id for e in before)
+
+        # Invalidate experience
+        bank.invalidate_experience(valid_exp.experience_id, reason="reverted due to regression")
+
+        # After invalidation: MUST NOT be retrieved
+        after = bank.retrieve_few_shots(error_type="KeyError", limit=10)
+        assert not any(e.experience_id == valid_exp.experience_id for e in after)
+
+        # 3. PatchEngine lifecycle test: PatchEngine must never record failed/skipped/timed-out runs
+        from unittest.mock import MagicMock
+        from core.sandbox_runner import SandboxTestResult
+
+        mock_runner = MagicMock()
+        mock_bank = MagicMock(spec=RepairExperienceBank)
+
+        from core.vectorstore import FaissVectorStore
+        from core.embedder import TfidfEmbedder
+        engine = PatchEngine(
+            store=FaissVectorStore(dim=16),
+            embedder=TfidfEmbedder(dim=16),
+            llm=None,
+            sandbox_runner=mock_runner,
+            experience_bank=mock_bank,
+        )
+
+        # Scenario A: Test failed
+        mock_runner.run_tests_with_patch.return_value = SandboxTestResult(
+            success=False, exit_code=1, stdout="", stderr="FAILED test", duration_seconds=0.5, framework="pytest"
+        )
+        engine.generate_and_verify_patch(
+            repo_id="test-repo", error_report="KeyError: 'k'", target_file="mod.py", max_iterations=1
+        )
+        mock_bank.record_success.assert_not_called()
+
+        # Scenario B: Test skipped
+        mock_runner.run_tests_with_patch.return_value = SandboxTestResult(
+            success=False, skipped=True, exit_code=0, stdout="", stderr="SKIPPED", duration_seconds=0.1, framework="pytest"
+        )
+        engine.generate_and_verify_patch(
+            repo_id="test-repo", error_report="KeyError: 'k'", target_file="mod.py", max_iterations=1
+        )
+        mock_bank.record_success.assert_not_called()
+
+        # Scenario C: Container timeout (exit_code -1)
+        mock_runner.run_tests_with_patch.return_value = SandboxTestResult(
+            success=False, exit_code=-1, stdout="", stderr="Timed out", duration_seconds=30.0, framework="pytest"
+        )
+        engine.generate_and_verify_patch(
+            repo_id="test-repo", error_report="KeyError: 'k'", target_file="mod.py", max_iterations=1
+        )
+        mock_bank.record_success.assert_not_called()
+
+        # Scenario D: Infrastructure error (exit_code -8 or -6)
+        mock_runner.run_tests_with_patch.return_value = SandboxTestResult(
+            success=False, exit_code=-8, stdout="", stderr="Docker daemon unavailable", duration_seconds=0.1, framework="pytest"
+        )
+        engine.generate_and_verify_patch(
+            repo_id="test-repo", error_report="KeyError: 'k'", target_file="mod.py", max_iterations=1
+        )
+        mock_bank.record_success.assert_not_called()
+
+
+def test_security_policy_provenance_and_strict_retrieval():
+    """
+    Verifies that RepairExperienceBank enforces security policy provenance:
+    1. Historical records without security_policy deserialize as 'unscanned' and are never upgraded automatically.
+    2. Candidate approved under 'secrets_only' cannot satisfy a 'strict' security retrieval requirement.
+    3. Candidate approved under 'strict' satisfies both strict and secrets_only retrieval.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        storage_file = os.path.join(tmp_dir, "repairs.json")
+        bank = RepairExperienceBank(storage_path=storage_file)
+
+        # 1. Historical record without security_policy
+        raw_historical = {
+            "experience_id": "hist-001",
+            "error_type": "KeyError",
+            "error_description": "legacy key error",
+            "original_code": "return d['x']",
+            "fixed_code": "return d.get('x')",
+            "explanation": "safe get",
+            "source": "sandbox_pass",
+            "language": "python",
+            "test_verified": True,
+            "developer_approved": True,
+        }
+        exp_hist = RepairExperience.from_dict(raw_historical)
+        assert exp_hist.security_policy == "unscanned"
+        assert exp_hist.security_approved is False
+        assert exp_hist.security_status == "unscanned"
+        bank.experiences[exp_hist.experience_id] = exp_hist
+
+        # 2. Record approved under secrets_only policy (partial coverage)
+        exp_secrets = bank.record_success(
+            error_type="KeyError",
+            error_description="key error in ts",
+            original_code="return obj['x']",
+            fixed_code="return obj?.x",
+            explanation="optional chaining",
+            source="sandbox_pass",
+            language="typescript",
+            test_verified=True,
+            developer_approved=False,
+            security_approved=True,
+            security_status="passed",
+            security_coverage="partial",
+            security_policy="secrets_only",
+            event_id="sec-secrets-1",
+        )
+        assert exp_secrets.security_policy == "secrets_only"
+
+        # 3. Record approved under strict policy (full AST + secret coverage)
+        exp_strict = bank.record_success(
+            error_type="KeyError",
+            error_description="key error in python",
+            original_code="return data['x']",
+            fixed_code="return data.get('x')",
+            explanation="use get",
+            source="sandbox_pass",
+            language="python",
+            test_verified=True,
+            developer_approved=False,
+            security_approved=True,
+            security_status="passed",
+            security_coverage="full",
+            security_policy="strict",
+            event_id="sec-strict-1",
+        )
+        assert exp_strict.security_policy == "strict"
+
+        # Test A: secrets_only cannot satisfy strict retrieval requirement
+        retrieved_strict_ts = bank.retrieve_few_shots(
+            error_type="KeyError",
+            language="typescript",
+            required_security_policy="strict",
+        )
+        # exp_secrets has secrets_only policy, so it must NOT be retrieved under strict
+        assert not any(e.experience_id == exp_secrets.experience_id for e in retrieved_strict_ts)
+
+        # Test B: secrets_only CAN satisfy secrets_only retrieval requirement
+        retrieved_secrets_ts = bank.retrieve_few_shots(
+            error_type="KeyError",
+            language="typescript",
+            required_security_policy="secrets_only",
+        )
+        assert any(e.experience_id == exp_secrets.experience_id for e in retrieved_secrets_ts)
+
+        # Test C: strict approval satisfies both strict and secrets_only
+        retrieved_strict_py = bank.retrieve_few_shots(
+            error_type="KeyError",
+            language="python",
+            required_security_policy="strict",
+        )
+        assert any(e.experience_id == exp_strict.experience_id for e in retrieved_strict_py)
+
+        retrieved_sec_py = bank.retrieve_few_shots(
+            error_type="KeyError",
+            language="python",
+            required_security_policy="secrets_only",
+        )
+        assert any(e.experience_id == exp_strict.experience_id for e in retrieved_sec_py)
+
+        # Test D: Historical unscanned record cannot satisfy strict or generic security_approved
+        retrieved_approved = bank.retrieve_few_shots(
+            error_type="KeyError",
+            require_security_approved=True,
+        )
+        assert not any(e.experience_id == "hist-001" for e in retrieved_approved)
+
+
+

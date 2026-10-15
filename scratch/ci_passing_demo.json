@@ -1,0 +1,43 @@
+{
+  "status": "success",
+  "ci_status": "success",
+  "exit_code": 0,
+  "pipeline_exit_code": 0,
+  "timestamp": "2026-10-15T05:55:08.132138+00:00",
+  "repo_path": "C:\\Users\\vikas\\AppData\\Local\\Temp\\icx_ci_demo_02xnv_tw\\pass_repo",
+  "analysis": {
+    "num_files": 2,
+    "num_chunks": 2,
+    "ast_chunks_count": 2,
+    "ast_ratio_percent": 0.0,
+    "ingestion_duration_seconds": 0.036,
+    "security_scan": {
+      "status": "passed",
+      "high_severity": 0,
+      "total_findings": 0
+    }
+  },
+  "patch_verification": {
+    "tested": true,
+    "sandbox_mode": "docker",
+    "docker_image": "intellicodex-sandbox:latest",
+    "target_file": "src/math_ops.py",
+    "runtime": "python",
+    "framework": "pytest",
+    "duration_seconds": 1.314,
+    "test_counts": {
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "total": 1
+    },
+    "passed_tests": [
+      "tests/test_ops.py::test_mult"
+    ],
+    "failed_tests": [],
+    "assertion_errors": [],
+    "verified": true,
+    "outcome": "passed"
+  },
+  "failures": []
+}

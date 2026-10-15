@@ -77,27 +77,23 @@ goto :MENU
 echo.
 echo Running IntelliCodeX Interactive CLI (Ollama backend - qwen2.5-coder:7b)...
 "%PYTHON_EXE%" cli.py sample_repo --backend ollama --model qwen2.5-coder:7b --tui
-echo.
-echo =======================================================================
-echo IntelliCodeX CLI has stopped.
-echo =======================================================================
-set "RESTART_CLI=Y"
-set /p "RESTART_CLI=Restart CLI? [Y/N] (default Y): "
-if /i "!RESTART_CLI!"=="N" goto :MENU
-goto :START_CLI
+set "CLI_EXIT=!ERRORLEVEL!"
+if not "!CLI_EXIT!"=="0" (
+    echo.
+    echo [ERROR] IntelliCodeX CLI exited with status code !CLI_EXIT!.
+)
+exit /b !CLI_EXIT!
 
 :START_CLI_OFFLINE
 echo.
 echo Running IntelliCodeX Interactive CLI (Offline TF-IDF mode)...
 "%PYTHON_EXE%" cli.py sample_repo --backend tfidf --tui
-echo.
-echo =======================================================================
-echo IntelliCodeX CLI has stopped.
-echo =======================================================================
-set "RESTART_CLI=Y"
-set /p "RESTART_CLI=Restart CLI? [Y/N] (default Y): "
-if /i "!RESTART_CLI!"=="N" goto :MENU
-goto :START_CLI_OFFLINE
+set "CLI_EXIT=!ERRORLEVEL!"
+if not "!CLI_EXIT!"=="0" (
+    echo.
+    echo [ERROR] IntelliCodeX CLI exited with status code !CLI_EXIT!.
+)
+exit /b !CLI_EXIT!
 
 :START_BACKEND
 echo.

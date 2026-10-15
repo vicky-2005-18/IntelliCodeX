@@ -199,11 +199,13 @@ def display_review_screen(
     explanation: str = "",
     file_idx: int = 1,
     total_files: int = 1,
-    mode: str = "auto"
+    mode: str = "auto",
+    verification_info: Optional[Dict[str, Any]] = None,
 ):
     """
     Renders the complete interactive review card for the active file.
     Automatically chooses side-by-side if terminal >= 120 cols, or unified otherwise.
+    Separates execution-derived verification verdicts from LLM advisory claims.
     """
     term_width = shutil.get_terminal_size((80, 24)).columns
     if console and hasattr(console, "width") and console.width:
@@ -216,15 +218,32 @@ def display_review_screen(
     else:
         is_side_by_side = False
 
+    sb_info = verification_info or {}
+    sb_status = sb_info.get("test_status", "skipped").upper()
+    is_verified = sb_info.get("verified", False)
+
     if HAS_RICH and console:
         # Header info
         header_grid = Table.grid(padding=(0, 2))
         header_grid.add_column(style="bold cyan", justify="right")
         header_grid.add_column(style="white")
         header_grid.add_row("Review Target:", f"[bold white]{filename}[/bold white] [dim]({file_idx} of {total_files})[/dim]")
-        header_grid.add_row("Status:", "[bold yellow]PROPOSED — PENDING APPROVAL[/bold yellow]")
+        
+        if sb_status == "PASSED" and is_verified:
+            header_grid.add_row("Execution Verdict:", "[bold green]PASSED — Verified inside Docker sandbox[/bold green]")
+            header_grid.add_row("Status:", "[bold green]VERIFIED — READY FOR APPROVAL[/bold green]")
+        elif sb_status == "FAILED":
+            header_grid.add_row("Execution Verdict:", "[bold red]FAILED — Sandbox test execution failed[/bold red]")
+            header_grid.add_row("Status:", "[bold red]UNVERIFIED — SANDBOX TESTS FAILED[/bold red]")
+        else:
+            header_grid.add_row("Execution Verdict:", "[bold yellow]SKIPPED — No automated tests verified[/bold yellow]")
+            header_grid.add_row("Status:", "[bold yellow]PROPOSED — PENDING APPROVAL[/bold yellow]")
+
         if explanation:
-            header_grid.add_row("Summary:", f"[italic]{explanation}[/italic]")
+            header_grid.add_row("Model Advisory:", f"[italic]{explanation}[/italic]")
+        if sb_status == "FAILED":
+            header_grid.add_row("Warning:", "[bold red][!] Model advisory claims cannot override failed test execution results.[/bold red]")
+
         header_grid.add_row("View Mode:", f"[bold]{'Side-by-Side (2 Columns)' if is_side_by_side else 'Unified Diff'}[/bold] [dim](Width: {term_width} cols)[/dim]")
 
         console.print("\n")
@@ -251,8 +270,12 @@ def display_review_screen(
         print("\n" + "=" * 70)
         print(f" INTELLICODEX CODE REVIEW: {filename} ({file_idx}/{total_files})")
         print("=" * 70)
+        print(f"Execution Verdict: {sb_status} {'(Verified in Docker)' if is_verified else ('(Unverified / Tests Failed)' if sb_status == 'FAILED' else '')}")
+        if sb_status == "FAILED":
+            print("[!] Warning: Candidate patch failed automated behavioral tests in Docker sandbox.")
+            print("[!] Model advisory claims cannot override failed test execution results.")
         if explanation:
-            print(f"Explanation: {explanation}")
+            print(f"Model Advisory   : {explanation}")
         print("\n--- Proposed Unified Diff ---")
         diff = difflib.unified_diff(
             original_code.splitlines(),
