@@ -190,9 +190,18 @@ def run_bandit_scan(target_path: str) -> Dict[str, Any]:
             "metrics": {},
         }
 
-    cmd = [sys.executable, "-m", "bandit", "-r", target_path, "-f", "json", "-q"]
+    is_dir = os.path.isdir(target_path)
+    timeout = 180 if is_dir else 60
+    if is_dir:
+        cmd = [
+            sys.executable, "-m", "bandit", "-r", target_path,
+            "-x", ".git,.venv,venv,env,.repos,.storage,node_modules,graphify-out,scratch,tests/fixtures",
+            "-f", "json", "-q"
+        ]
+    else:
+        cmd = [sys.executable, "-m", "bandit", target_path, "-f", "json", "-q"]
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
         out = proc.stdout.strip()
         if not out:
             # Bandit returns empty string if clean or on error
@@ -257,7 +266,7 @@ def run_bandit_scan(target_path: str) -> Dict[str, Any]:
         return {
             "success": False,
             "target": target_path,
-            "error": "Bandit scanner timed out after 60s",
+            "error": f"Bandit scanner timed out after {timeout}s",
             "findings": [],
             "metrics": {},
         }

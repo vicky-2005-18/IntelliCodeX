@@ -85,7 +85,7 @@ def test_environment_variable_filtering(sample_repo):
 
 def test_shell_metacharacter_rejection(sample_repo):
     """Test that shell metacharacters are rejected in commands."""
-    runner = SandboxRunner(default_timeout=10, sandbox_mode="local")
+    runner = SandboxRunner(default_timeout=10, sandbox_mode="local", is_admin=True)
 
     # Test with && (command chaining)
     result = runner.run_tests_with_patch(
@@ -127,7 +127,7 @@ def test_shell_metacharacter_rejection(sample_repo):
 
 def test_disallowed_executable_rejection(sample_repo):
     """Test that disallowed executables are rejected."""
-    runner = SandboxRunner(default_timeout=10, sandbox_mode="local")
+    runner = SandboxRunner(default_timeout=10, sandbox_mode="local", is_admin=True)
 
     # Test with curl (not on allowlist)
     result = runner.run_tests_with_patch(
@@ -550,3 +550,175 @@ def test_api_payload_verified_false_when_skipped():
     
     # Check that verified uses test_passed and not test_skipped
     assert "test_passed and not test_skipped" in source, "API payload should set verified=False when skipped"
+
+
+# =========================================================================
+# Timeout Sentinel Defaults, Precedence, and Validation Tests
+# =========================================================================
+
+def test_timeout_sentinel_resolution_and_precedence():
+    """
+    Verifies the 4-tier timeout precedence hierarchy:
+    call override > explicit engine setting > runner default > fallback (30).
+    Also confirms explicit default_timeout=30 is preserved and not overwritten.
+    """
+    from core.sandbox_runner import SandboxRunner, DEFAULT_TIMEOUT, validate_timeout
+    from core.patch_generator import PatchEngine
+
+    # Fallback when neither engine nor runner specifies timeout
+    runner_fallback = SandboxRunner()
+    assert runner_fallback.default_timeout == 30
+    assert runner_fallback._explicit_default_timeout is False
+
+    engine_fallback = PatchEngine(
+        store=MagicMock(),
+        embedder=MagicMock(),
+        sandbox_runner=runner_fallback,
+    )
+    assert engine_fallback.default_timeout == 30
+    assert engine_fallback._explicit_default_timeout is False
+
+    # Runner default inherited when engine omits setting (None sentinel)
+    runner_custom = SandboxRunner(default_timeout=60)
+    assert runner_custom.default_timeout == 60
+    assert runner_custom._explicit_default_timeout is True
+
+    engine_inherited = PatchEngine(
+        store=MagicMock(),
+        embedder=MagicMock(),
+        sandbox_runner=runner_custom,
+    )
+    assert engine_inherited.default_timeout == 60
+    assert engine_inherited._explicit_default_timeout is False
+
+    # Explicit engine setting takes precedence over runner default
+    engine_explicit = PatchEngine(
+        store=MagicMock(),
+        embedder=MagicMock(),
+        sandbox_runner=runner_custom,  # runner has 60
+        default_timeout=45,
+    )
+    assert engine_explicit.default_timeout == 45
+    assert engine_explicit._explicit_default_timeout is True
+
+    # Critical requirement: explicit timeout=30 must be preserved and NOT overwritten by runner=60
+    engine_explicit_30 = PatchEngine(
+        store=MagicMock(),
+        embedder=MagicMock(),
+        sandbox_runner=runner_custom,  # runner has 60
+        default_timeout=30,
+    )
+    assert engine_explicit_30.default_timeout == 30
+    assert engine_explicit_30._explicit_default_timeout is True
+
+    # Call override takes precedence over everything
+    call_timeout = 15
+    assert validate_timeout(call_timeout) == 15
+
+
+def test_invalid_timeout_values_rejected_clearly():
+    """Verifies that invalid timeout values raise clear ValueErrors across runner and engine."""
+    from core.sandbox_runner import SandboxRunner, validate_timeout
+    from core.patch_generator import PatchEngine
+    import math
+
+    invalid_values = [
+        (0, "greater than 0"),
+        (-1, "greater than 0"),
+        (-30, "greater than 0"),
+        (True, "positive integer or float"),   # bool is subclass of int in Python
+        (False, "positive integer or float"),
+        ("30", "positive integer or float"),
+        ("invalid", "positive integer or float"),
+        ([], "positive integer or float"),
+        ({}, "positive integer or float"),
+        (float("nan"), "greater than 0"),
+        (float("inf"), "greater than 0"),
+    ]
+
+    for val, expected_phrase in invalid_values:
+        with pytest.raises(ValueError) as excinfo:
+            validate_timeout(val)
+        assert expected_phrase in str(excinfo.value), f"Failed for val={val!r}: {excinfo.value}"
+
+        with pytest.raises(ValueError):
+            SandboxRunner(default_timeout=val)
+
+        with pytest.raises(ValueError):
+            PatchEngine(store=MagicMock(), embedder=MagicMock(), default_timeout=val)
+
+
+def test_docker_cleanup_scoped_to_exact_container_and_unrelated_active_container_unaffected():
+    """
+    Requirement 1:
+    Scope Docker cleanup assertions to the exact container created by that test.
+    Never assert all icx-sandbox containers globally are absent.
+    Verify an unrelated active container does not cause failure or get terminated.
+    """
+    from core.sandbox_runner import SandboxRunner
+    import subprocess
+    import uuid
+
+    runner = SandboxRunner(sandbox_mode="docker", docker_image="intellicodex-sandbox:latest", is_admin=True)
+    if not runner._check_docker_available():
+        pytest.skip("Docker daemon not available for live container scoping test")
+
+    unrelated_name = f"icx-sandbox-unrelated-{uuid.uuid4().hex[:8]}"
+
+    # Start an unrelated active container matching the icx-sandbox- prefix
+    start_cmd = [
+        "docker", "run", "-d", "--rm",
+        "--name", unrelated_name,
+        "intellicodex-sandbox:latest",
+        "sleep", "45"
+    ]
+    start_proc = subprocess.run(start_cmd, capture_output=True, text=True)
+    if start_proc.returncode != 0:
+        pytest.skip(f"Could not spawn unrelated Docker container: {start_proc.stderr}")
+
+    try:
+        # Verify the unrelated container is active
+        check_unrelated = subprocess.run(
+            ["docker", "ps", "-q", "--filter", f"name={unrelated_name}"],
+            capture_output=True, text=True
+        )
+        assert check_unrelated.stdout.strip(), "Unrelated container failed to launch"
+
+        # Execute a sandboxed run that triggers a timeout
+        with tempfile.TemporaryDirectory() as tmp_repo:
+            test_file = os.path.join(tmp_repo, "hang.py")
+            with open(test_file, "w") as f:
+                f.write("import time\ntime.sleep(30)\n")
+
+            res = runner.run_tests_with_patch(
+                repo_path=tmp_repo,
+                target_file="hang.py",
+                patched_code="import time\ntime.sleep(30)\n",
+                test_command=["python", "hang.py"],
+                timeout=2,
+                runtime="python",
+            )
+
+        assert res.exit_code == -1
+        assert res.container_name is not None
+        assert res.container_name != unrelated_name
+
+        # Verify that ONLY the test's exact container was terminated and removed
+        check_test_container = subprocess.run(
+            ["docker", "ps", "-q", "--filter", f"name={res.container_name}"],
+            capture_output=True, text=True
+        )
+        assert check_test_container.stdout.strip() == "", f"Test container {res.container_name} was leaked"
+
+        # Verify that the unrelated active container is STILL RUNNING and was NOT terminated
+        check_still_running = subprocess.run(
+            ["docker", "ps", "-q", "--filter", f"name={unrelated_name}"],
+            capture_output=True, text=True
+        )
+        assert check_still_running.stdout.strip() != "", (
+            f"Unrelated container {unrelated_name} was erroneously killed by test cleanup!"
+        )
+
+    finally:
+        # Clean up the unrelated canary container
+        subprocess.run(["docker", "rm", "-f", unrelated_name], capture_output=True)

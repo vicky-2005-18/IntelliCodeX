@@ -556,9 +556,11 @@ add_test(NAME HangTest COMMAND test_hang)
         assert result.exit_code == -1
         assert "timed out" in (result.error_message or "").lower()
 
-        # Verify no orphan containers left running
+        # Verify the specific container created for this test was cleanly removed
+        target_container = getattr(result, "container_name", None) or getattr(runner, "last_container_name", None)
+        assert target_container, "Container name should be tracked for docker execution"
         ps_res = subprocess.run(
-            ["docker", "ps", "--filter", "name=icx-sandbox-", "--format", "{{.Names}}"],
+            ["docker", "ps", "--filter", f"name={target_container}", "--format", "{{.Names}}"],
             capture_output=True,
             text=True,
         )

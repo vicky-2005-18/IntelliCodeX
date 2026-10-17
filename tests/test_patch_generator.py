@@ -179,6 +179,16 @@ def test_review_gate_lifecycle_and_audit_log():
             assert f.read() == orig_code
 
         # 3. Approve applies the patch with .bak backup and creates audit log
+        rec["sandbox_validation"] = {
+            "verified": True,
+            "test_status": "passed",
+            "iterations_count": 1,
+        }
+        rec["security_validation"] = {
+            "security_status": "passed",
+            "security_approved": True,
+            "security_policy": "strict",
+        }
         ok_app, msg = engine.apply_patch(rec, approved_by="developer_bob")
         assert ok_app is True
         assert os.path.isfile(abs_path)
@@ -335,6 +345,17 @@ def test_concurrent_modification_conflict_detection():
         # Simulate concurrent external edit on disk after patch generation
         with open(abs_path, "w", encoding="utf-8") as f:
             f.write("def serve():\n    # Modified by developer concurrently\n    return 'v2_in_flight'\n")
+
+        patch_rec["sandbox_validation"] = {
+            "verified": True,
+            "test_status": "passed",
+            "iterations_count": 1,
+        }
+        patch_rec["security_validation"] = {
+            "security_status": "passed",
+            "security_approved": True,
+            "security_policy": "strict",
+        }
 
         # Applying patch without force MUST detect conflict and refuse to overwrite
         ok, msg = engine.apply_patch(patch_rec, approved_by="alice", force=False)

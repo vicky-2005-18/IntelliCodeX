@@ -132,6 +132,16 @@ def test_week4_patch_generator_engine(tmp_path):
     assert rec["confidence_score"] > 0.0
 
     # Test applying patch to physical file
+    rec["sandbox_validation"] = {
+        "verified": True,
+        "test_status": "passed",
+        "iterations_count": 1,
+    }
+    rec["security_validation"] = {
+        "security_status": "passed",
+        "security_approved": True,
+        "security_policy": "strict",
+    }
     ok_app, msg_app = patch_engine.apply_patch(rec)
     assert ok_app is True
     assert "Successfully applied" in msg_app

@@ -83,7 +83,7 @@ jobs:
         run: |
           python cli.py sample_repo --backend tfidf --ci \
             --target-file utils.py \
-            --patch "def helper():\n    return 'ci_verified'\n" \
+            --patch-file .github/fixtures/utils_patch.py \
             --runtime python \
             --sandbox docker \
             --docker-image intellicodex-sandbox:latest \

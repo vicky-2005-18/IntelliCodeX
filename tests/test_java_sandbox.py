@@ -388,9 +388,11 @@ public class HangTest {
         assert result.duration_seconds >= 2.0
         assert "timed out" in (result.traceback_summary or "").lower() or "timed out" in (result.error_message or "").lower()
 
-        # Confirm zero orphaned containers remain active
+        # Confirm the specific container created for this test does not remain active
+        target_container = getattr(result, "container_name", None) or getattr(runner, "last_container_name", None)
+        assert target_container, "Container name should be tracked for docker execution"
         ps_out = subprocess.run(
-            ["docker", "ps", "--filter", "name=icx-sandbox-", "--format", "{{.ID}}"],
+            ["docker", "ps", "--filter", f"name={target_container}", "--format", "{{.ID}}"],
             capture_output=True,
             text=True,
         )

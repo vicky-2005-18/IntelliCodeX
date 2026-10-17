@@ -1,6 +1,7 @@
 # IntelliCodeX — AI-Powered Software Repository Intelligence & Code Analysis Engine
 
-[![Tests: 305 Passed](https://img.shields.io/badge/Tests-305%20Passed-brightgreen)](docs/TESTING.md)
+[![Tests: 572 Passed](https://img.shields.io/badge/Tests-572%20Passed-brightgreen)](docs/PROJECT_STATUS.md)
+[![CI: Automated Gates](https://img.shields.io/badge/CI-Passing%20Gates-success)](.github/workflows/intellicodex.yml)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![CLI: Interactive Terminal Assistant](https://img.shields.io/badge/Interface-CLI%20First-orange)](cli.py)
 [![Backend: FastAPI Bridge](https://img.shields.io/badge/Backend-FastAPI-009688)](backend/main.py)
@@ -202,7 +203,22 @@ pip install -r requirements.txt
 pip install -r requirements-dev.txt
 ```
 
-### 4.2 Run IntelliCodeX Interactive CLI `[TESTED]`
+### 4.2 One-Copy-Paste Docker Demo `[VERIFIED]`
+
+Run the complete pipeline from a fresh clone inside Docker without installing Python or local dependencies:
+
+```bash
+# Build the self-contained container
+docker build -t intellicodex:latest .
+
+# Run instant query demo on sample_repo (offline TF-IDF mode, zero AI setup required)
+docker run --rm -it intellicodex:latest python cli.py sample_repo --backend tfidf -q "how does authenticate work?"
+
+# Or enter interactive CLI inside Docker
+docker run --rm -it intellicodex:latest python cli.py sample_repo --backend tfidf
+```
+
+### 4.3 Run IntelliCodeX Interactive CLI `[TESTED]`
 
 * **Using Windows Launcher**: Run [`run_cli.bat`](run_cli.bat) or [`run.bat`](run.bat) (Option 1).
 

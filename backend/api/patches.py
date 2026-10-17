@@ -29,6 +29,7 @@ class PatchApprovalRequest(BaseModel):
     patch_id: str
     status: str = Field(..., description="'approved' | 'rejected' | 'applied'")
     manual_edit: Optional[str] = Field(None, description="Developer-edited patch content")
+    security_policy: Optional[str] = Field(None, description="'strict' | 'secrets_only'")
 
 
 @router.post("/generate")
@@ -98,14 +99,21 @@ def approve_patch(req: PatchApprovalRequest, current_user: User = Depends(get_cu
         allow_local_sandbox=False  # API mode: local sandbox disabled by default
     )
 
-    updated = engine.update_patch_status(req.patch_id, req.status, req.manual_edit)
+    updated = engine.update_patch_status(
+        req.patch_id,
+        req.status,
+        req.manual_edit,
+        user=current_user.id,
+        security_policy=req.security_policy,
+    )
     if not updated:
         raise HTTPException(status_code=404, detail=f"Patch ID '{req.patch_id}' not found.")
 
     if req.status == "applied" and updated.get("apply_result", {}).get("success") is False:
+        err_msg = updated["apply_result"].get("message") or updated["apply_result"].get("error") or "Unknown error"
         raise HTTPException(
-            status_code=500,
-            detail=f"Patch application failed: {updated['apply_result'].get('error')}",
+            status_code=400,
+            detail=f"Patch application failed: {err_msg}",
         )
 
     return updated

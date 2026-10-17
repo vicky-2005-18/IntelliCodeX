@@ -4,6 +4,7 @@ Extracts code context via RAG, localizes root causes, prompts LLM or runs heuris
 merges snippet fixes into full repository files, generates unified git diffs, validates syntax,
 and executes iterative test-driven closed-loop sandbox validation.
 """
+import copy
 import difflib
 import logging
 import os
@@ -12,7 +13,7 @@ import re
 import tempfile
 import uuid
 import time
-from typing import List, Dict, Any, Optional, Tuple, Callable
+from typing import List, Dict, Any, Optional, Tuple, Callable, Union
 import networkx as nx
 
 # Ensure repository root is on sys.path for direct script execution
@@ -25,7 +26,7 @@ from core.embedder import BaseEmbedder
 from core.llm_client import OllamaLLM
 from core.chunker import CodeChunk
 from core.bug_localizer import BugLocalizer, AdvancedBugLocalizer
-from core.sandbox_runner import SandboxRunner, SandboxTestResult
+from core.sandbox_runner import SandboxRunner, SandboxTestResult, validate_timeout, DEFAULT_TIMEOUT
 from core.safe_paths import resolve_within
 from backend.patch_generator.llm_parser import extract_code_and_explanation, strip_language_prefix
 from backend.patch_generator.patch_validator import validate_patch, compute_patch_quality_score
@@ -209,6 +210,183 @@ def validate_candidate_interface(
     return True, None
 
 
+def evaluate_patch_approval_gate(
+    patch_record: Dict[str, Any],
+    security_policy: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Central Approval Gate for applying patches to codebases.
+
+    Enforces strict invariants before a proposed candidate patch can be applied:
+    1. Behavioral Verification Gate:
+       - Requires consistent evidence of successful execution:
+         verified=True, test_status='passed', success=True, exit_code=0.
+       - Requires at least one passing test (passed_count >= 1).
+       - Zero tests executed/passed is strictly rejected.
+       - Missing, skipped, failed, timed-out, collection-error, or pre-flight-rejected
+         verification blocks application.
+       - status="verified" on patch_record CANNOT override contradictory execution evidence.
+    2. Security Policy Gate (kept separate from behavioral verification):
+       - strict: incomplete, failed, unscanned, or error states block.
+       - secrets_only: allow only an explicitly approved result under that policy;
+         preserve coverage limitations and policy provenance.
+    """
+    if not isinstance(patch_record, dict):
+        return False, "Approval rejected: invalid patch record (must be a dictionary)."
+
+    target_file = patch_record.get("target_file")
+    suggested = patch_record.get("suggested_patch")
+    if not target_file or not suggested:
+        return False, "Approval rejected: invalid patch record (missing target_file or suggested_patch)."
+
+    # ---------------------------------------------------------
+    # 1. Behavioral Verification Gate
+    # ---------------------------------------------------------
+    sb_val = patch_record.get("sandbox_validation")
+    if not sb_val or not isinstance(sb_val, dict):
+        return False, "Approval rejected: missing sandbox verification metadata. Normal approval requires verified candidate patch."
+
+    test_status = str(sb_val.get("test_status", "")).lower().strip()
+    if test_status in ("failed", "error", "rejected"):
+        return False, f"Approval rejected: candidate patch failed test verification (test_status: {test_status})."
+
+    if test_status in ("timed-out", "timed_out", "timeout"):
+        return False, "Approval rejected: candidate patch failed test verification (sandbox test execution timed out)."
+
+    if test_status in ("collection_error", "collection-error"):
+        return False, "Approval rejected: candidate patch failed test verification (test collection errors occurred during sandbox execution)."
+
+    if test_status in ("pre_flight_rejected", "preflight_rejected"):
+        return False, "Approval rejected: candidate patch failed test verification (candidate pre-flight interface validation failed)."
+
+    if sb_val.get("skipped") is True or test_status == "skipped":
+        return False, "Approval rejected: sandbox test execution was skipped. Normal approval requires executed and passing tests."
+
+    is_verified = sb_val.get("verified")
+    if is_verified is not True:
+        return False, f"Approval rejected: candidate patch failed test verification (verified={is_verified})."
+
+    if test_status != "passed":
+        return False, f"Approval rejected: test_status must be 'passed', got '{test_status}'."
+
+    # Inspect test_result / execution evidence
+    test_res = sb_val.get("test_result")
+    if isinstance(test_res, dict):
+        if test_res.get("skipped") is True:
+            return False, "Approval rejected: test execution result indicates tests were skipped."
+
+        if test_res.get("success") is False:
+            return False, "Approval rejected: test execution reported success=False."
+
+        exit_code = test_res.get("exit_code")
+        if exit_code is not None and exit_code != 0:
+            err_text = (str(test_res.get("error_message") or "") + " " + str(test_res.get("stderr") or "")).lower()
+            if "candidate validation rejected" in err_text or "candidate_interface_validation" in (test_res.get("failed_tests") or []):
+                return False, "Approval rejected: candidate pre-flight interface validation failed."
+            if "timeout" in err_text or "timed out" in err_text or exit_code == -1:
+                return False, "Approval rejected: sandbox test execution timed out."
+            return False, f"Approval rejected: test execution returned non-zero exit code ({exit_code})."
+
+        failed_count = test_res.get("failed_count", 0)
+        failed_tests = test_res.get("failed_tests") or []
+        if failed_count > 0 or len(failed_tests) > 0:
+            if "candidate_interface_validation" in failed_tests:
+                return False, "Approval rejected: candidate pre-flight interface validation failed."
+            return False, f"Approval rejected: test execution reported {failed_count or len(failed_tests)} failing test(s): {failed_tests}."
+
+        coll_errors = test_res.get("collection_errors") or []
+        if len(coll_errors) > 0:
+            return False, f"Approval rejected: test execution encountered collection errors: {coll_errors}."
+
+        err_msg = str(test_res.get("error_message") or "")
+        stderr_msg = str(test_res.get("stderr") or "")
+        combined_err = (err_msg + " " + stderr_msg).lower()
+        if "timeout" in combined_err or "timed out" in combined_err:
+            return False, "Approval rejected: sandbox test execution timed out."
+        if "test file immutability violation" in combined_err:
+            return False, "Approval rejected: test file immutability violation detected."
+        if "candidate validation rejected" in combined_err:
+            return False, "Approval rejected: candidate pre-flight interface validation failed."
+
+        passed_cnt = test_res.get("passed_count")
+        passed_list = test_res.get("passed_tests")
+        total_cnt = test_res.get("total_count")
+        if passed_cnt is not None and passed_cnt <= 0:
+            return False, "Approval rejected: zero tests passed. Verification requires at least one passing test."
+        if passed_list is not None and len(passed_list) == 0 and (passed_cnt is None or passed_cnt == 0):
+            return False, "Approval rejected: zero tests passed. Verification requires at least one passing test."
+        if total_cnt is not None and total_cnt <= 0 and (passed_cnt is None or passed_cnt == 0):
+            return False, "Approval rejected: zero tests executed. Verification requires at least one passing test."
+
+    top_failed_count = sb_val.get("failed_count", 0)
+    top_failed_tests = sb_val.get("failed_tests") or []
+    if top_failed_count > 0 or len(top_failed_tests) > 0:
+        return False, f"Approval rejected: candidate patch reported failing test(s): {top_failed_tests or top_failed_count}."
+
+    top_coll_errors = sb_val.get("collection_errors") or []
+    if len(top_coll_errors) > 0:
+        return False, f"Approval rejected: test collection errors occurred: {top_coll_errors}."
+
+    top_passed_count = sb_val.get("passed_count")
+    if top_passed_count is not None and top_passed_count <= 0:
+        return False, "Approval rejected: zero tests passed. Verification requires at least one passing test."
+
+    top_total_count = sb_val.get("total_count")
+    if top_total_count is not None and top_total_count <= 0 and (top_passed_count is None or top_passed_count == 0):
+        return False, "Approval rejected: zero tests executed. Verification requires at least one passing test."
+
+    # ---------------------------------------------------------
+    # 2. Security Policy Gate (kept separate from behavioral)
+    # ---------------------------------------------------------
+    sec_val = patch_record.get("security_validation")
+    sec_policy = (
+        security_policy
+        or patch_record.get("security_policy")
+        or (sec_val.get("security_policy") if isinstance(sec_val, dict) else None)
+        or "strict"
+    ).lower().strip()
+
+    if not isinstance(sec_val, dict) or not sec_val:
+        sec_status = "unscanned"
+        sec_approved = False
+        sec_coverage = "unknown"
+        sec_findings = 0
+        record_policy = "unknown"
+    else:
+        sec_status = str(sec_val.get("security_status", "unscanned")).lower().strip()
+        sec_approved = bool(sec_val.get("security_approved", False))
+        sec_coverage = str(sec_val.get("security_coverage", "unknown")).lower().strip()
+        sec_findings = sec_val.get("failing_findings_count", 0)
+        record_policy = str(sec_val.get("security_policy", "strict")).lower().strip()
+
+    if sec_policy == "strict":
+        if record_policy == "secrets_only":
+            return False, "Approval rejected: candidate patch was only approved under 'secrets_only' policy and cannot be applied under 'strict' security policy."
+        if sec_status == "unscanned":
+            return False, "Approval rejected: security scan status is 'unscanned'. Strict security policy requires completed security scan."
+        if sec_status == "incomplete":
+            return False, f"Approval rejected: incomplete security coverage ({sec_coverage}) under strict security policy."
+        if sec_status == "failed" or sec_findings > 0:
+            return False, f"Approval rejected: candidate patch failed security scan ({sec_findings} finding(s)). Security scan failed."
+        if sec_status == "error":
+            return False, "Approval rejected: security scanner encountered an error during scan."
+        if sec_status != "passed" or not sec_approved:
+            return False, f"Approval rejected: security verification not passed under strict policy (status: {sec_status}, approved: {sec_approved})."
+
+    elif sec_policy == "secrets_only":
+        if sec_status == "unscanned":
+            return False, "Approval rejected: security scan status is 'unscanned'. Secrets-only policy requires completed secret scan."
+        if sec_status == "failed" or sec_findings > 0:
+            return False, f"Approval rejected: candidate patch failed secrets_only security scan ({sec_findings} secret finding(s))."
+        if sec_status == "error":
+            return False, "Approval rejected: security scanner encountered an error during scan."
+        if sec_status != "passed" or not sec_approved:
+            return False, f"Approval rejected: candidate patch is not explicitly approved under secrets_only policy (status: {sec_status}, approved: {sec_approved})."
+
+    else:
+        return False, f"Approval rejected: unknown security policy '{sec_policy}'."
+
+    return True, "Approval gate passed."
+
 
 class PatchEngine:
     """
@@ -225,7 +403,7 @@ class PatchEngine:
         sandbox_runner: Optional[SandboxRunner] = None,
         is_admin: bool = False,  # CLI mode should pass True
         allow_local_sandbox: bool = True,  # CLI mode should pass True
-        default_timeout: int = 30,
+        default_timeout: Optional[Union[int, float]] = None,
         experience_bank: Optional[RepairExperienceBank] = None,
         allow_heuristic_fallback: bool = True,
     ):
@@ -234,7 +412,12 @@ class PatchEngine:
         self.llm = llm
         self.graph = graph
         self.repo_path = repo_path
-        self.default_timeout = default_timeout
+        if default_timeout is not None:
+            self.default_timeout = validate_timeout(default_timeout, "default_timeout")
+            self._explicit_default_timeout = True
+        else:
+            self.default_timeout = None
+            self._explicit_default_timeout = False
         self.allow_heuristic_fallback = allow_heuristic_fallback
         if experience_bank is False:
             self.experience_bank = None
@@ -252,16 +435,24 @@ class PatchEngine:
                     docker_image=settings.SANDBOX_DOCKER_IMAGE,
                     allow_local_sandbox=allow_local_sandbox or settings.ALLOW_LOCAL_SANDBOX,
                     is_admin=is_admin,
-                    default_timeout=default_timeout
+                    default_timeout=self.default_timeout,
                 )
             except ImportError:
                 self.sandbox_runner = SandboxRunner(
                     is_admin=is_admin,
                     allow_local_sandbox=allow_local_sandbox,
-                    default_timeout=default_timeout
+                    default_timeout=self.default_timeout,
                 )
+            if not self._explicit_default_timeout:
+                self.default_timeout = self.sandbox_runner.default_timeout
         else:
             self.sandbox_runner = sandbox_runner
+            if not self._explicit_default_timeout:
+                runner_timeout = getattr(sandbox_runner, "default_timeout", None)
+                if runner_timeout is not None:
+                    self.default_timeout = runner_timeout
+                else:
+                    self.default_timeout = DEFAULT_TIMEOUT
 
     def generate_patch(
         self,
@@ -291,8 +482,9 @@ class PatchEngine:
                 **kwargs,
             )
 
-        localization = self.localizer.localize(error_report, top_k=3)
-        candidates = localization.get("candidates", [])
+        raw_loc = self.localizer.localize(error_report, top_k=3)
+        localization = copy.deepcopy(raw_loc)
+        candidates = copy.deepcopy(localization.get("candidates", []))
 
         if not candidates:
             disk_fallback = self._read_file(target_file) if target_file else None
@@ -323,7 +515,10 @@ class PatchEngine:
             )
             disk_content = self._read_file(target_file)
             if disk_content is None:
-                return self._failed_patch(repo_id, target_file, f"Target file '{target_file}' could not be read from disk.")
+                if matching_candidate and not self.repo_path:
+                    disk_content = matching_candidate.get("snippet", "")
+                else:
+                    return self._failed_patch(repo_id, target_file, f"Target file '{target_file}' could not be read from disk.")
 
             file_path = target_file
             if matching_candidate and matching_candidate.get("snippet", "") in disk_content:
@@ -340,7 +535,7 @@ class PatchEngine:
                 }
             full_original = disk_content
             using_full_file = full_original.strip() != snippet.strip()
-            file_read_from_disk = True
+            file_read_from_disk = self._read_file(target_file) is not None
         else:
             top_candidate = candidates[0]
             file_path = top_candidate.get("file_path", "")
@@ -459,8 +654,9 @@ class PatchEngine:
         Closed-Loop Agentic Test-Driven Repair (Milestone 1).
         Generates patch, tests inside isolated sandbox, and refines if tests fail (up to max_iterations).
         """
-        localization = self.localizer.localize(error_report, top_k=3)
-        candidates = localization.get("candidates", [])
+        raw_loc = self.localizer.localize(error_report, top_k=3)
+        localization = copy.deepcopy(raw_loc)
+        candidates = copy.deepcopy(localization.get("candidates", []))
 
         if not candidates:
             disk_fallback = self._read_file(target_file) if target_file else None
@@ -609,12 +805,22 @@ class PatchEngine:
                 if progress_callback:
                     progress_callback(turn, max_iterations, f"Running sandbox test suite (Turn {turn}/{max_iterations})...")
 
+                # Timeout precedence: call override > explicit engine setting > runner default > fallback
+                if "timeout" in kwargs and kwargs["timeout"] is not None:
+                    effective_call_timeout = validate_timeout(kwargs["timeout"], "timeout")
+                elif self._explicit_default_timeout:
+                    effective_call_timeout = self.default_timeout
+                elif getattr(self.sandbox_runner, "default_timeout", None) is not None:
+                    effective_call_timeout = self.sandbox_runner.default_timeout
+                else:
+                    effective_call_timeout = self.default_timeout or DEFAULT_TIMEOUT
+
                 test_res = self.sandbox_runner.run_tests_with_patch(
                     repo_path=self.repo_path,
                     target_file=file_path,
                     patched_code=patched_full,
                     test_command=test_command,
-                    timeout=self.default_timeout,
+                    timeout=effective_call_timeout,
                     runtime=language,
                     extra_files=kwargs.get("extra_files"),
                 )
@@ -799,9 +1005,12 @@ class PatchEngine:
         patch_record: Dict[str, Any],
         approved_by: Optional[str] = None,
         force: bool = False,
+        security_policy: Optional[str] = None,
     ) -> Tuple[bool, str]:
         """Applies suggested patch directly to physical file on disk.
         Enforces review gate: patch must be approved or explicitly confirmed.
+        Enforces central approval gate: candidate must pass both behavioral verification
+        and security policy verification (force does not bypass verification).
         Checks for concurrent file modification conflicts unless force=True.
         Records an audit log entry upon successful application.
         """
@@ -812,13 +1021,14 @@ class PatchEngine:
         if not target_file or not suggested:
             return False, "Invalid patch record"
 
-        # Approval Gate: Block normal approval from applying unverified / failed candidates
-        if not force:
-            sb_val = patch_record.get("sandbox_validation", {})
-            test_status = sb_val.get("test_status", "")
-            is_verified = sb_val.get("verified", False) or patch_record.get("status") == "verified"
-            if test_status == "failed" or (sb_val and not is_verified and test_status != "skipped"):
-                return False, f"Approval rejected: candidate patch failed test verification (test_status: {test_status or 'unverified'}). Unverified patches cannot be applied."
+        # Central Approval Gate: Always enforce behavioral and security approval.
+        # Normal user/API approval MUST NOT silently bypass verification via force=True.
+        effective_sec_policy = security_policy or getattr(self, "security_policy", None)
+        ok_gate, gate_msg = evaluate_patch_approval_gate(
+            patch_record, security_policy=effective_sec_policy
+        )
+        if not ok_gate:
+            return False, gate_msg
 
         is_disk_tracked = patch_record.get("file_read_from_disk", patch_record.get("using_full_file", False))
         expected_original = None if force or not is_disk_tracked else patch_record.get("original_code")
@@ -855,7 +1065,7 @@ class PatchEngine:
                         or "UnknownError"
                     )
                     is_test_verified = patch_record.get("sandbox_validation", {}).get("verified", False)
-                    sec_val = patch_record.get("security_validation", {})
+                    sec_val = patch_record.get("security_validation") or {}
                     if orig_snip and fix_snip:
                         self.experience_bank.record_success(
                             error_type=err_type,
@@ -870,7 +1080,7 @@ class PatchEngine:
                             security_approved=sec_val.get("security_approved", False),
                             security_status=sec_val.get("security_status", "unscanned"),
                             security_coverage=sec_val.get("security_coverage", "unknown"),
-                            security_policy=sec_val.get("security_policy", "unscanned"),
+                            security_policy=sec_val.get("security_policy", effective_sec_policy or "strict"),
                             repo_id=patch_record.get("repo_id"),
                             event_id=f"approval:{patch_id}",
                         )
@@ -887,6 +1097,7 @@ class PatchEngine:
         status: str,
         manual_edit: Optional[str] = None,
         user: Optional[str] = None,
+        security_policy: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Updates proposal status (approved, rejected, applied) and manages review gate lifecycle."""
         try:
@@ -907,9 +1118,12 @@ class PatchEngine:
             record["suggested_patch"] = manual_edit
 
         if status == "applied":
-            ok_apply, msg_apply = self.apply_patch(record, approved_by=user)
+            ok_apply, msg_apply = self.apply_patch(record, approved_by=user, security_policy=security_policy)
             update_fields["apply_result"] = {"success": ok_apply, "message": msg_apply}
             record["apply_result"] = update_fields["apply_result"]
+            if not ok_apply:
+                # Do NOT mark status as applied if patch application was rejected!
+                update_fields["status"] = record.get("status", "pending")
         else:
             self._write_audit_log(
                 event=f"patch_{status}",

@@ -47,15 +47,34 @@ import re
 import shlex
 import shutil
 import subprocess
+import math
 import sys
 import time
 import uuid
 import psutil
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Union
 
 from core.safe_paths import resolve_within
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_TIMEOUT: int = 30
+
+
+def validate_timeout(timeout: Any, name: str = "timeout") -> int:
+    """
+    Validates that a timeout value is positive numeric (int or float) and returns it as int.
+    Rejects booleans, non-numeric values, <= 0, NaN, and infinity with a clear ValueError.
+    """
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise ValueError(
+            f"Invalid {name}: must be a positive integer or float, got {type(timeout).__name__} ({timeout!r})"
+        )
+    if math.isnan(timeout) or math.isinf(timeout) or timeout <= 0:
+        raise ValueError(
+            f"Invalid {name}: must be a positive number greater than 0, got {timeout}"
+        )
+    return int(timeout)
 
 # Maximum output size in bytes (1 MB)
 MAX_OUTPUT_SIZE = 1024 * 1024
@@ -132,6 +151,7 @@ class SandboxTestResult:
     test_command: Optional[List[str]] = None
     working_dir: Optional[str] = None
     patched_file_path: Optional[str] = None
+    container_name: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -153,12 +173,25 @@ class SandboxRunner:
         "target"
     }
 
-    def __init__(self, default_timeout: int = 30, sandbox_mode: str = "local", docker_image: str = "python:3.11-slim", allow_local_sandbox: bool = True, is_admin: bool = False):
-        self.default_timeout = default_timeout
+    def __init__(
+        self,
+        default_timeout: Optional[Union[int, float]] = None,
+        sandbox_mode: str = "local",
+        docker_image: str = "python:3.11-slim",
+        allow_local_sandbox: bool = True,
+        is_admin: bool = False,
+    ):
+        if default_timeout is not None:
+            self.default_timeout = validate_timeout(default_timeout, "default_timeout")
+            self._explicit_default_timeout = True
+        else:
+            self.default_timeout = DEFAULT_TIMEOUT
+            self._explicit_default_timeout = False
         self.sandbox_mode = sandbox_mode
         self.docker_image = docker_image
         self.allow_local_sandbox = allow_local_sandbox
         self.is_admin = is_admin
+        self.last_container_name: Optional[str] = None
 
     @staticmethod
     def _collect_test_file_hashes(sandbox_dir: str) -> Dict[str, str]:
@@ -395,6 +428,7 @@ class SandboxRunner:
                     container_cmd.append(norm_arg)
 
             container_name = f"icx-sandbox-{uuid.uuid4().hex[:12]}"
+            self.last_container_name = container_name
             # Build docker command with security hardening
             docker_cmd = [
                 "docker", "run", "--rm",
@@ -448,9 +482,9 @@ class SandboxRunner:
             return result.returncode, result.stdout, result.stderr, None
 
         except subprocess.TimeoutExpired:
-            # Explicitly force-kill the container to ensure no orphaned test container remains running
+            # Explicitly force-kill and remove the container to ensure no orphaned test container remains running
             try:
-                subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=5)
+                subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=5)
             except Exception:
                 pass
             return -1, "", "", f"Docker container timed out after {timeout}s"
@@ -1298,8 +1332,8 @@ class SandboxRunner:
         repo_path: str,
         target_file: str,
         patched_code: str,
-        test_command: Optional[str] = None,
-        timeout: Optional[int] = None,
+        test_command: Optional[Union[str, List[str]]] = None,
+        timeout: Optional[Union[int, float]] = None,
         runtime: Optional[str] = None,
         extra_files: Optional[Dict[str, str]] = None,
     ) -> SandboxTestResult:
@@ -1307,6 +1341,36 @@ class SandboxRunner:
         Copies repo to an isolated temporary sandbox, applies patched_code to target_file,
         runs test suite, and parses outcome.
         """
+        if timeout is not None:
+            effective_timeout = validate_timeout(timeout, "timeout")
+        else:
+            effective_timeout = self.default_timeout
+
+        self.last_container_name = None
+        res = self._run_tests_with_patch_impl(
+            repo_path=repo_path,
+            target_file=target_file,
+            patched_code=patched_code,
+            test_command=test_command,
+            timeout=effective_timeout,
+            runtime=runtime,
+            extra_files=extra_files,
+        )
+        if res is not None and getattr(res, "container_name", None) is None:
+            res.container_name = getattr(self, "last_container_name", None)
+        return res
+
+    def _run_tests_with_patch_impl(
+        self,
+        repo_path: str,
+        target_file: str,
+        patched_code: str,
+        test_command: Optional[Union[str, List[str]]] = None,
+        timeout: Optional[int] = None,
+        runtime: Optional[str] = None,
+        extra_files: Optional[Dict[str, str]] = None,
+    ) -> SandboxTestResult:
+        """Internal implementation for sandboxed test execution."""
         import tempfile
 
         t_start = time.perf_counter()
@@ -1425,10 +1489,10 @@ class SandboxRunner:
                         success=False,
                         exit_code=-8,
                         stdout="",
-                        stderr="Docker mode requested but Docker daemon is unavailable: Docker Desktop is not running or Linux daemon is disconnected. Live container validation is blocked.",
+                        stderr="Docker unavailable and local sandbox disabled: Docker Desktop is not running or Linux daemon is disconnected. Live container validation is blocked.",
                         duration_seconds=elapsed,
                         framework=framework or "unknown",
-                        error_message="Docker mode requested but Docker daemon is unavailable: Docker Desktop / Linux daemon is not running. Live container validation is blocked.",
+                        error_message="Docker unavailable and local sandbox disabled: Docker Desktop / Linux daemon is not running. Live container validation is blocked.",
                         traceback_summary="Infrastructure: Docker daemon unavailable",
                     )
 

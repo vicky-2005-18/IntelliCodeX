@@ -335,3 +335,46 @@ def test_github_actions_workflow_yaml_validity():
 
     # Check runner
     assert docker_job["runs-on"] == "ubuntu-latest"
+
+
+def test_ci_pipeline_patch_file_with_multiline_content(disposable_python_repo):
+    """Verifies that --patch-file with real multiline Python content passes CI verification."""
+    patch_file_path = os.path.join(disposable_python_repo, "patch_to_apply.py")
+    with open(patch_file_path, "w", encoding="utf-8") as f:
+        f.write(
+            "def add(a: int, b: int) -> int:\n"
+            "    \"\"\"Sum two integers with multiline docstring.\"\"\"\n"
+            "    result = a + b\n"
+            "    return result\n"
+        )
+
+    cli_args = [
+        "cli.py",
+        disposable_python_repo,
+        "--backend", "tfidf",
+        "--ci",
+        "--target-file", "pkg/calc.py",
+        "--patch-file", patch_file_path,
+        "--runtime", "python",
+        "--sandbox", "local",
+    ]
+    with patch("sys.argv", cli_args):
+        exit_code = main()
+
+    assert exit_code == EXIT_SUCCESS, f"Expected EXIT_SUCCESS (0), got {exit_code}"
+
+
+def test_github_actions_workflow_uses_patch_file_fixture():
+    """Verifies that .github/workflows/intellicodex.yml uses --patch-file instead of inline escaping."""
+    workflow_path = os.path.join(".github", "workflows", "intellicodex.yml")
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    assert "--patch-file .github/fixtures/utils_patch.py" in content, (
+        "Workflow must use --patch-file with multiline fixture for shell-independent execution"
+    )
+    fixture_path = os.path.join(".github", "fixtures", "utils_patch.py")
+    assert os.path.isfile(fixture_path), f"Fixture file must exist at {fixture_path}"
+    with open(fixture_path, "r", encoding="utf-8") as f:
+        fixture_content = f.read()
+    assert "ci_verified" in fixture_content

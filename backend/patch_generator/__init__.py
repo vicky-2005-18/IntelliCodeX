@@ -6,7 +6,7 @@ from backend.patch_generator.patch_applier import apply_patch_to_file, merge_sni
 from backend.patch_generator.llm_parser import extract_code_and_explanation
 
 def __getattr__(name):
-    if name in ("PatchEngine", "generate_git_diff", "PATCH_SYSTEM_PROMPT"):
+    if name in ("PatchEngine", "generate_git_diff", "PATCH_SYSTEM_PROMPT", "evaluate_patch_approval_gate"):
         import core.patch_generator as cpg
         return getattr(cpg, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -682,6 +682,12 @@ def render_patch_card(patch_rec: dict, fix_time: float):
     else:
         sb_display = f"{sb_status} (Iterations: {sb_turns})"
 
+    passed_tests = test_res.get("passed_tests") or []
+    failed_tests = test_res.get("failed_tests") or []
+    rag_chunks = patch_rec.get("rag_context_chunks") or []
+    cited_chunks = [f"{c.get('file', '')}:{c.get('lines', '')} ({c.get('name', '')})" for c in rag_chunks if c.get("file")]
+    sec_val = patch_rec.get("security_validation") or {}
+
     if HAS_RICH and console:
         status_color = "green" if sb_status == "PASSED" else ("red" if sb_status == "FAILED" else "yellow")
         info_table = Table.grid(padding=(0, 2))
@@ -691,6 +697,19 @@ def render_patch_card(patch_rec: dict, fix_time: float):
         info_table.add_row("Error Type:", str(patch_rec.get("error_type", "Unknown")))
         info_table.add_row("Confidence:", conf)
         info_table.add_row("Sandbox Verification:", f"[{status_color}]{sb_display}[/{status_color}]")
+        info_table.add_row("Refinement Iterations:", f"{sb_turns} attempt(s)")
+        if passed_tests:
+            pt_summary = ", ".join(passed_tests[:3]) + (f" (+{len(passed_tests)-3} more)" if len(passed_tests) > 3 else "")
+            info_table.add_row("Tests Passed:", f"[green]{pt_summary}[/green]")
+        if failed_tests:
+            ft_summary = ", ".join(failed_tests[:3]) + (f" (+{len(failed_tests)-3} more)" if len(failed_tests) > 3 else "")
+            info_table.add_row("Tests Failed:", f"[red]{ft_summary}[/red]")
+        if cited_chunks:
+            info_table.add_row("Grounded Chunks:", f"[dim]{', '.join(cited_chunks[:3])}[/dim]")
+        if sec_val:
+            sec_st = sec_val.get("security_status", "unscanned").upper()
+            sec_color = "green" if sec_st == "PASSED" else ("red" if sec_st == "FAILED" else "yellow")
+            info_table.add_row("Security Scan:", f"[{sec_color}]{sec_st} ({sec_val.get('findings_count', 0)} finding(s))[/{sec_color}]")
         if contract_type == "ai_generated_proposal":
             info_table.add_row("Contract Grounding:", "[bold yellow]AI-Generated Test Proposal (disposable contract)[/bold yellow]")
             if contract_disclaimer:
@@ -712,6 +731,15 @@ def render_patch_card(patch_rec: dict, fix_time: float):
         print(f"Error Type      : {patch_rec.get('error_type', 'Unknown')}")
         print(f"Confidence      : {conf}")
         print(f"Sandbox Tests   : {sb_display}")
+        print(f"Iterations      : {sb_turns} attempt(s)")
+        if passed_tests:
+            print(f"Tests Passed    : {', '.join(passed_tests[:3])}")
+        if failed_tests:
+            print(f"Tests Failed    : {', '.join(failed_tests[:3])}")
+        if cited_chunks:
+            print(f"Grounded Chunks : {', '.join(cited_chunks[:3])}")
+        if sec_val:
+            print(f"Security Scan   : {sec_val.get('security_status', 'unscanned').upper()} ({sec_val.get('findings_count', 0)} finding(s))")
         if contract_type == "ai_generated_proposal":
             print("Contract Grounding: AI-Generated Test Proposal (disposable contract)")
             if contract_disclaimer:
@@ -3989,13 +4017,10 @@ def main():
                         current_mode = "unified" if current_mode == "side_by_side" else "side_by_side"
                         continue
                     elif action in ("a", "approve", "y", "yes"):
-                        is_verified = patch_rec.get("sandbox_validation", {}).get("verified", False)
-                        test_status = patch_rec.get("sandbox_validation", {}).get("test_status", "unknown")
-                        if not is_verified or patch_rec.get("status") != "verified":
-                            msg_reject = (
-                                f"[!] APPROVAL REJECTED: Candidate patch failed behavioral verification "
-                                f"(status: {test_status}). Normal approval cannot apply an unverified candidate."
-                            )
+                        from core.patch_generator import evaluate_patch_approval_gate
+                        ok_gate, msg_gate = evaluate_patch_approval_gate(patch_rec)
+                        if not ok_gate:
+                            msg_reject = f"[!] APPROVAL REJECTED: {msg_gate}"
                             if HAS_RICH and console:
                                 console.print(f"\n[bold red]{msg_reject}[/bold red]\n")
                             else:

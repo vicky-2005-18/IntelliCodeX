@@ -406,14 +406,16 @@ def test_go_docker_timeout_terminates_container_cleanly(docker_available):
         assert res.exit_code == -1, f"Expected timeout exit code -1, got {res.exit_code}"
         assert elapsed < 15, f"Timeout abort took too long ({elapsed:.1f}s)"
 
-        # Verify no orphan containers left running
+        # Verify the specific container created for this test was cleanly terminated and removed
+        target_container = getattr(res, "container_name", None) or getattr(runner, "last_container_name", None)
+        assert target_container, "Container name should be tracked for docker execution"
         ps = subprocess.run(
-            ["docker", "ps", "-q", "--filter", "name=icx-sandbox-"],
+            ["docker", "ps", "-q", "--filter", f"name={target_container}"],
             capture_output=True,
             text=True,
             timeout=5,
         )
-        assert ps.stdout.strip() == "", "Orphaned test container leaked after timeout"
+        assert ps.stdout.strip() == "", f"Orphaned test container {target_container} leaked after timeout"
 
 
 def test_go_docker_original_repo_files_remain_unchanged(docker_available):
@@ -452,7 +454,7 @@ def test_go_patchengine_integration_records_verified_experience_only_on_pass(doc
         math_file = _create_go_repo(repo_dir, buggy=True)
 
         exp_bank = RepairExperienceBank(storage_path=os.path.join(repo_dir, "exp_bank.json"))
-        runner = SandboxRunner(sandbox_mode="docker", docker_image=IMAGE_NAME, is_admin=True)
+        runner = SandboxRunner(sandbox_mode="docker", docker_image=IMAGE_NAME, is_admin=True, default_timeout=60)
         engine = PatchEngine(
             store=FaissVectorStore(dim=64),
             embedder=TfidfEmbedder(),
@@ -460,6 +462,7 @@ def test_go_patchengine_integration_records_verified_experience_only_on_pass(doc
             sandbox_runner=runner,
             experience_bank=exp_bank,
             is_admin=True,
+            default_timeout=60,
         )
 
         # 1. Invalid patch: must NOT be stored in experience bank

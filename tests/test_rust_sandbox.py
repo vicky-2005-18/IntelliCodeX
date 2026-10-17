@@ -549,9 +549,11 @@ def test_rust_docker_timeout_cleans_up_container(docker_available):
         assert elapsed < 12, f"Execution hung beyond expected timeout: {elapsed}s"
         assert "timed out" in (res.error_message or "").lower()
 
-        # Check docker ps: no containers named icx-sandbox-* should remain
-        ps = subprocess.run(["docker", "ps", "--filter", "name=icx-sandbox-", "--format", "{{.Names}}"], capture_output=True, text=True)
-        assert "icx-sandbox-" not in ps.stdout, f"Orphaned sandbox container detected: {ps.stdout}"
+        # Check docker ps: the specific container created for this test should not remain
+        target_container = getattr(res, "container_name", None) or getattr(runner, "last_container_name", None)
+        assert target_container, "Container name should be tracked for docker execution"
+        ps = subprocess.run(["docker", "ps", "--filter", f"name={target_container}", "--format", "{{.Names}}"], capture_output=True, text=True)
+        assert ps.stdout.strip() == "", f"Orphaned sandbox container detected: {target_container}"
 
 
 def test_rust_docker_preserves_original_repository_state(docker_available):

@@ -161,6 +161,16 @@ def test_apply_patch_records_into_experience_bank():
             "snippet_patch": "def div(a, b):\n    return a / b if b != 0 else 0.0\n",
             "explanation": "Guarded against division by zero.",
             "error_type": "ZeroDivisionError",
+            "sandbox_validation": {
+                "verified": True,
+                "test_status": "passed",
+                "iterations_count": 1,
+            },
+            "security_validation": {
+                "security_status": "passed",
+                "security_approved": True,
+                "security_policy": "strict",
+            },
         }
 
         ok, msg = engine.apply_patch(patch_rec, approved_by="senior_dev")

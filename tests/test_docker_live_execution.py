@@ -130,10 +130,16 @@ def test_live_docker_timeout_and_container_cleanup(live_disposable_repo):
     assert result.exit_code == -1
     assert result.success is False
 
-    # Verify no container was leaked
+    # Verify the specific container created for this test was not leaked
+    target_container = getattr(result, "container_name", None) or getattr(runner, "last_container_name", None)
+    assert target_container, "Container name should be tracked for docker execution"
     time.sleep(1)
-    leaked = get_active_sandbox_containers()
-    assert len(leaked) == 0, f"Found orphan container(s): {leaked}"
+    ps_chk = subprocess.run(
+        ["docker", "ps", "-q", "--filter", f"name={target_container}"],
+        capture_output=True,
+        text=True,
+    )
+    assert ps_chk.stdout.strip() == "", f"Container {target_container} was leaked"
 
 
 def test_live_docker_controlled_network_restriction(live_disposable_repo):

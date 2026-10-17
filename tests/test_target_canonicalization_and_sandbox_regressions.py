@@ -376,7 +376,12 @@ def test_rejection_of_failed_candidate_approval():
                 "verified": True,
                 "test_status": "passed",
                 "iterations_count": 1,
-            }
+            },
+            "security_validation": {
+                "security_status": "passed",
+                "security_approved": True,
+                "security_policy": "strict",
+            },
         }
         ok_v, msg_v = engine.apply_patch(verified_patch_rec, force=False)
         assert ok_v is True
