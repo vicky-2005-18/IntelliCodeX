@@ -477,9 +477,6 @@ class SandboxRunner:
                 timeout=timeout
             )
 
-            # Re-ensure permissions so host user can cleanly remove any files created in the volume
-            self._prepare_sandbox_permissions(sandbox_dir)
-
             # Check for infrastructure communication error from Docker CLI
             if result.returncode != 0 and (
                 "error during connect" in (result.stderr or "").lower()
@@ -499,6 +496,27 @@ class SandboxRunner:
             return -1, "", "", f"Docker container timed out after {timeout}s"
         except Exception as e:
             return -2, "", "", f"Docker execution error: {e}"
+
+    def _cleanup_container_ownership(self, sandbox_dir: str) -> None:
+        """Restores host user ownership and open permissions on files created by non-root container users."""
+        if hasattr(os, "getuid"):
+            try:
+                uid = os.getuid()
+                gid = os.getgid()
+                subprocess.run(
+                    [
+                        "docker", "run", "--rm",
+                        "-v", f"{sandbox_dir}:/work",
+                        "--user", "0:0",
+                        self.docker_image,
+                        "sh", "-c", f"chown -R {uid}:{gid} /work 2>/dev/null || true; chmod -R 777 /work 2>/dev/null || true"
+                    ],
+                    capture_output=True,
+                    timeout=15,
+                )
+            except Exception:
+                pass
+        self._prepare_sandbox_permissions(sandbox_dir)
 
     @staticmethod
     def _prepare_sandbox_permissions(sandbox_dir: str) -> None:
@@ -2636,6 +2654,9 @@ class SandboxRunner:
                     error_message=f"Sandbox execution error: {str(e)}",
                     traceback_summary=str(e),
                 )
+            finally:
+                if self.sandbox_mode == "docker":
+                    self._cleanup_container_ownership(sandbox_dir)
 
     def run_baseline_tests(
         self,
