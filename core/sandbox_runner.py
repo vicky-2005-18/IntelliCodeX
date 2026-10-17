@@ -500,17 +500,17 @@ class SandboxRunner:
     def _prepare_sandbox_permissions(sandbox_dir: str) -> None:
         """Ensure sandbox directory and files are accessible by non-root container users (e.g. UID 1000)."""
         try:
-            os.chmod(sandbox_dir, 0o777)
+            os.chmod(sandbox_dir, 0o777)  # nosec B103
             for root, dirs, files in os.walk(sandbox_dir):
                 for d in dirs:
                     try:
-                        os.chmod(os.path.join(root, d), 0o777)
+                        os.chmod(os.path.join(root, d), 0o777)  # nosec B103
                     except Exception:
                         pass
                 for f in files:
                     try:
                         current_mode = os.stat(os.path.join(root, f)).st_mode
-                        os.chmod(os.path.join(root, f), current_mode | 0o666)
+                        os.chmod(os.path.join(root, f), current_mode | 0o666)  # nosec B103
                     except Exception:
                         pass
         except Exception:
