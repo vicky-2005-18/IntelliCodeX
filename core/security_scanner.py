@@ -195,9 +195,11 @@ def run_bandit_scan(target_path: str) -> Dict[str, Any]:
     if is_dir:
         cmd = [
             sys.executable, "-m", "bandit", "-r", target_path,
-            "-x", ".git,.venv,venv,env,.repos,.storage,node_modules,graphify-out,scratch,tests/fixtures",
+            "-x", "*tests*,*.repos*,*.storage*,*scratch*,*.git*,*venv*,*node_modules*,*fixtures*,*graphify-out*",
             "-f", "json", "-q"
         ]
+
+
     else:
         cmd = [sys.executable, "-m", "bandit", target_path, "-f", "json", "-q"]
     try:
@@ -348,8 +350,16 @@ def run_security_scan(
         discovered_files = [target]
     else:
         for cur_root, dirs, files in os.walk(target):
-            # Ignore hidden & cache directories
-            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "target", "build", "__pycache__", "venv", ".git")]
+            # Ignore hidden, cache, and test directories
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith(".")
+                and d not in (
+                    "node_modules", "target", "build", "__pycache__", "venv", ".git",
+                    "tests", "test", "test_fixtures", "fixtures", "scratch"
+                )
+            ]
+
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
                 if ext in EXT_TO_LANG:

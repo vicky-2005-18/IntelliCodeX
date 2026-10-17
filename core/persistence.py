@@ -242,7 +242,8 @@ def get_repo_id(repo_path: str) -> str:
     base = os.path.basename(clean_path) or "repo"
     if base.endswith(".git"):
         base = base[:-4]
-    path_hash = hashlib.md5(os.path.abspath(clean_path).encode("utf-8")).hexdigest()[:8]
+    path_hash = hashlib.md5(os.path.abspath(clean_path).encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
+
     clean_base = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in base)
     return f"{clean_base}_{path_hash}"
 

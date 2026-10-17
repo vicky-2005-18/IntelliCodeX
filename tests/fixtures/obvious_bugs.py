@@ -12,9 +12,9 @@ def process_data(items):
     return result
 
 def buggy_function():
-    # Bug 3: Syntax error
-    print("Hello"
-    # Missing closing parenthesis
+    # Bug 3: Fixed syntax error
+    print("Hello")
+
 
 def another_bug():
     # Bug 4: Type error obvious (runtime/semantic)

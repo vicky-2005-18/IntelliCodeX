@@ -38,7 +38,8 @@ logger = logging.getLogger(__name__)
 
 def compute_file_hash(content: str) -> str:
     """Computes MD5 hash of file content for fast equality checks."""
-    return hashlib.md5(content.encode("utf-8")).hexdigest()
+    return hashlib.md5(content.encode("utf-8"), usedforsecurity=False).hexdigest()
+
 
 
 IGNORED_EXTENSIONS = {

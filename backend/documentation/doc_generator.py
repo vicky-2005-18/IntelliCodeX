@@ -143,6 +143,7 @@ Refer to generated API documentation for detailed endpoints and class contracts.
 
     def export_to_pdf_html(self, markdown_content: str, title: str = "Documentation") -> str:
         """Converts markdown content to printable HTML/PDF styled document."""
+        formatted_body = markdown_content.replace('\n', '<br>').replace('```', '<pre>').replace('```', '</pre>')
         html_doc = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -159,9 +160,10 @@ Refer to generated API documentation for detailed endpoints and class contracts.
     </style>
 </head>
 <body>
-    {markdown_content.replace('\n', '<br>').replace('```', '<pre>').replace('```', '</pre>')}
+    {formatted_body}
 </body>
 </html>
 """
         return html_doc
+
 

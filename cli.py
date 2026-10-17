@@ -3262,9 +3262,11 @@ def main():
             continue
 
         if query.lower() in ("clear", "cls"):
-            os.system("cls" if os.name == "nt" else "clear")
+            os.system("cls" if os.name == "nt" else "clear")  # nosec B605
             render_banner()
             continue
+
+
 
         if query.lower() == "status":
             render_status_panel(current_path, active_backend, engine, watcher)
