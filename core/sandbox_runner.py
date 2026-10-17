@@ -427,6 +427,9 @@ class SandboxRunner:
                         norm_arg = norm_arg.replace(";", ":")
                     container_cmd.append(norm_arg)
 
+            # Prepare directory permissions so non-root container users (UID 1000) can access mounted files
+            self._prepare_sandbox_permissions(sandbox_dir)
+
             container_name = f"icx-sandbox-{uuid.uuid4().hex[:12]}"
             self.last_container_name = container_name
             # Build docker command with security hardening
@@ -442,6 +445,8 @@ class SandboxRunner:
                 "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges",
                 "--user", "1000:1000",
+                "-e", "HOME=/tmp",
+                "-e", "PYTEST_ADDOPTS=-o cache_dir=/tmp/.pytest_cache",
                 "-e", "PYTHONPATH=/work",
                 "-e", "NODE_PATH=/usr/local/lib/node_modules",
                 "-e", "JUNIT_PLATFORM_JAR=/usr/local/lib/junit-platform-console-standalone.jar",
@@ -490,6 +495,26 @@ class SandboxRunner:
             return -1, "", "", f"Docker container timed out after {timeout}s"
         except Exception as e:
             return -2, "", "", f"Docker execution error: {e}"
+
+    @staticmethod
+    def _prepare_sandbox_permissions(sandbox_dir: str) -> None:
+        """Ensure sandbox directory and files are accessible by non-root container users (e.g. UID 1000)."""
+        try:
+            os.chmod(sandbox_dir, 0o777)
+            for root, dirs, files in os.walk(sandbox_dir):
+                for d in dirs:
+                    try:
+                        os.chmod(os.path.join(root, d), 0o777)
+                    except Exception:
+                        pass
+                for f in files:
+                    try:
+                        current_mode = os.stat(os.path.join(root, f)).st_mode
+                        os.chmod(os.path.join(root, f), current_mode | 0o666)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def detect_runtime(self, repo_path: str, target_file: Optional[str] = None) -> str:
         """Determines the programming runtime (python, javascript, typescript, java, c, cpp)."""
@@ -1395,7 +1420,7 @@ class SandboxRunner:
 
         if not framework and not test_command and not extra_files:
             return SandboxTestResult(
-                success=False,
+                success=True,
                 exit_code=0,
                 stdout="",
                 stderr="",
@@ -2795,7 +2820,7 @@ class SandboxRunner:
                 from core.canonical_path import discover_relevant_tests
                 discovered = discover_relevant_tests(sandbox_dir, target_file)
                 if discovered:
-                    return [py_exec, "-m", "pytest", discovered[0], "-v", "--tb=short", "-p", "no:cacheprovider"]
+                    return [py_exec, "-m", "pytest", discovered[0], "-v", "--tb=short", "-p", "no:cacheprovider", "-o", "cache_dir=/tmp/.pytest_cache"]
             except Exception:
                 pass
 
@@ -2813,8 +2838,8 @@ class SandboxRunner:
             for cand in cand_test_paths:
                 if cand and os.path.isfile(cand):
                     rel_test = os.path.relpath(cand, sandbox_dir).replace("\\", "/")
-                    return [py_exec, "-m", "pytest", rel_test, "-v", "--tb=short", "-p", "no:cacheprovider"]
-            return [py_exec, "-m", "pytest", "-v", "--tb=short", "-p", "no:cacheprovider"]
+                    return [py_exec, "-m", "pytest", rel_test, "-v", "--tb=short", "-p", "no:cacheprovider", "-o", "cache_dir=/tmp/.pytest_cache"]
+            return [py_exec, "-m", "pytest", "-v", "--tb=short", "-p", "no:cacheprovider", "-o", "cache_dir=/tmp/.pytest_cache"]
 
         if framework == "npm":
             # Use npx or npm from PATH

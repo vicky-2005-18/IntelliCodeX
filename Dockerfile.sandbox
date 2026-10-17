@@ -31,6 +31,8 @@ ENV CGO_ENABLED="0"
 ENV CARGO_NET_OFFLINE="true"
 ENV CARGO_TERM_COLOR="never"
 ENV CARGO_HOME="/tmp/cargo-home"
+ENV HOME="/tmp"
+ENV PYTEST_ADDOPTS="-o cache_dir=/tmp/.pytest_cache"
 
 RUN pip install --no-cache-dir pytest
 
@@ -42,4 +44,4 @@ RUN useradd -m -u 1000 sandbox && chown -R sandbox:sandbox /work
 USER 1000:1000
 
 # Default command (will be overridden by sandbox runner)
-CMD ["python", "-m", "pytest", "-v", "-p", "no:cacheprovider"]
+CMD ["python", "-m", "pytest", "-v", "-p", "no:cacheprovider", "-o", "cache_dir=/tmp/.pytest_cache"]
