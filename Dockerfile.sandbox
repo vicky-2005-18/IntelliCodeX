@@ -33,6 +33,7 @@ ENV CARGO_TERM_COLOR="never"
 ENV CARGO_HOME="/tmp/cargo-home"
 ENV HOME="/tmp"
 ENV PYTEST_ADDOPTS="-o cache_dir=/tmp/.pytest_cache"
+ENV PYTHONDONTWRITEBYTECODE="1"
 
 RUN pip install --no-cache-dir pytest
 

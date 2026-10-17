@@ -447,6 +447,7 @@ class SandboxRunner:
                 "--user", "1000:1000",
                 "-e", "HOME=/tmp",
                 "-e", "PYTEST_ADDOPTS=-o cache_dir=/tmp/.pytest_cache",
+                "-e", "PYTHONDONTWRITEBYTECODE=1",
                 "-e", "PYTHONPATH=/work",
                 "-e", "NODE_PATH=/usr/local/lib/node_modules",
                 "-e", "JUNIT_PLATFORM_JAR=/usr/local/lib/junit-platform-console-standalone.jar",
@@ -475,6 +476,9 @@ class SandboxRunner:
                 errors="replace",
                 timeout=timeout
             )
+
+            # Re-ensure permissions so host user can cleanly remove any files created in the volume
+            self._prepare_sandbox_permissions(sandbox_dir)
 
             # Check for infrastructure communication error from Docker CLI
             if result.returncode != 0 and (
@@ -1433,7 +1437,10 @@ class SandboxRunner:
                 error_message="No automated test suite discovered in repository."
             )
 
-        with tempfile.TemporaryDirectory(prefix="icx_sandbox_") as sandbox_dir:
+        td_kwargs = {"prefix": "icx_sandbox_"}
+        if sys.version_info >= (3, 10):
+            td_kwargs["ignore_cleanup_errors"] = True
+        with tempfile.TemporaryDirectory(**td_kwargs) as sandbox_dir:
             try:
                 # 1. Copy repo files into sandbox
                 self._populate_sandbox(repo_path, sandbox_dir)

@@ -2480,7 +2480,10 @@ def run_ci_pipeline(
 
         # 2a. Candidate Security Gate: scan the patched disposable snapshot
         patch_report["candidate_snapshot"] = "patched_disposable_snapshot"
-        with tempfile.TemporaryDirectory(prefix="cand_snapshot_") as snap_dir:
+        td_kwargs = {"prefix": "cand_snapshot_"}
+        if sys.version_info >= (3, 10):
+            td_kwargs["ignore_cleanup_errors"] = True
+        with tempfile.TemporaryDirectory(**td_kwargs) as snap_dir:
             snap_repo = os.path.join(snap_dir, "repo")
             shutil.copytree(
                 repo_path,
