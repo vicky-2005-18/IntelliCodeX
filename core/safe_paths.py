@@ -25,8 +25,12 @@ _TRAILING_DOT_SPACE_RE = re.compile(r'[\. ]+$')
 # Drive-relative paths: "C:escape.txt"  (drive letter + colon, no following slash)
 _DRIVE_RELATIVE_RE = re.compile(r'^[A-Za-z]:(?![/\\])')
 
+# Windows absolute paths: "C:/..." or "C:\..." (drive letter + colon + slash)
+_WIN_ABS_RE = re.compile(r'^[A-Za-z]:[/\\]')
+
 # UNC paths: "\\server\share\..." or "//server/share/..."
 _UNC_RE = re.compile(r'^(?:\\\\|//)')
+
 
 
 def resolve_within(root: str, relative_path: str) -> str:
@@ -76,12 +80,13 @@ def resolve_within(root: str, relative_path: str) -> str:
             f"(got {relative_path!r})"
         )
 
-    # --- 3. Reject absolute paths (POSIX /… or Windows C:\… or \…) ---
-    if os.path.isabs(relative_path):
+    # --- 3. Reject absolute paths (POSIX /… or Windows C:\… or C:/… or \…) ---
+    if os.path.isabs(relative_path) or _WIN_ABS_RE.match(relative_path):
         raise ValueError(
             f"Path traversal rejected: relative_path must be relative, "
             f"got absolute path {relative_path!r}"
         )
+
 
     # --- 4a. Reject Windows drive-relative paths (e.g. "C:escape.txt") ---
     if _DRIVE_RELATIVE_RE.match(relative_path):

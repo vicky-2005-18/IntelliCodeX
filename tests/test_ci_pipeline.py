@@ -107,9 +107,10 @@ def test_ci_pipeline_passing_fixture_invariance(disposable_python_repo, monkeypa
         "--target-file", "pkg/calc.py",
         "--patch", patch_text,
         "--runtime", "python",
-        "--sandbox", "docker",
+        "--sandbox", "local",
         "--output-json", report_file,
     ]
+
 
     with patch("sys.argv", cli_args):
         exit_code = main()
