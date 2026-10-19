@@ -424,7 +424,12 @@ class OrgMemoryStore:
         self._thread_lock = threading.Lock()
 
         # Disk storage configuration
-        self.storage_dir = storage_dir or os.path.join(".storage", "org_memory")
+        if storage_dir:
+            self.storage_dir = storage_dir
+        else:
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            base_storage = os.environ.get("STORAGE_DIR") or os.path.join(repo_root, ".storage")
+            self.storage_dir = os.path.join(base_storage, "org_memory")
         os.makedirs(self.storage_dir, exist_ok=True)
         store_key = f"{org_id}_{repo_id}" if repo_id else f"{org_id}_org_shared"
         safe_key = re.sub(r"[^\w\-.]", "_", store_key)

@@ -165,8 +165,9 @@ def test_review_gate_lifecycle_and_audit_log():
         store = FaissVectorStore(dim=vecs.shape[1])
         store.add([chunk], vecs)
 
+        from core.persistence import get_repo_id
         engine = PatchEngine(store, embedder, llm=None, repo_path=tmpdir)
-        rec = engine.generate_patch("test_repo", "KeyError: 'token' in login", file_path)
+        rec = engine.generate_patch(get_repo_id(tmpdir), "KeyError: 'token' in login", file_path)
 
         # 1. Proposal is created in 'pending' status without modifying disk file
         assert rec["status"] == "pending"
@@ -338,8 +339,9 @@ def test_concurrent_modification_conflict_detection():
         store = FaissVectorStore(dim=vecs.shape[1])
         store.add([chunk], vecs)
 
+        from core.persistence import get_repo_id
         engine = PatchEngine(store, embedder, llm=None, repo_path=tmpdir)
-        patch_rec = engine.generate_patch("test_repo", "Improve serve function", file_path)
+        patch_rec = engine.generate_patch(get_repo_id(tmpdir), "Improve serve function", file_path)
         assert patch_rec["status"] == "pending"
 
         # Simulate concurrent external edit on disk after patch generation

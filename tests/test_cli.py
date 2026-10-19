@@ -48,7 +48,9 @@ def test_resolve_repo_path_local_not_found():
 
 
 def test_resolve_repo_path_git_clone_new():
-    with patch("os.path.exists", side_effect=lambda p: False if ".repos" in p else os.path.exists(p)):
+    repos_base = os.environ.get("REPOS_DIR") or os.path.abspath(".repos")
+    real_exists = os.path.exists
+    with patch("os.path.exists", side_effect=lambda p: False if (repos_base in p or ".repos" in p) else real_exists(p)):
         with patch("subprocess.run") as mock_sub:
             mock_sub.return_value = MagicMock(returncode=0, stderr="")
             res = resolve_repo_path("https://github.com/vicky-2005-18/TB.git")
@@ -60,7 +62,8 @@ def test_resolve_repo_path_git_clone_new():
 
 
 def test_resolve_repo_path_git_pull_existing():
-    repo_dir = os.path.abspath(os.path.join(".repos", "TB_test_mock"))
+    repos_base = os.environ.get("REPOS_DIR") or os.path.abspath(".repos")
+    repo_dir = os.path.abspath(os.path.join(repos_base, "TB_test_mock"))
     git_dir = os.path.join(repo_dir, ".git")
     os.makedirs(git_dir, exist_ok=True)
     try:
@@ -380,5 +383,9 @@ def test_cli_headless_ci_mode_empty_repo_failure(capsys):
             assert ret == 1
 
     captured = capsys.readouterr()
-    assert "Error ingesting repository" in captured.out
+    assert (
+        "Zero AST/code chunks generated during ingestion" in captured.out
+        or "No ingestible source files found" in captured.out
+        or "Error ingesting repository" in captured.out
+    )
 

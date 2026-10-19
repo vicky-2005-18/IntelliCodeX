@@ -18,6 +18,8 @@ import time
 import tempfile
 import shutil
 import logging
+import threading
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import requests
 
@@ -31,8 +33,12 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
+_project_root = os.path.dirname(os.path.abspath(__file__))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 # Automatically load .env configuration if present
-_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+_env_path = os.path.join(_project_root, ".env")
 if os.path.exists(_env_path):
     try:
         with open(_env_path, "r", encoding="utf-8") as _f:
@@ -105,45 +111,164 @@ def format_time_consumed(seconds: float) -> str:
 
 def parse_mention(query: str) -> tuple[str, str]:
     """Extracts @filename mention from query and returns (cleaned_query, filename).
-    
-    If @filename is found, strips it from the query and returns the filename.
-    If no @mention is found, returns (original_query, None).
-    
-    Examples:
-        "any issue in @calculator_practice.py?" -> ("any issue in ?", "calculator_practice.py")
-        "how does @auth.py work?" -> ("how does work?", "auth.py")
-        "what is this?" -> ("what is this?", None)
+    Supports quoted filenames containing spaces (e.g. @"to do.java" or @'to do.java')
+    as well as standard unquoted filenames (e.g. @TodoApp.java).
     """
-    # Match @filename pattern (supports @filename.ext, @path/to/file.py, @path\to\file.py)
-    # Match word characters, dots, underscores, hyphens, forward slashes, and backslashes after @
-    # Stop at whitespace or punctuation that's not part of a path
+    # 1. Match quoted @mention: @"file with spaces.py" or @'file with spaces.py'
+    m_quoted = re.search(r'@["\']([^"\']+)["\']', query)
+    if m_quoted:
+        filename = m_quoted.group(1).replace("\\", "/")
+        cleaned_query = query.replace(m_quoted.group(0), "").strip()
+        cleaned_query = re.sub(r'\s+', ' ', cleaned_query)
+        return cleaned_query, filename
+
+    # 2. Match standard unquoted @filename pattern
     match = re.search(r'@([\w\-.\/\\]+)', query)
     if match:
         filename = match.group(1).replace("\\", "/")
-        # Remove the @mention from the query (use exact match to avoid partial replacements)
         cleaned_query = query.replace(f"@{filename}", "").strip()
-        # Clean up extra spaces that might be left
         cleaned_query = re.sub(r'\s+', ' ', cleaned_query)
         return cleaned_query, filename
     return query, None
 
 
-def print_ingestion_summary(result, current_path: str, elapsed: float):
-    """Prints repository ingestion results with elapsed time, throughput, and cache mode."""
-    time_str = format_time_consumed(elapsed)
+def _extract_ingestion_metrics(
+    result,
+    current_path: str,
+    elapsed: float,
+    auto_update_status: Optional[str] = None,
+    backend: Optional[str] = None,
+    model: Optional[str] = None,
+    file_filter: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Dynamically extracts clear, presentation-ready metrics from ingestion results."""
+    repo_name = os.path.basename(os.path.abspath(current_path)) or current_path
+    num_files = getattr(result, "num_files", 0)
+    num_chunks = getattr(result, "num_chunks", 0)
+    ast_chunks = getattr(result, "ast_chunks_count", 0)
+
+    # Dynamically inspect non-AST chunk metadata from real attributes without false labels
+    chunks = getattr(getattr(result, "store", None), "chunks", None)
+    non_ast_parts = []
+    if isinstance(chunks, list) and chunks:
+        ast_kinds = ("function", "class", "method", "interface", "enum", "type", "struct")
+        config_langs = ("yaml", "yml", "json", "toml", "xml", "ini", "cfg", "env")
+        config_exts = (".yaml", ".yml", ".json", ".toml", ".xml", ".ini", ".cfg", ".env")
+        doc_langs = ("markdown", "md", "rst")
+        doc_exts = (".md", ".markdown", ".rst", ".txt")
+
+        non_ast = [c for c in chunks if getattr(c, "kind", "") not in ast_kinds]
+        if non_ast:
+            doc_count = 0
+            config_count = 0
+            empty_count = 0
+            module_block_count = 0
+
+            for c in non_ast:
+                raw_code = getattr(c, "code", "") or ""
+                lang = (getattr(c, "language", "") or "").lower()
+                fp = (getattr(c, "file_path", "") or "").lower()
+                kind = getattr(c, "kind", "")
+
+                if not raw_code.strip():
+                    empty_count += 1
+                elif lang in doc_langs or any(fp.endswith(ext) for ext in doc_exts) or kind == "section":
+                    doc_count += 1
+                elif lang in config_langs or any(fp.endswith(ext) for ext in config_exts):
+                    config_count += 1
+                else:
+                    module_block_count += 1
+
+            if doc_count > 0:
+                non_ast_parts.append(f"{doc_count} documentation sections")
+            if config_count > 0:
+                non_ast_parts.append(f"{config_count} structured config blocks")
+            if module_block_count > 0:
+                non_ast_parts.append(f"{module_block_count} module-level code sections")
+            if empty_count > 0:
+                non_ast_parts.append(f"{empty_count} package init/empty files")
+    elif num_chunks > ast_chunks:
+        diff = num_chunks - ast_chunks
+        non_ast_parts.append(f"{diff} document & data sections")
+
+    if non_ast_parts:
+        syntax_details = f"{ast_chunks} syntax-derived functions & classes (plus {', '.join(non_ast_parts)})"
+    else:
+        syntax_details = f"{ast_chunks} syntax-derived functions & classes (parsed via language AST)"
+
+    # Dynamically extract graph relationship counts without describing every node as a file or function
+    dep_edges = result.graph.number_of_edges() if getattr(result, "graph", None) else 0
+    dep_nodes = result.graph.number_of_nodes() if getattr(result, "graph", None) else 0
+    call_g = getattr(result, "call_graph", None)
+    call_edges = call_g.number_of_edges() if call_g else 0
+    call_nodes = call_g.number_of_nodes() if call_g else 0
+
+    if call_g and (call_edges > 0 or call_nodes > 0):
+        graph_rel_str = f"{dep_edges} file dependencies across {dep_nodes} graph nodes, {call_edges} call links across {call_nodes} symbol nodes"
+    else:
+        graph_rel_str = f"{dep_edges} file dependencies across {dep_nodes} graph nodes"
+
     mode = getattr(result, "indexing_mode", "fresh").lower()
-    mode_badge = {
-        "cached": "Instant Disk Cache",
-        "incremental": "Incremental Update",
-        "fresh": "Fresh Indexing"
-    }.get(mode, "Fresh Indexing")
-    speed_str = f" ({result.num_files / elapsed:.1f} files/sec)" if elapsed > 0.05 and mode != "cached" else ""
-    print(f"[*] Indexed {result.num_files} files -> {result.num_chunks} code chunks ({result.ast_chunks_count} AST)")
-    print(f"[*] Dependency graph: {result.graph.number_of_nodes()} nodes, {result.graph.number_of_edges()} edges")
-    if getattr(result, "call_graph", None):
-        print(f"[*] Call graph: {result.call_graph.number_of_nodes()} nodes, {result.call_graph.number_of_edges()} call edges")
-    print(f"[*] Format version: v{GRAPH_FORMAT_VERSION} (Graph/Index v{GRAPH_FORMAT_VERSION})")
-    print(f"[*] [Time Consumed]: {time_str}{speed_str} [{mode_badge}]")
+    mode_badge_map = {
+        "cached": "Instant Disk Cache (loaded pre-computed index with zero re-computation)",
+        "incremental": "Incremental Update (re-indexed modified files while retaining index)",
+        "fresh": "Fresh Indexing (full repository scan, AST extraction, and vector embedding)",
+    }
+    mode_desc = mode_badge_map.get(mode, f"{mode.capitalize()} Indexing")
+
+    time_str = format_time_consumed(elapsed)
+    speed_str = f" ({num_files / elapsed:.1f} files/sec)" if elapsed > 0.05 and mode != "cached" else ""
+    elapsed_str = f"{time_str}{speed_str}"
+
+    if auto_update_status is None:
+        auto_update_status = "Active — real-time file watcher auto-updates index on change"
+
+    backend_str = (backend.upper() if backend else "Ollama") + (f" ({model})" if model else "")
+    file_filter_str = file_filter if file_filter else "None (searching all files)"
+
+    return {
+        "repo_name": repo_name,
+        "repo_path": current_path,
+        "backend_model": backend_str,
+        "file_filter": file_filter_str,
+        "num_files": num_files,
+        "num_chunks": num_chunks,
+        "ast_chunks": ast_chunks,
+        "syntax_details": syntax_details,
+        "graph_rel_str": graph_rel_str,
+        "mode": mode,
+        "mode_desc": mode_desc,
+        "elapsed_str": elapsed_str,
+        "auto_update_status": auto_update_status,
+    }
+
+
+def print_ingestion_summary(
+    result,
+    current_path: str,
+    elapsed: float,
+    auto_update_status: Optional[str] = None,
+    backend: Optional[str] = None,
+    model: Optional[str] = None,
+    file_filter: Optional[str] = None,
+):
+    """Prints repository ingestion results with clear English labels, counts, and descriptions."""
+    metrics = _extract_ingestion_metrics(
+        result, current_path, elapsed,
+        auto_update_status=auto_update_status,
+        backend=backend, model=model, file_filter=file_filter,
+    )
+    print(f"\n[*] Repository          : {metrics['repo_name']} ({metrics['repo_path']})")
+    print(f"[*] Backend / Model     : {metrics['backend_model']}")
+    print(f"[*] Active file scope   : {metrics['file_filter']}")
+    print(f"[*] Source files        : {metrics['num_files']} files analyzed")
+    print(f"[*] Searchable sections : {metrics['num_chunks']} code sections indexed for retrieval")
+    print(f"[*] Syntax-derived      : {metrics['syntax_details']}")
+    print(f"[*] Graph relationships : {metrics['graph_rel_str']}")
+    print(f"[*] Indexing mode       : {metrics['mode_desc']}")
+    print(f"[*] Elapsed time        : {metrics['elapsed_str']}")
+    print(f"[*] Automatic updates   : {metrics['auto_update_status']}")
+
 
 
 def check_ollama_available(host: str = "http://localhost:11434") -> bool:
@@ -188,6 +313,11 @@ def validate_git_url(url: str) -> str:
 
 def resolve_repo_path(repo_target: str, full_history: bool = False) -> str:
     """Resolves local directory path or clones remote Git repository URL into .repos folder (shallow clone --depth 1 by default)."""
+    # Clean leading/trailing whitespace and quotes that may be passed from terminal shells
+    repo_target = repo_target.strip().strip('"').strip("'")
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    repos_base = os.environ.get("REPOS_DIR") or os.path.join(project_root, ".repos")
+
     # Check if target is a remote repository URL or malicious clone argument
     is_remote = (
         repo_target.startswith("-") or
@@ -201,7 +331,7 @@ def resolve_repo_path(repo_target: str, full_history: bool = False) -> str:
         repo_name = repo_target.rstrip("/").split("/")[-1]
         if repo_name.endswith(".git"):
             repo_name = repo_name[:-4]
-        target_dir = os.path.abspath(os.path.join(".repos", repo_name))
+        target_dir = os.path.abspath(os.path.join(repos_base, repo_name))
 
         git_env = os.environ.copy()
         git_env["GIT_TERMINAL_PROMPT"] = "0"
@@ -218,7 +348,7 @@ def resolve_repo_path(repo_target: str, full_history: bool = False) -> str:
             except Exception as e:
                 print(f"[!] Warning: 'git pull' encountered an issue: {e}. Using existing local files.")
         else:
-            os.makedirs(".repos", exist_ok=True)
+            os.makedirs(repos_base, exist_ok=True)
             mode_desc = "full history" if full_history else "shallow --depth 1"
             safe_target = sanitize_git_url(repo_target)
             print(f"[*] Cloning remote Git repository '{safe_target}' into '{target_dir}' ({mode_desc})...")
@@ -238,67 +368,158 @@ def resolve_repo_path(repo_target: str, full_history: bool = False) -> str:
 
     if not os.path.exists(repo_target):
         # Also check if target matches a known local repo folder in .repos or sample_repo
-        repos_cand = os.path.abspath(os.path.join(".repos", repo_target))
+        repos_cand = os.path.abspath(os.path.join(repos_base, repo_target))
         if os.path.isdir(repos_cand):
             return repos_cand
         sample_cand = os.path.abspath("sample_repo")
         if repo_target == "sample_repo" and os.path.isdir(sample_cand):
             return sample_cand
+        proj_sample_cand = os.path.abspath(os.path.join(project_root, "sample_repo"))
+        if repo_target == "sample_repo" and os.path.isdir(proj_sample_cand):
+            return proj_sample_cand
         raise FileNotFoundError(f"Repository path or URL invalid / not found: '{repo_target}'")
     return os.path.abspath(repo_target)
 
 
 
 def print_banner():
-    banner = """
+    # If stdout supports UTF-8 half-blocks, print the solid pixel-art sprite beside title
+    try:
+        "▀".encode(getattr(sys.stdout, "encoding", "utf-8") or "utf-8")
+        mascot_lines = MascotController.get_mascot_ansi_lines()
+        banner_header = "=" * 71
+        print(banner_header)
+        for i, m_line in enumerate(mascot_lines):
+            if i == 3:
+                print(f"  {m_line}    INTELLICODEX INTERACTIVE CLI ASSISTANT")
+            elif i == 4:
+                print(f"  {m_line}    AI-Powered Repository Search, Dependency Analysis & Code")
+            elif i == 5:
+                print(f"  {m_line}    Intelligence")
+            else:
+                print(f"  {m_line}")
+        print(banner_header)
+    except Exception:
+        banner = """
 =======================================================================
-               INTELLICODEX INTERACTIVE CLI ASSISTANT
-  AI-Powered Repository Search, Dependency Analysis & Code Intelligence
+      ^      INTELLICODEX INTERACTIVE CLI ASSISTANT
+   +[# #]+   AI-Powered Repository Search, Dependency Analysis & Code
+  <| < > |>  Intelligence
+    d   b
 =======================================================================
 """
-    print(banner)
+        print(banner)
+
+
+COMMAND_CATEGORIES: Dict[str, Dict[str, Any]] = {
+    "Search & AI": {
+        "color": "cyan",
+        "commands": [
+            ("search:<query>", "Instant lexical & semantic search without LLM wait", ["search:"]),
+            ("chunks:<file>", "Inspect chunk-level index, line ranges & vector preview", ["chunks:"]),
+            ("index-stats", "Display overall index statistics across the repository", ["index-stats"]),
+            ("explain:<query>", "Inspect RAG pipeline, prompt & retrieval (--compare, --width)", ["explain:"]),
+            ("create: <task> Target: \"<file>\"", "Explicit new-file creation workflow with sandbox validation (e.g. 'create: ... Target: \"TodoApp.java\"')", ["create:"]),
+            ("run: @<file>", "Interactively run a Java, Python, or JS file in isolated Docker container (e.g. 'run: @TodoApp.java')", ["run:"]),
+            ("fix: @<file>", "Diagnose bug & generate automated sandbox code patch (e.g. 'fix: @utils.py')", ["fix:"]),
+            ("doc:<target>", "Generate documentation for symbol or file using call graph", ["doc:"]),
+            ("security:<file>", "Run security vulnerability & secret scan on target file", ["security:"]),
+            ("<question>", "Ask AI a question about the repository (supports @file scoping)", []),
+            ("@<filename>", "Scope query to a specific file (one-shot, e.g. 'any issue in @auth.py?')", ["@"]),
+        ],
+    },
+    "Code Analysis": {
+        "color": "magenta",
+        "commands": [
+            ("graph:<entity>", "Query knowledge graph for entity attributes, callers & lines", ["graph:"]),
+            ("deps:<file>", "View direct & reverse dependencies for a file", ["deps:"]),
+            ("callers:<func>", "Find all call sites calling <func> across repo AST", ["callers:"]),
+            ("top / centrality", "Show PageRank centrality rankings for files & symbols", ["top", "centrality"]),
+            ("arch / cycles", "Analyze circular dependencies & high-coupling bottleneck modules", ["arch", "cycles"]),
+            ("info:<file>", "Show file stats: size, chunk count, lines, centrality score", ["info:"]),
+        ],
+    },
+    "Repository": {
+        "color": "green",
+        "commands": [
+            ("repos / list-repos", "List all known repositories and switch by number", ["repos", "list-repos"]),
+            ("repo <path_or_url>", "Switch or clone active repository (e.g. 'repo https://github.com/user/repo')", ["repo "]),
+            ("repo <number>", "Switch to a previously added repo by its list number (e.g. 'repo 2')", []),
+            ("repo remove <name|num>", "Unregister repository from list (preserves source files & cache)", ["repo remove "]),
+            ("clone <url>", "Clone repository (shallow default, use --full-history for all commits)", ["clone "]),
+            ("files / ls", "List all indexed repository source files", ["files", "ls"]),
+        ],
+    },
+    "Review & Safe Repair": {
+        "color": "yellow",
+        "commands": [
+            ("review", "List pending patch proposals awaiting developer review", ["review"]),
+            ("review <id>", "Inspect detailed patch proposal card and diff", ["review "]),
+            ("approve <id>", "Approve and apply a pending patch proposal", ["approve "]),
+            ("reject <id>", "Reject and discard a pending patch proposal", ["reject "]),
+        ],
+    },
+    "Settings & Configuration": {
+        "color": "yellow",
+        "commands": [
+            ("backend <ollama|tfidf>", "Switch active backend engine dynamically", ["backend "]),
+            ("persona <name>", "Switch AI persona (general, security, reviewer, refactor, fixer)", ["persona "]),
+            ("model <model_name>", "Switch active Ollama LLM model (e.g. 'model qwen2.5-coder:7b')", ["model "]),
+            ("file:<filename>", "Set persistent file filter for all queries (e.g. 'file:auth.py')", ["file:"]),
+            ("file:off", "Clear persistent file filter", ["file:off"]),
+            ("hybrid / hybrid:status", "Check hybrid search status (BM25 + Dense RRF)", ["hybrid", "hybrid:status"]),
+            ("hybrid:on / hybrid:off", "Enable or disable BM25 lexical hybrid ranking", ["hybrid:on", "hybrid:off"]),
+            ("hybrid:toggle", "Toggle hybrid BM25 search on/off", ["hybrid:toggle"]),
+        ],
+    },
+    "Git & Watcher": {
+        "color": "blue",
+        "commands": [
+            ("hooks", "Install Git background re-indexing hooks for current repository", ["hooks"]),
+            ("hooks:status", "Check status of installed Git hooks", ["hooks:status"]),
+            ("hooks:remove", "Uninstall Git background re-indexing hooks", ["hooks:remove"]),
+            ("watch", "Check real-time filesystem watcher status", ["watch", "watch:status"]),
+            ("watch:start / watch:stop", "Start or stop real-time file watcher", ["watch:start", "watch:stop"]),
+        ],
+    },
+    "Architecture & Memory": {
+        "color": "magenta",
+        "commands": [
+            ("why:<query>", "Query historical design decisions and commit rationale (e.g. 'why:FAISS')", ["why:"]),
+            ("adrs", "List all Architectural Decision Records (ADRs) found in repo", ["adrs"]),
+            ("decision: <title> | <desc>", "Record developer architectural decision into memory", ["decision:"]),
+            ("learned", "Show self-improving agent memory bank and repair statistics", ["learned"]),
+        ],
+    },
+    "Session": {
+        "color": "white",
+        "commands": [
+            ("wave / hi", "Greet mascot (primary command; IDEs may intercept Ctrl+G/F1)", ["wave", "hi", "hello", "hey", "greet", "mascot"]),
+            ("status", "Show full system status, active backend, model & watcher", ["status"]),
+            ("history", "View multi-turn conversation history", ["history", "chat"]),
+            ("clear-chat / reset", "Clear conversation history", ["clear-chat", "reset"]),
+            ("export:<file>", "Save last AI answer to a Markdown file", ["export:"]),
+            ("version", "Show IntelliCodeX CLI version", ["version"]),
+            ("clear / cls", "Clear terminal screen", ["clear", "cls"]),
+            ("help / ?", "Show this command reference", ["help", "?"]),
+            ("exit / quit", "Exit IntelliCodeX CLI", ["exit", "quit"]),
+        ],
+    },
+}
 
 
 def print_help():
-    help_text = """
-Available Commands:
-  fix:<err_or_file>      - Diagnose bug & generate automated code patch (e.g. 'fix:KeyError in auth.py')
-  deps:<filepath>        - View direct & reverse dependencies for <filepath> (e.g. 'deps:pkg/db.py')
-  callers:<func>         - Find all function call sites calling <func> (e.g. 'callers:fetch_user')
-  top / centrality       - Show top central files and critical functions (PageRank score)
-  arch / cycles          - Analyze circular dependencies & high-coupling bottleneck modules
-  why:<query>            - Query historical design decisions and commit rationale (e.g. 'why:FAISS')
-  adrs                   - List all Architectural Decision Records (ADRs) found in repo
-  repos / list-repos     - List all already-added repositories and switch by number
-  repo <path_or_url>     - Switch/clone active repository (e.g. 'repo https://github.com/user/repo')
-  repo <number>          - Switch to a previously added repo by its list number (e.g. 'repo 2')
-  repo remove <num|name> - Unregister repository registration (preserves source files & cache)
-  backend <ollama|tfidf> - Switch active backend engine dynamically
-  persona <name>         - Switch AI persona (general, security, reviewer, refactor, fixer)
-  model <model_name>     - Switch active Ollama model (e.g. 'model qwen2.5-coder:7b')
-  history / clear-chat   - View or clear multi-turn chat memory
-  reset / clear-memory  - Clear conversation history (useful before new @file scope)
-  hooks / setup-hooks   - Install Git background re-indexing hooks for current repository
-  hooks:status          - Check status of installed Git hooks
-  hooks:remove          - Uninstall Git background re-indexing hooks
-  watch / watch:status   - Check real-time file watcher status
-  watch:stop / watch:start - Stop or restart real-time file watching
-  hybrid / hybrid:status - Check hybrid search status (BM25 + Dense RRF)
-  hybrid:on / hybrid:off - Enable or disable BM25 hybrid ranking
-  search:<query>         - Instant lexical & semantic search without LLM wait
-  chunks:<file>          - Inspect chunk-level index, start/end lines & vector preview
-  index-stats            - Display overall index statistics (files, chunks, nodes, vocab, FAISS)
-  explain:<query>        - Inspect RAG pipeline & prompt (--no-answer, --compare, --width, --json)
-  clear / cls            - Clear terminal screen
-  help / ?               - Show this help message
-  exit / quit            - Exit IntelliCodeX CLI
-
-File Scoping:
-  @filename              - Scope query to a specific file (one-shot, e.g. 'any issue in @auth.py?')
-  file:<filename>        - Set persistent file filter for all queries (e.g. 'file:auth.py')
-  file:off               - Clear persistent file filter
-"""
-    print(help_text)
+    lines = ["Available Commands:"]
+    for cat_name, cat_data in COMMAND_CATEGORIES.items():
+        lines.append(f"\n{cat_name}:")
+        for item in cat_data["commands"]:
+            cmd, desc = item[0], item[1]
+            lines.append(f"  {cmd:<26} - {desc}")
+    lines.append("\nFile Scoping:")
+    lines.append("  @filename                  - Scope query to a specific file (one-shot, e.g. 'any issue in @auth.py?')")
+    lines.append("  file:<filename>            - Set persistent file filter for all queries (e.g. 'file:auth.py')")
+    lines.append("  file:off                   - Clear persistent file filter")
+    print("\n".join(lines))
 
 
 def get_available_repos(current_path: str, db_path: Optional[str] = None) -> list:
@@ -333,10 +554,16 @@ def get_available_repos(current_path: str, db_path: Optional[str] = None) -> lis
         known.append((label, abs_p))
         seen_paths.add(norm_key)
 
+    project_root = os.path.dirname(os.path.abspath(__file__))
+
     # 1. Built-in sample_repo
     sample_abs = os.path.abspath("sample_repo")
     if os.path.isdir(sample_abs):
         _add_repo("sample_repo", sample_abs)
+    else:
+        proj_sample = os.path.abspath(os.path.join(project_root, "sample_repo"))
+        if os.path.isdir(proj_sample):
+            _add_repo("sample_repo", proj_sample)
 
     # 2. Currently active repo
     if current_path and os.path.isdir(current_path):
@@ -356,11 +583,12 @@ def get_available_repos(current_path: str, db_path: Optional[str] = None) -> lis
         pass
 
     # 4. Repos cloned into .repos/
-    repos_dir = os.path.abspath(".repos")
-    if os.path.isdir(repos_dir):
-        for entry in sorted(os.scandir(repos_dir), key=lambda e: e.name.lower()):
-            if entry.is_dir():
-                _add_repo(entry.name, entry.path)
+    repos_base = os.environ.get("REPOS_DIR") or os.path.join(project_root, ".repos")
+    for r_dir in [os.path.abspath(".repos"), repos_base]:
+        if os.path.isdir(r_dir):
+            for entry in sorted(os.scandir(r_dir), key=lambda e: e.name.lower()):
+                if entry.is_dir():
+                    _add_repo(entry.name, entry.path)
 
     return known
 
@@ -381,37 +609,693 @@ def should_use_tui() -> bool:
     return True
 
 
-def create_interactive_session(completer=None, history=None):
-    """Creates a prompt_toolkit PromptSession with Windows fallback if raw console buffer fails."""
-    if not HAS_PROMPT_TOOLKIT or PromptSession is None:
-        return None
+def is_mascot_mouse_enabled() -> bool:
+    """Returns True ONLY if mascot mouse interaction is explicitly opted-in.
+    Defaults to False to preserve normal terminal scrollback, mouse-wheel scrolling,
+    text selection, and copy/paste."""
+    val = os.environ.get("INTELLICODEX_MASCOT_MOUSE", "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
+def get_mascot_greeting_keys() -> list:
+    """Returns configured keyboard shortcut combinations for mascot greeting.
+    Configurable via the INTELLICODEX_GREET_KEYS environment variable (comma-separated,
+    e.g. 'c-g,f1' or 'f1' or 'none' to disable).
+    Default: ['c-g', 'f1'].
+
+    Note: Host IDE shortcuts (such as Ctrl+G in Antigravity IDE, which opens the
+    directory picker) may intercept keyboard events before they reach the terminal.
+    For this reason, 'wave' is the primary greeting command in IntelliCodeX."""
+    val = os.environ.get("INTELLICODEX_GREET_KEYS", "").strip().lower()
+    if not val:
+        val = "c-g,f1"
+    if val in ("0", "none", "off", "false", "disabled"):
+        return []
+    return [k.strip() for k in val.split(",") if k.strip()]
+
+
+_mascot_rendering_suspended = False
+_active_watcher = None
+
+
+def suspend_mascot_rendering():
+    """Suspends interactive mascot rendering while executing commands, printing tables, diffs, or answers."""
+    global _mascot_rendering_suspended
+    _mascot_rendering_suspended = True
+
+
+def resume_mascot_rendering():
+    """Resumes interactive mascot rendering once output printing has finished and waiting at the prompt."""
+    global _mascot_rendering_suspended
+    _mascot_rendering_suspended = False
+
+
+def is_mascot_rendering_suspended() -> bool:
+    """Returns True if mascot rendering is currently suspended."""
+    return _mascot_rendering_suspended
+
+
+def register_active_watcher(watcher):
+    """Registers the active repository watcher for coordinated shutdown."""
+    global _active_watcher
+    _active_watcher = watcher
+
+
+def restore_terminal_mouse_modes():
+    """Restores native terminal mouse modes.
+    Ensures terminal mouse tracking (X10, button, SGR) is turned off cleanly
+    so native terminal scrolling, mouse-wheel, and selection are never hijacked.
+    Does NOT toggle screen buffers (\x1b[?1049l) because the CLI runs exclusively
+    in the normal terminal buffer."""
     try:
-        return PromptSession(completer=completer, history=history)
+        if sys.stdout and not getattr(sys.stdout, "closed", False):
+            # Disable mouse tracking modes:
+            # ?9l: X10 mouse tracking off
+            # ?1000l: VT200 normal tracking off
+            # ?1001l: Hilite tracking off
+            # ?1002l: Button event tracking off
+            # ?1003l: Any event tracking off
+            # ?1006l: SGR extended coordinates off
+            sys.stdout.write("\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1006l")
+            sys.stdout.flush()
     except Exception:
         pass
 
-    # Windows fallback: when NoConsoleScreenBufferError occurs in modern terminals / ConPTY
+
+def cleanup_cli_resources(watcher=None):
+    """Ensures no animation, spinner thread, or filesystem watcher survives CLI shutdown.
+    Cleanly restores terminal mouse tracking modes at lifecycle boundaries."""
+    global _active_watcher
     try:
-        from prompt_toolkit.output.vt100 import Vt100_Output
-        import shutil
-
-        def get_size():
-            sz = shutil.get_terminal_size((80, 24))
-            return (sz.columns, sz.lines)
-
-        out = Vt100_Output(sys.stdout, get_size)
-        return PromptSession(completer=completer, history=history, output=out)
+        MascotSpinner.stop_all()
     except Exception:
+        pass
+    suspend_mascot_rendering()
+    w = watcher or _active_watcher
+    if w is not None:
+        try:
+            w.stop()
+        except Exception:
+            pass
+        _active_watcher = None
+    restore_terminal_mouse_modes()
+
+
+atexit.register(cleanup_cli_resources)
+
+
+
+def create_interactive_session(completer=None, history=None, input=None, output=None):
+    """Creates a prompt_toolkit PromptSession with Windows fallback if raw console buffer fails."""
+    resume_mascot_rendering()
+    if not HAS_PROMPT_TOOLKIT or PromptSession is None:
         return None
+    session = None
+
+    # Configure key bindings including greeting shortcuts (configurable via INTELLICODEX_GREET_KEYS)
+    # Note: Host IDEs (e.g. Antigravity IDE) may intercept shortcuts such as Ctrl+G; 'wave' is the primary greeting command.
+    kb = None
+    try:
+        from prompt_toolkit.key_binding import KeyBindings
+        kb = KeyBindings()
+
+        greet_keys = get_mascot_greeting_keys()
+        if greet_keys:
+            def _greet_mascot(event):
+                MascotController.trigger_wave()
+                event.app.invalidate()
+
+            for key_combo in greet_keys:
+                try:
+                    kb.add(key_combo)(_greet_mascot)
+                except Exception:
+                    pass
+    except Exception:
+        kb = None
+
+    try:
+        session = PromptSession(completer=completer, history=history, key_bindings=kb, input=input, output=output)
+    except Exception:
+        session = None
+
+    # Windows fallback: when NoConsoleScreenBufferError occurs in modern terminals / ConPTY
+    if session is None and input is None and output is None:
+        try:
+            from prompt_toolkit.output.vt100 import Vt100_Output
+            from prompt_toolkit.data_structures import Size
+            import shutil
+
+            def get_size():
+                sz = shutil.get_terminal_size((80, 24))
+                return Size(rows=sz.lines, columns=sz.columns)
+
+            out = Vt100_Output(sys.stdout, get_size)
+            session = PromptSession(completer=completer, history=history, key_bindings=kb, output=out)
+        except Exception:
+            session = None
+
+    if session is not None and is_animation_enabled():
+        try:
+            from prompt_toolkit.layout.containers import Window, ConditionalContainer
+            from prompt_toolkit.layout.controls import FormattedTextControl
+            from prompt_toolkit.filters import is_done
+            from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+            from prompt_toolkit.mouse_events import MouseEventType
+
+            def on_mascot_click(mouse_event):
+                if mouse_event.event_type in (MouseEventType.MOUSE_UP, MouseEventType.MOUSE_DOWN):
+                    MascotController.trigger_wave()
+                    if session and hasattr(session, "app") and session.app:
+                        session.app.invalidate()
+
+            def get_mascot_idle_tokens():
+                if is_mascot_rendering_suspended():
+                    return []
+                now = time.time()
+                waving = MascotController.is_waving()
+                mouse_opted_in = is_mascot_mouse_enabled()
+
+                buf_text = ""
+                if session and hasattr(session, "default_buffer") and session.default_buffer:
+                    buf_text = session.default_buffer.text or ""
+                is_typing = bool(buf_text.strip())
+
+                if waving:
+                    # Wave animation: alternate waving hand frames
+                    elapsed = now - MascotController._last_wave_time
+                    wave_mode = "wave1" if (int(elapsed * 4.0) % 2 == 0) else "wave2"
+                    lines = MascotController.get_mascot_ansi_lines(eye_mode=wave_mode)
+                    status_title = "Hey! How can I help?"
+                    status_sub = "Ask me anything about this repository's code, structure, or bugs."
+                    status_msg = "Try: 'search:<term>', 'deps:<file>', 'callers:<fn>', 'arch', 'review', or ask a question."
+                    if mouse_opted_in:
+                        status_hint = "Type 'wave' (or click mascot) to wave again. 'help' for all commands."
+                    else:
+                        status_hint = "Type 'wave' to wave again. Type 'help' for all commands."
+                elif is_typing:
+                    # Attentive eyes: wide open focused eyes, blinking paused while typing
+                    lines = MascotController.get_mascot_ansi_lines(eye_mode="static")
+                    preview = (buf_text[:38] + "...") if len(buf_text) > 38 else buf_text
+                    status_title = "IntelliCodeX Listening... (Attentive)"
+                    status_sub = f"Editing: \033[36m{preview}\033[0m"
+                    status_msg = "Press Enter to execute, or continue typing your query."
+                    status_hint = "Autocomplete suggestions available via Tab / Arrow keys."
+                else:
+                    # Idle state: occasional brief blink (~0.22s) every 3.8s
+                    is_blink = (now % 3.8) < 0.22
+                    lines = MascotController.get_mascot_ansi_lines(is_blink=is_blink)
+                    status_title = "IntelliCodeX Interactive Assistant"
+                    status_sub = "AI-Powered Repository Search & Code Intelligence"
+                    status_msg = "IntelliCodeX ready. Type a question or 'help' for options, 'exit' to quit."
+                    if mouse_opted_in:
+                        status_hint = "Commands: search:, deps:, callers:, arch, review, status (type 'wave' or click to greet!)"
+                    else:
+                        status_hint = "Commands: search:, deps:, callers:, arch, review, status (type 'wave' to greet!)"
+
+                status_lines = [
+                    "",
+                    f"   \033[1;36m{status_title}\033[0m",
+                    f"   \033[38;2;191;247;253m{status_sub}\033[0m",
+                    "   \033[90m──────────────────────────────────────────────────────────\033[0m",
+                    f"   \033[37m{status_msg}\033[0m",
+                    f"   \033[90m{status_hint}\033[0m",
+                    "",
+                    "",
+                    "",
+                ]
+                rows = [f"{m}{s}" for m, s in zip(lines, status_lines)]
+                ansi_str = "\n".join(rows)
+
+                # Attach click handler ONLY if mouse interaction is explicitly opted in
+                try:
+                    tokens = to_formatted_text(ANSI(ansi_str))
+                    if mouse_opted_in:
+                        return [(style, text, on_mascot_click) for style, text in tokens]
+                    return [(style, text) for style, text in tokens]
+                except Exception:
+                    return ANSI(ansi_str)
+
+            from prompt_toolkit.filters import Condition
+            mascot_win = ConditionalContainer(
+                Window(FormattedTextControl(get_mascot_idle_tokens), dont_extend_height=True, height=9),
+                filter=(~is_done) & Condition(lambda: not is_mascot_rendering_suspended())
+            )
+            session.layout.container.children.insert(0, mascot_win)
+        except Exception:
+            pass
+
+    return session
+
+
+
+class MascotController:
+    """IntelliCodeX solid pixel-art cyan robot mascot controller supporting Ready, Processing, Success, and Failure states."""
+
+    # 16-wide x 18-tall pixel grid matching approved reference design
+    # C: Vibrant Cyan (#00d8f6), L: Pale Ice Cyan (#bff7fd), D: Dark Eye/Chest (#121214), .: Transparent
+    SPRITE_STATIC = [
+        "......CCCC......",  # 0: Antenna cap
+        ".......CC.......",  # 1: Antenna stalk
+        "..CCCCCCCCCCCC..",  # 2: Head top border
+        ".CLLLLLLLLLLLLC.",  # 3: Head faceplate top
+        "CCLLDDLLLLDDLLCC",  # 4: Ears + Eyes (top)
+        "CCLLDDLLLLDDLLCC",  # 5: Ears + Eyes (bot)
+        ".CLLLLLLLLLLLLC.",  # 6: Head faceplate bot
+        "..CCCCCCCCCCCC..",  # 7: Head bot border
+        "................",  # 8: Neck gap
+        "...CCCCCCCCCC...",  # 9: Torso top
+        ".C.CCCDCCDCCC.C.",  # 10: Arms top + <> top
+        ".C.CCDCCCCDCC.C.",  # 11: Arms mid + <> vertices
+        ".L.CCCDCCDCCC.L.",  # 12: Arms cuff + <> bot
+        ".C.CCCCCCCCCC.C.",  # 13: Arms hand + Torso bot
+        "................",  # 14: Leg gap
+        "....CCC..CCC....",  # 15: Feet
+        "....CCC..CCC....",  # 16: Feet base
+        "................",  # 17: Padding
+    ]
+
+    # Blink frame for processing state (subtle blinking eye slits)
+    SPRITE_BLINK = [
+        "......CCCC......",  # 0: Antenna cap
+        ".......CC.......",  # 1: Antenna stalk
+        "..CCCCCCCCCCCC..",  # 2: Head top border
+        ".CLLLLLLLLLLLLC.",  # 3: Head faceplate top
+        "CCLLLLLLLLLLLLCC",  # 4: Ears + Faceplate (eyes closed upper)
+        "CCLLDDLLLLDDLLCC",  # 5: Ears + Eyes slits (lower)
+        ".CLLLLLLLLLLLLC.",  # 6: Head faceplate bot
+        "..CCCCCCCCCCCC..",  # 7: Head bot border
+        "................",  # 8: Neck gap
+        "...CCCCCCCCCC...",  # 9: Torso top
+        ".C.CCCDCCDCCC.C.",  # 10: Arms top + <> top
+        ".C.CCDCCCCDCC.C.",  # 11: Arms mid + <> vertices
+        ".L.CCCDCCDCCC.L.",  # 12: Arms cuff + <> bot
+        ".C.CCCCCCCCCC.C.",  # 13: Arms hand + Torso bot
+        "................",  # 14: Leg gap
+        "....CCC..CCC....",  # 15: Feet
+        "....CCC..CCC....",  # 16: Feet base
+        "................",  # 17: Padding
+    ]
+
+    # Look-left frame for processing eye movement
+    SPRITE_LOOK_LEFT = [
+        "......CCCC......",  # 0: Antenna cap
+        ".......CC.......",  # 1: Antenna stalk
+        "..CCCCCCCCCCCC..",  # 2: Head top border
+        ".CLLLLLLLLLLLLC.",  # 3: Head faceplate top
+        "CCLDDLLLLDDLLLCC",  # 4: Ears + Eyes shifted left (top)
+        "CCLDDLLLLDDLLLCC",  # 5: Ears + Eyes shifted left (bot)
+        ".CLLLLLLLLLLLLC.",  # 6: Head faceplate bot
+        "..CCCCCCCCCCCC..",  # 7: Head bot border
+        "................",  # 8: Neck gap
+        "...CCCCCCCCCC...",  # 9: Torso top
+        ".C.CCCDCCDCCC.C.",  # 10: Arms top + <> top
+        ".C.CCDCCCCDCC.C.",  # 11: Arms mid + <> vertices
+        ".L.CCCDCCDCCC.L.",  # 12: Arms cuff + <> bot
+        ".C.CCCCCCCCCC.C.",  # 13: Arms hand + Torso bot
+        "................",  # 14: Leg gap
+        "....CCC..CCC....",  # 15: Feet
+        "....CCC..CCC....",  # 16: Feet base
+        "................",  # 17: Padding
+    ]
+
+    # Look-right frame for processing eye movement
+    SPRITE_LOOK_RIGHT = [
+        "......CCCC......",  # 0: Antenna cap
+        ".......CC.......",  # 1: Antenna stalk
+        "..CCCCCCCCCCCC..",  # 2: Head top border
+        ".CLLLLLLLLLLLLC.",  # 3: Head faceplate top
+        "CCLLLDDLLLLDDLCC",  # 4: Ears + Eyes shifted right (top)
+        "CCLLLDDLLLLDDLCC",  # 5: Ears + Eyes shifted right (bot)
+        ".CLLLLLLLLLLLLC.",  # 6: Head faceplate bot
+        "..CCCCCCCCCCCC..",  # 7: Head bot border
+        "................",  # 8: Neck gap
+        "...CCCCCCCCCC...",  # 9: Torso top
+        ".C.CCCDCCDCCC.C.",  # 10: Arms top + <> top
+        ".C.CCDCCCCDCC.C.",  # 11: Arms mid + <> vertices
+        ".L.CCCDCCDCCC.L.",  # 12: Arms cuff + <> bot
+        ".C.CCCCCCCCCC.C.",  # 13: Arms hand + Torso bot
+        "................",  # 14: Leg gap
+        "....CCC..CCC....",  # 15: Feet
+        "....CCC..CCC....",  # 16: Feet base
+        "................",  # 17: Padding
+    ]
+
+    # Wave frame 1 (right arm raised waving)
+    SPRITE_WAVE_1 = [
+        "......CCCC......",  # 0: Antenna cap
+        ".......CC.......",  # 1: Antenna stalk
+        "..CCCCCCCCCCCC..",  # 2: Head top border
+        ".CLLLLLLLLLLLLCC",  # 3: Head faceplate top + waving hand
+        "CCLLDDLLLLDDLL.L",  # 4: Ears + Eyes + waving cuff
+        "CCLLDDLLLLDDLL.C",  # 5: Ears + Eyes + arm diagonal
+        ".CLLLLLLLLLLLLC.",  # 6: Head faceplate bot
+        "..CCCCCCCCCCCC..",  # 7: Head bot border
+        "................",  # 8: Neck gap
+        "...CCCCCCCCCC.C.",  # 9: Torso top + shoulder
+        ".C.CCCDCCDCCC...",  # 10: Left arm + <> top
+        ".C.CCDCCCCDCC...",  # 11: Left arm + <> vertices
+        ".L.CCCDCCDCCC...",  # 12: Left arm + <> bot
+        ".C.CCCCCCCCCC...",  # 13: Left arm + Torso bot
+        "................",  # 14: Leg gap
+        "....CCC..CCC....",  # 15: Feet
+        "....CCC..CCC....",  # 16: Feet base
+        "................",  # 17: Padding
+    ]
+
+    # Wave frame 2 (right arm raised high)
+    SPRITE_WAVE_2 = [
+        "......CCCC....CC",  # 0: Antenna cap + raised hand
+        ".......CC......L",  # 1: Antenna stalk + cuff
+        "..CCCCCCCCCCCC.C",  # 2: Head top border + arm
+        ".CLLLLLLLLLLLLC.",  # 3: Head faceplate top
+        "CCLLDDLLLLDDLLCC",  # 4: Ears + Eyes (top)
+        "CCLLDDLLLLDDLLCC",  # 5: Ears + Eyes (bot)
+        ".CLLLLLLLLLLLLC.",  # 6: Head faceplate bot
+        "..CCCCCCCCCCCC..",  # 7: Head bot border
+        "................",  # 8: Neck gap
+        "...CCCCCCCCCC...",  # 9: Torso top
+        ".C.CCCDCCDCCC...",  # 10: Left arm + <> top
+        ".C.CCDCCCCDCC...",  # 11: Left arm + <> vertices
+        ".L.CCCDCCDCCC...",  # 12: Left arm + <> bot
+        ".C.CCCCCCCCCC...",  # 13: Left arm + Torso bot
+        "................",  # 14: Leg gap
+        "....CCC..CCC....",  # 15: Feet
+        "....CCC..CCC....",  # 16: Feet base
+        "................",  # 17: Padding
+    ]
+
+    # Unsupported terminal ASCII fallback
+    MASCOT_ASCII_LINES = [
+        "    ^    ",
+        " +[# #]+ ",
+        "<| < > |>",
+        "  d   b  ",
+    ]
+
+    COLOR_MAP = {
+        'C': (0, 216, 246),      # Vibrant Cyan
+        'L': (191, 247, 253),    # Pale Ice Cyan (Faceplate & Cuffs)
+        'D': (18, 18, 20),       # Dark Eye & <> Symbol
+        '.': None,               # Transparent / Background
+    }
+
+    _last_wave_time: float = 0.0
+    _WAVE_DURATION: float = 2.5
+
+    @classmethod
+    def trigger_wave(cls):
+        """Triggers brief wave animation and greeting."""
+        cls._last_wave_time = time.time()
+
+    @classmethod
+    def is_waving(cls) -> bool:
+        """Returns True if mascot is currently in the waving state."""
+        return (time.time() - cls._last_wave_time) < cls._WAVE_DURATION
+
+    @classmethod
+    def get_mascot_rich(cls, eye_mode: str = "static", is_blink: bool = False) -> Any:
+        """Renders solid pixel-art sprite into a Rich Text renderable using half-blocks."""
+        if not HAS_RICH or not Text:
+            return None
+        from rich.style import Style
+        from rich.color import Color
+        if is_blink or eye_mode == "blink":
+            sprite = cls.SPRITE_BLINK
+        elif eye_mode == "left":
+            sprite = cls.SPRITE_LOOK_LEFT
+        elif eye_mode == "right":
+            sprite = cls.SPRITE_LOOK_RIGHT
+        elif eye_mode == "wave1":
+            sprite = cls.SPRITE_WAVE_1
+        elif eye_mode == "wave2":
+            sprite = cls.SPRITE_WAVE_2
+        elif eye_mode == "wave":
+            sprite = cls.SPRITE_WAVE_1 if (int(time.time() * 3.5) % 2 == 0) else cls.SPRITE_WAVE_2
+        else:
+            sprite = cls.SPRITE_STATIC
+        t = Text()
+        for r in range(0, len(sprite), 2):
+            top_row = sprite[r]
+            bot_row = sprite[r+1] if r+1 < len(sprite) else '.' * len(top_row)
+            for x in range(len(top_row)):
+                c_top = cls.COLOR_MAP.get(top_row[x])
+                c_bot = cls.COLOR_MAP.get(bot_row[x])
+                if c_top is None and c_bot is None:
+                    t.append(' ')
+                elif c_top is not None and c_bot is None:
+                    t.append('▀', style=Style(color=Color.from_rgb(*c_top)))
+                elif c_top is None and c_bot is not None:
+                    t.append('▄', style=Style(color=Color.from_rgb(*c_bot)))
+                elif c_top == c_bot:
+                    t.append('█', style=Style(color=Color.from_rgb(*c_top)))
+                else:
+                    t.append('▀', style=Style(color=Color.from_rgb(*c_top), bgcolor=Color.from_rgb(*c_bot)))
+            if r + 2 < len(sprite):
+                t.append('\n')
+        return t
+
+    @classmethod
+    def get_mascot_ansi_lines(cls, eye_mode: str = "static", is_blink: bool = False) -> list[str]:
+        """Renders solid pixel-art sprite into ANSI string lines using half-blocks."""
+        if is_blink or eye_mode == "blink":
+            sprite = cls.SPRITE_BLINK
+        elif eye_mode == "left":
+            sprite = cls.SPRITE_LOOK_LEFT
+        elif eye_mode == "right":
+            sprite = cls.SPRITE_LOOK_RIGHT
+        elif eye_mode == "wave1":
+            sprite = cls.SPRITE_WAVE_1
+        elif eye_mode == "wave2":
+            sprite = cls.SPRITE_WAVE_2
+        elif eye_mode == "wave":
+            sprite = cls.SPRITE_WAVE_1 if (int(time.time() * 3.5) % 2 == 0) else cls.SPRITE_WAVE_2
+        else:
+            sprite = cls.SPRITE_STATIC
+        lines = []
+        for r in range(0, len(sprite), 2):
+            top_row = sprite[r]
+            bot_row = sprite[r+1] if r+1 < len(sprite) else '.' * len(top_row)
+            line = ''
+            for x in range(len(top_row)):
+                c_top = cls.COLOR_MAP.get(top_row[x])
+                c_bot = cls.COLOR_MAP.get(bot_row[x])
+                if c_top is None and c_bot is None:
+                    line += ' '
+                elif c_top is not None and c_bot is None:
+                    line += f'\033[38;2;{c_top[0]};{c_top[1]};{c_top[2]}m▀\033[0m'
+                elif c_top is None and c_bot is not None:
+                    line += f'\033[38;2;{c_bot[0]};{c_bot[1]};{c_bot[2]}m▄\033[0m'
+                elif c_top == c_bot:
+                    line += f'\033[38;2;{c_top[0]};{c_top[1]};{c_top[2]}m█\033[0m'
+                else:
+                    line += f'\033[38;2;{c_top[0]};{c_top[1]};{c_top[2]};48;2;{c_bot[0]};{c_bot[1]};{c_bot[2]}m▀\033[0m'
+            lines.append(line)
+        return lines
+
+    @classmethod
+    def get_mascot_text(cls, eyes: str = "■ ■", ascii_mode: bool = False) -> str:
+        if ascii_mode:
+            return "\n".join(cls.MASCOT_ASCII_LINES)
+        return "\n".join(cls.get_mascot_ansi_lines(is_blink=(eyes == "— —")))
+
+    @classmethod
+    def create_mascot_grid(cls, status_text: Any, eye_mode: str = "static", is_blink: bool = False, style: str = "cyan") -> Any:
+        if not HAS_RICH or not Table:
+            return None
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column()
+        grid.add_column(vertical="middle")
+        mascot = cls.get_mascot_rich(eye_mode=eye_mode, is_blink=is_blink)
+        if isinstance(status_text, str):
+            status_text = Text(status_text, style=style)
+        grid.add_row(mascot, status_text)
+        return grid
+
+    @classmethod
+    def render_ready(cls, message: str = ""):
+        """Renders static mascot in Ready state."""
+        if HAS_RICH and console:
+            msg_text = Text(message or "Ready to assist.", style="dim white")
+            console.print(cls.create_mascot_grid(msg_text, is_blink=False))
+        else:
+            mascot_plain = cls.get_mascot_text(ascii_mode=True)
+            print(f"{mascot_plain}\n[*] Ready: {message or 'Standing by'}\n")
+
+    @classmethod
+    def render_greeting(cls):
+        """Displays wave greeting and supported capabilities."""
+        if HAS_RICH and console:
+            greeting_text = Text()
+            greeting_text.append("Hey! How can I help?\n", style="bold cyan")
+            greeting_text.append("Ask a question about this repository or try:\n", style="white")
+            greeting_text.append("  • search:<query>   ", style="bold cyan")
+            greeting_text.append("— fast semantic code search\n", style="dim white")
+            greeting_text.append("  • deps:<file>      ", style="bold cyan")
+            greeting_text.append("— dependency impact analysis\n", style="dim white")
+            greeting_text.append("  • callers:<func>   ", style="bold cyan")
+            greeting_text.append("— trace call hierarchy\n", style="dim white")
+            greeting_text.append("  • arch / review    ", style="bold cyan")
+            greeting_text.append("— architecture analysis & patch review\n", style="dim white")
+            greeting_text.append("  • status / help    ", style="bold yellow")
+            greeting_text.append("— inspect repository health & full reference\n", style="dim white")
+            greeting_text.append("  Tip: Type 'wave' to greet anytime. (Host IDEs may intercept Ctrl+G/F1 shortcuts)\n", style="dim cyan")
+            console.print(cls.create_mascot_grid(greeting_text, eye_mode="wave1"))
+        else:
+            print("[*] Robot: Hey! How can I help? Try search:<query>, deps:<file>, arch, or 'help' for options. (Type 'wave' to greet anytime)\n")
+
+    @classmethod
+    def render_success(cls, message: str = "Operation completed successfully"):
+        """Renders static mascot in Success state with green check."""
+        if HAS_RICH and console:
+            status = Text()
+            status.append("✓ ", style="bold green")
+            status.append(message, style="green")
+            console.print(cls.create_mascot_grid(status, is_blink=False))
+        else:
+            print(f"[*] [✓] {message}")
+
+    @classmethod
+    def render_failure(cls, error_message: str):
+        """Renders static mascot in Failure state with amber indicator and actual error message."""
+        if HAS_RICH and console:
+            status = Text()
+            status.append("⚠ ", style="bold #FFB000")
+            status.append(f"Error: {error_message}", style="yellow")
+            console.print(cls.create_mascot_grid(status, is_blink=False))
+        else:
+            print(f"[!] [⚠] Error: {error_message}")
+
+
+def is_animation_enabled() -> bool:
+    """Checks if live terminal animation is supported and permitted."""
+    ci_val = os.getenv("CI", "").strip().lower()
+    if ci_val not in ("", "0", "false", "no"):
+        return False
+    no_anim = os.getenv("INTELLICODEX_NO_ANIMATION", "").strip().lower()
+    if no_anim not in ("", "0", "false", "no"):
+        return False
+    if os.getenv("INTELLICODEX_FORCE_ANIMATION", "").strip() == "1":
+        return True
+    if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
+        return False
+    if not HAS_RICH or not console:
+        return False
+    return True
+
+
+class MascotSpinner:
+    """Animated processing indicator with faster thinking dots and occasional eye movement."""
+    _active_spinners = set()
+
+    @classmethod
+    def stop_all(cls):
+        """Stops all active spinners to guarantee no background thread survives."""
+        for spinner in list(cls._active_spinners):
+            try:
+                spinner.stop()
+            except Exception:
+                pass
+
+    def __init__(self, task_name: str = "Processing"):
+        self.task_name = task_name
+        self.stop_event = threading.Event()
+        self.thread = None
+        self._is_active = False
+
+    def start(self):
+        MascotSpinner._active_spinners.add(self)
+        if not is_animation_enabled():
+            print(f"[*] {self.task_name}...")
+            self._is_active = True
+            return
+
+        self._is_active = True
+        self.stop_event.clear()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        dots_cycle = [".  ", ".. ", "...", "···", "•••", "..."]
+        eye_cycle = [
+            "static", "static", "static", "static",
+            "left",   "left",   "static", "static",
+            "right",  "right",  "static", "static",
+            "blink",  "static", "static", "static",
+        ]
+        idx = 0
+        try:
+            from rich.live import Live
+            with Live(console=console, transient=True, refresh_per_second=10) as live:
+                while not self.stop_event.is_set():
+                    eye_mode = eye_cycle[idx % len(eye_cycle)]
+                    dot = dots_cycle[idx % len(dots_cycle)]
+                    grid = MascotController.create_mascot_grid(
+                        f"{self.task_name} thinking {dot}",
+                        eye_mode=eye_mode,
+                        style="cyan"
+                    )
+                    if grid:
+                        live.update(grid)
+                    idx += 1
+                    time.sleep(0.09)
+        except Exception:
+            pass
+
+    def stop(self):
+        MascotSpinner._active_spinners.discard(self)
+        if not self._is_active:
+            return
+        self._is_active = False
+        self.stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=0.3)
+        self.thread = None
+
+
+@contextmanager
+def mascot_status(task_name: str = "Processing", success_message: Optional[str] = None):
+    """
+    Context manager coordinating mascot processing state:
+    - Subtle blinking eyes and animated thinking dots.
+    - Automatic clean stop on exit, Ctrl+C, or error.
+    - Green check on success (only after operation actually succeeds).
+    - Amber indicator with actual error message on failure.
+    """
+    spinner = MascotSpinner(task_name)
+    spinner.start()
+    success = False
+    try:
+        yield spinner
+        success = True
+    except KeyboardInterrupt:
+        spinner.stop()
+        raise
+    except Exception as exc:
+        spinner.stop()
+        MascotController.render_failure(str(exc))
+        raise
+    finally:
+        spinner.stop()
+
+    if success and success_message:
+        MascotController.render_success(success_message)
 
 
 def render_banner():
-    """Renders interactive banner with rich styling if available."""
+    """Renders interactive banner with solid pixel-art cyan robot mascot placed beside startup title."""
     if HAS_RICH and console:
+        grid = Table.grid(padding=(0, 3))
+        grid.add_column()
+        grid.add_column(vertical="middle")
+
+        mascot_renderable = MascotController.get_mascot_rich(is_blink=False)
+
         title_text = Text()
         title_text.append("INTELLICODEX INTERACTIVE CLI ASSISTANT\n", style="bold cyan")
         title_text.append("AI-Powered Repository Search, Dependency Analysis & Code Intelligence", style="dim white")
-        console.print(Panel(title_text, border_style="cyan", padding=(1, 2)))
+
+        grid.add_row(mascot_renderable, title_text)
+        console.print(Panel(grid, border_style="cyan", padding=(1, 2)))
     else:
         print_banner()
 
@@ -761,58 +1645,9 @@ def render_patch_card(patch_rec: dict, fix_time: float):
 def render_help_panel():
     """Renders rich color-coded help table grouped by command category."""
     if HAS_RICH and console:
-        groups = [
-            ("Search & AI", "cyan", [
-                ("search:<query>",  "Instant retrieval without LLM (fast, no AI wait)"),
-                ("chunks:<file>",   "Inspect chunk-level index, line ranges & vectors"),
-                ("index-stats",     "Show comprehensive index statistics across the repo"),
-                ("explain:<query>", "Inspect RAG pipeline, prompt & compare (--compare, --width)"),
-                ("<question>",      "Ask AI a question about the repository"),
-                ("@filename",       "Scope query to a specific file (one-shot)"),
-                ("fix:<error>",     "Diagnose error & generate automated sandbox patch"),
-            ]),
-            ("Code Analysis", "magenta", [
-                ("graph:<entity>",  "Query knowledge graph for entity attributes, callers & lines"),
-                ("deps:<file>",     "View reverse dependency impact for a file"),
-                ("callers:<func>",  "Find all call sites of a function across the repo"),
-                ("top / centrality","Show PageRank centrality rankings for files & symbols"),
-                ("info:<file>",     "Show file stats: size, chunk count, centrality score"),
-            ]),
-            ("Repository", "green", [
-                ("repo <path|url>", "Switch or clone a repository (shallow --depth 1 default)"),
-                ("clone <url>",     "Clone repository (shallow default, use --full-history for all commits)"),
-                ("repo <number>",   "Switch to a previously added repo by list number"),
-                ("repos",           "List all known repositories"),
-                ("files / ls",      "List all indexed source files"),
-            ]),
-            ("Settings", "yellow", [
-                ("backend <name>",  "Switch backend engine: ollama | tfidf"),
-                ("persona <name>",  "Switch AI persona: general, security, reviewer, refactor, fixer"),
-                ("model <name>",    "Set active Ollama LLM model (e.g. qwen2.5-coder:7b)"),
-                ("file:<name>",     "Set persistent file filter for all queries"),
-                ("file:off",        "Clear persistent file filter"),
-                ("hybrid:on|off",   "Enable or disable BM25 lexical hybrid search"),
-                ("hybrid:toggle",   "Toggle hybrid search on/off"),
-            ]),
-            ("Git & Watcher", "blue", [
-                ("hooks",           "Install Git background re-indexing hooks"),
-                ("hooks:status",    "Check Git hooks installation status"),
-                ("hooks:remove",    "Uninstall Git background re-indexing hooks"),
-                ("watch",           "Check real-time filesystem watcher status"),
-                ("watch:start|stop","Start or stop the real-time file watcher"),
-            ]),
-            ("Session", "white", [
-                ("status",          "Show full system status at a glance"),
-                ("history",         "View multi-turn conversation history"),
-                ("clear-chat",      "Clear conversation history"),
-                ("export:<file>",   "Save last AI answer to a Markdown file"),
-                ("version",         "Show IntelliCodeX version"),
-                ("clear / cls",     "Clear terminal screen"),
-                ("help / ?",        "Show this help message"),
-                ("exit / quit",     "Exit IntelliCodeX CLI"),
-            ]),
-        ]
-        for group_name, color, cmds in groups:
+        for group_name, group_data in COMMAND_CATEGORIES.items():
+            color = group_data.get("color", "white")
+            cmds = group_data.get("commands", [])
             table = Table(
                 title=f"[bold {color}]{group_name}[/bold {color}]",
                 border_style=color, show_header=True,
@@ -820,7 +1655,8 @@ def render_help_panel():
             )
             table.add_column("Command", style=color, min_width=24)
             table.add_column("Description", style="white")
-            for cmd, desc in cmds:
+            for item in cmds:
+                cmd, desc = item[0], item[1]
                 table.add_row(cmd, desc)
             console.print(table)
         console.print("\n[dim]  ↑/↓ arrows recall command history · Tab for autocomplete[/dim]\n")
@@ -828,47 +1664,184 @@ def render_help_panel():
         print_help()
 
 
-def render_ingestion_panel(result, current_path: str, elapsed: float):
-    """Renders repository ingestion results with rich panel styling."""
-    time_str = format_time_consumed(elapsed)
-    mode = getattr(result, "indexing_mode", "fresh").lower()
+def render_ingestion_panel(
+    result,
+    current_path: str,
+    elapsed: float,
+    watcher=None,
+    auto_update_status: Optional[str] = None,
+    backend: Optional[str] = None,
+    model: Optional[str] = None,
+    file_filter: Optional[str] = None,
+):
+    """Renders repository ingestion results with clear English labels, counts, and presentation-ready styling."""
+    if auto_update_status is None and watcher is not None:
+        auto_update_status = "Active — real-time file watcher auto-updates index on change" if getattr(watcher, "is_alive", lambda: False)() else "Inactive"
+
+    metrics = _extract_ingestion_metrics(
+        result, current_path, elapsed,
+        auto_update_status=auto_update_status,
+        backend=backend, model=model, file_filter=file_filter,
+    )
     if HAS_RICH and console:
-        mode_badge = {
-            "cached":      "[bold green]Instant Disk Cache[/bold green]",
-            "incremental": "[bold yellow]Incremental Update[/bold yellow]",
-            "fresh":       "[bold cyan]Fresh Indexing[/bold cyan]",
-        }.get(mode, "[bold cyan]Fresh Indexing[/bold cyan]")
-        speed_str = (
-            f" ({result.num_files / elapsed:.1f} files/sec)"
-            if elapsed > 0.05 and mode != "cached" else ""
-        )
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style="bold cyan", justify="right")
         grid.add_column(style="white")
-        grid.add_row(
-            "[green]✓[/green] Files indexed:",
-            f"[bold]{result.num_files}[/bold] → [bold]{result.num_chunks}[/bold] chunks ([dim]{result.ast_chunks_count} AST[/dim])",
-        )
-        grid.add_row(
-            "[green]✓[/green] Dependency graph:",
-            f"{result.graph.number_of_nodes()} nodes, {result.graph.number_of_edges()} edges",
-        )
-        call_g = getattr(result, "call_graph", None)
-        if call_g:
-            grid.add_row(
-                "[green]✓[/green] Call graph:",
-                f"{call_g.number_of_nodes()} nodes, {call_g.number_of_edges()} call edges",
-            )
-        grid.add_row("[green]✓[/green] Mode:", mode_badge)
-        grid.add_row("[green]✓[/green] Format version:", f"[dim]v{GRAPH_FORMAT_VERSION} (Graph/Index v{GRAPH_FORMAT_VERSION})[/dim]")
-        grid.add_row("[green]✓[/green] Time consumed:", f"[bold green]{time_str}[/bold green]{speed_str}")
+        grid.add_row("[green]✓[/green] Repository:", f"[bold]{metrics['repo_name']}[/bold] ({metrics['repo_path']})")
+        grid.add_row("[green]✓[/green] Backend / Model:", f"[bold]{metrics['backend_model']}[/bold]")
+        grid.add_row("[green]✓[/green] Active file scope:", metrics['file_filter'])
+        grid.add_row("[green]✓[/green] Source files:", f"[bold]{metrics['num_files']}[/bold] files analyzed")
+        grid.add_row("[green]✓[/green] Searchable sections:", f"[bold]{metrics['num_chunks']}[/bold] code sections indexed for retrieval")
+        grid.add_row("[green]✓[/green] Syntax-derived:", metrics['syntax_details'])
+        grid.add_row("[green]✓[/green] Graph relationships:", metrics['graph_rel_str'])
+        grid.add_row("[green]✓[/green] Indexing mode:", metrics['mode_desc'])
+        grid.add_row("[green]✓[/green] Elapsed time:", f"[bold green]{metrics['elapsed_str']}[/bold green]")
+        grid.add_row("[green]✓[/green] Automatic updates:", f"[bold green]{metrics['auto_update_status']}[/bold green]")
         console.print(Panel(
             grid,
-            title=f"[bold cyan]Repository Indexed — {os.path.basename(current_path)}[/bold cyan]",
+            title=f"[bold cyan]Repository Welcome Summary — {metrics['repo_name']}[/bold cyan]",
             border_style="cyan", padding=(1, 2),
         ))
     else:
-        print_ingestion_summary(result, current_path, elapsed)
+        print_ingestion_summary(
+            result, current_path, elapsed,
+            auto_update_status=auto_update_status,
+            backend=backend, model=model, file_filter=file_filter,
+        )
+
+
+def _extract_repo_examples(result, current_path: str) -> Tuple[str, str]:
+    """Dynamically extracts sample source file and function symbol from active repository results."""
+    sample_file = ""
+    sample_symbol = ""
+
+    chunks = getattr(getattr(result, "store", None), "chunks", None)
+    if isinstance(chunks, list) and chunks:
+        code_files: List[str] = []
+        code_symbols: List[str] = []
+        for c in chunks:
+            fp = getattr(c, "file_path", "")
+            if fp:
+                norm_fp = fp.replace("\\", "/")
+                if norm_fp not in code_files:
+                    code_files.append(norm_fp)
+            kind = getattr(c, "kind", "")
+            name = getattr(c, "name", "")
+            if kind in ("function", "method") and name and not name.startswith("__"):
+                if name not in code_symbols:
+                    code_symbols.append(name)
+        if code_files:
+            sample_file = code_files[0]
+        if code_symbols:
+            sample_symbol = code_symbols[0]
+
+    if not sample_file:
+        files = getattr(result, "files", None)
+        if isinstance(files, list) and files:
+            sample_file = getattr(files[0], "rel_path", "").replace("\\", "/")
+
+    call_g = getattr(result, "call_graph", None)
+    if not sample_symbol and call_g and hasattr(call_g, "nodes"):
+        try:
+            for n in call_g.nodes():
+                if isinstance(n, str) and not n.startswith("__") and "::" not in n:
+                    sample_symbol = n
+                    break
+        except Exception:
+            pass
+
+    if not sample_file:
+        sample_file = "main.py"
+    if not sample_symbol:
+        sample_symbol = "process_data"
+
+    return sample_file, sample_symbol
+
+
+def render_welcome_actions(result, current_path: str):
+    """
+    Renders a compact guided 'What would you like to do?' section using supported commands
+    and dynamic examples derived from the active repository.
+    Explains safe repair verification and required interactive user approval.
+    """
+    sample_file, sample_symbol = _extract_repo_examples(result, current_path)
+
+    if HAS_RICH and console:
+        table = Table.grid(padding=(0, 1))
+        table.add_column(style="bold yellow", width=4)
+        table.add_column(style="white")
+
+        table.add_row(
+            "1.",
+            f"[bold cyan]Ask a question or search code[/bold cyan]\n"
+            f"   Type any natural language query or scope to a file:\n"
+            f"     [green]>> How does @{sample_file} handle errors?[/green]\n"
+            f"     [green]>> Where is {sample_symbol} used and what does it do?[/green]"
+        )
+        table.add_row("", "")
+        table.add_row(
+            "2.",
+            f"[bold cyan]Explore relationships & call chains[/bold cyan]\n"
+            f"   Inspect module dependencies or caller functions:\n"
+            f"     [green]>> deps:{sample_file}[/green]    [dim](View import & reverse dependencies)[/dim]\n"
+            f"     [green]>> callers:{sample_symbol}[/green] [dim](Find call sites calling this symbol)[/dim]"
+        )
+        table.add_row("", "")
+        table.add_row(
+            "3.",
+            f"[bold cyan]Diagnose & repair code (Safe Automated Repair)[/bold cyan]\n"
+            f"   Diagnose a bug and generate an automated unified diff:\n"
+            f"     [green]>> fix: @{sample_file}[/green]\n"
+            f"   [yellow]⚠ Note on Safe Repair:[/yellow] Automated repairs never modify code silently.\n"
+            f"   All candidate patches undergo AST & sandbox verification and require\n"
+            rf"   your explicit interactive approval \[a]pprove & commit / \[c]ancel" "\n"
+            f"   (with timestamped backups automatically preserved)."
+        )
+        table.add_row("", "")
+        table.add_row(
+            "4.",
+            f"[bold cyan]Inspect architecture & review patches[/bold cyan]\n"
+            f"   View centrality, coupling, and review pending proposals:\n"
+            f"     [green]>> top[/green]          [dim](PageRank architectural centrality hotspots)[/dim]\n"
+            f"     [green]>> arch[/green]         [dim](Circular dependency & coupling analysis)[/dim]\n"
+            f"     [green]>> review[/green]       [dim](List pending patch proposals awaiting review)[/dim]\n"
+            f"     [green]>> repo remove <name|num>[/green] [dim](Unregister repository registration)[/dim]"
+        )
+        table.add_row("", "")
+        table.add_row(
+            "•",
+            f"[dim]Type [bold white]wave[/bold white] to greet the mascot, [bold white]help[/bold white] for complete command reference, or [bold white]exit[/bold white] to quit.[/dim]"
+        )
+
+        console.print(Panel(
+            table,
+            title="[bold green]What would you like to do?[/bold green]",
+            subtitle="[dim]Supported Commands & Active Repository Examples[/dim]",
+            border_style="green",
+            padding=(1, 2),
+        ))
+        print()
+    else:
+        print("\n=== What would you like to do? ===")
+        print("  1. Ask a question or search code:")
+        print(f"     Type any natural language query or scope to a file:")
+        print(f"       >> How does @{sample_file} handle errors?")
+        print(f"       >> Where is {sample_symbol} used and what does it do?")
+        print("\n  2. Explore relationships & call chains:")
+        print(f"       >> deps:{sample_file}      (View import & reverse dependencies)")
+        print(f"       >> callers:{sample_symbol}   (Find call sites calling this symbol)")
+        print("\n  3. Diagnose & repair code (Safe Automated Repair):")
+        print(f"       >> fix: @{sample_file}")
+        print("     * Note on Safe Repair: Automated repairs never modify code silently.")
+        print("       All candidate patches undergo AST & sandbox verification and require")
+        print("       your explicit interactive approval [a]pprove & commit / [c]ancel before files are changed")
+        print("       (with timestamped backups automatically preserved).")
+        print("\n  4. Inspect architecture & review patches:")
+        print("       >> top          (PageRank architectural centrality hotspots)")
+        print("       >> arch         (Circular dependency & coupling analysis)")
+        print("       >> review       (List pending patch proposals awaiting review)")
+        print("       >> repo remove <name|num> (Unregister repository registration)")
+        print("\n  Type 'help' for full command list, or 'exit' to quit.\n")
 
 
 def render_deps_panel(target: str, affected: list, elapsed: float):
@@ -987,18 +1960,37 @@ def render_status_panel(current_path: str, active_backend: str, engine, watcher)
         grid.add_row("Hybrid Search:", hybrid_st)
         grid.add_row("File Watcher:", watcher_st)
         grid.add_row("Version:",      f"[dim]{VERSION}[/dim]")
+        grid.add_row("Index Format:", f"v{GRAPH_FORMAT_VERSION} (Graph/Index v{GRAPH_FORMAT_VERSION})")
+        llm = getattr(engine, "llm", None)
+        if llm and hasattr(llm, "temperature"):
+            t = getattr(llm, "temperature", 0.0)
+            p = getattr(llm, "num_predict", 800)
+            rp = getattr(llm, "repeat_penalty", 1.1)
+            if isinstance(t, (int, float)):
+                grid.add_row("Generation Config:", f"[dim]temperature={t}, num_predict={p}, repeat_penalty={rp}[/dim]")
         console.print(Panel(
             grid, title="[bold cyan]IntelliCodeX — System Status[/bold cyan]",
             border_style="cyan", padding=(1, 2),
         ))
     else:
         print(f"\n[*] System Status:")
-        print(f"    Repository : {current_path}")
-        print(f"    Backend    : {active_backend}")
-        print(f"    Persona    : {engine.active_persona}")
-        print(f"    Hybrid     : {'ON' if getattr(engine, 'hybrid_search', True) else 'OFF'}")
-        print(f"    Watcher    : {'ON' if (watcher and watcher.is_alive()) else 'OFF'}")
-        print(f"    Version    : {VERSION}\n")
+        print(f"    Repository   : {current_path}")
+        print(f"    Backend      : {active_backend}")
+        print(f"    Persona      : {engine.active_persona}")
+        if hasattr(engine, "active_model") and engine.active_model:
+            print(f"    Model        : {engine.active_model}")
+        print(f"    Hybrid       : {'ON' if getattr(engine, 'hybrid_search', True) else 'OFF'}")
+        print(f"    Watcher      : {'ON' if (watcher and watcher.is_alive()) else 'OFF'}")
+        print(f"    Version      : {VERSION}")
+        print(f"    Index Format : v{GRAPH_FORMAT_VERSION} (Graph/Index v{GRAPH_FORMAT_VERSION})")
+        llm = getattr(engine, "llm", None)
+        if llm and hasattr(llm, "temperature"):
+            t = getattr(llm, "temperature", 0.0)
+            p = getattr(llm, "num_predict", 800)
+            rp = getattr(llm, "repeat_penalty", 1.1)
+            if isinstance(t, (int, float)):
+                print(f"    Generation   : temperature={t}, num_predict={p}, repeat_penalty={rp}")
+        print()
 
 
 def render_search_results(query: str, results: list, elapsed: float):
@@ -1420,6 +2412,7 @@ def render_index_stats(result, embedder):
         t.add_row("Embedder Used", str(embedder_name))
         t.add_row("BM25 Vocabulary Size", f"{bm25_vocab:,} terms")
         t.add_row("FAISS Vector Count", f"{faiss_count:,} vectors")
+        t.add_row("Index Format Version", f"v{GRAPH_FORMAT_VERSION}")
         console.print()
         console.print(t)
         console.print()
@@ -1430,7 +2423,8 @@ def render_index_stats(result, embedder):
         print(f"  Graph nodes: {graph_nodes}")
         print(f"  Embedder used: {embedder_name}")
         print(f"  BM25 vocabulary size: {bm25_vocab} terms")
-        print(f"  FAISS vector count: {faiss_count} vectors\n")
+        print(f"  FAISS vector count: {faiss_count} vectors")
+        print(f"  Index format version: v{GRAPH_FORMAT_VERSION}\n")
 
 
 def render_compare_panels(no_rag_ans: str, elapsed_no_rag: float, rag_ans: str, elapsed_rag: float):
@@ -1724,66 +2718,25 @@ def execute_graph_command(result, query: str):
         print()
 
 
+def _build_completer_commands() -> List[Tuple[str, str]]:
+    """Derives autocomplete commands and descriptions directly from shared COMMAND_CATEGORIES."""
+    cmds: List[Tuple[str, str]] = []
+    seen: set = set()
+    for cat_data in COMMAND_CATEGORIES.values():
+        for item in cat_data.get("commands", []):
+            desc = item[1]
+            tokens = item[2] if len(item) > 2 else []
+            for tok in tokens:
+                if tok and tok not in seen:
+                    cmds.append((tok, desc))
+                    seen.add(tok)
+    return cmds
+
+
 class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
     """Context-aware autocompleter for commands, files, symbols, and settings."""
 
-    COMMANDS = [
-        ("graph:", "Query repository knowledge graph entity, relationships, or paths (e.g. 'graph:Calculator')"),
-        ("explain:", "Inspect RAG retrieval, augmented prompt & fusion provenance"),
-        ("chunks:", "Inspect index chunks and vector previews for a file"),
-        ("index-stats", "Show comprehensive index statistics across the repository"),
-        ("help", "Show available CLI commands"),
-        ("?", "Show available CLI commands"),
-        ("exit", "Exit IntelliCodeX CLI"),
-        ("quit", "Exit IntelliCodeX CLI"),
-        ("clear", "Clear terminal screen"),
-        ("cls", "Clear terminal screen"),
-        ("files", "List all indexed repository files"),
-        ("ls", "List all indexed repository files"),
-        ("top", "Show PageRank centrality rankings"),
-        ("centrality", "Show PageRank centrality rankings"),
-        ("repos", "List all known local & cloned repositories"),
-        ("list-repos", "List all known repositories"),
-        ("repo remove ", "Unregister repository from persistent list by number or name"),
-        ("repo ", "Switch active repository by path, URL, or number"),
-        ("backend ", "Switch backend engine (ollama | tfidf)"),
-        ("persona ", "Switch AI persona (general, security, reviewer, refactor, fixer)"),
-        ("model ", "Switch Ollama LLM model"),
-        ("file:", "Set persistent file filter for all queries"),
-        ("history", "View conversation history"),
-        ("chat", "View conversation history"),
-        ("clear-chat", "Clear conversation history"),
-        ("hooks", "Install Git background re-indexing hooks"),
-        ("setup-hooks", "Install Git background re-indexing hooks"),
-        ("hooks:status", "Check Git hooks installation status"),
-        ("hooks:remove", "Uninstall Git background re-indexing hooks"),
-        ("watch", "Check real-time filesystem watcher status"),
-        ("watch:status", "Check filesystem watcher status"),
-        ("watch:stop", "Stop real-time filesystem watcher"),
-        ("watch:start", "Start real-time filesystem watcher"),
-        ("hybrid", "Check BM25 hybrid search status"),
-        ("hybrid:status", "Check hybrid search status"),
-        ("hybrid:on", "Enable hybrid BM25 lexical ranking"),
-        ("hybrid:off", "Disable hybrid search (dense only)"),
-        ("hybrid:toggle", "Toggle hybrid BM25 search on/off"),
-        ("deps:", "Inspect reverse dependency impact for a file"),
-        ("callers:", "Find all function callers across repository AST"),
-        ("fix:", "Diagnose error and generate automated sandbox patch"),
-        ("review", "List pending patch proposals awaiting developer review"),
-        ("approve ", "Approve and apply a pending patch proposal (e.g. 'approve <id>')"),
-        ("reject ", "Reject and discard a pending patch proposal (e.g. 'reject <id>')"),
-        ("doc:", "Generate documentation for symbol or file using call graph (e.g. 'doc:login')"),
-        ("security:", "Run Bandit AST security vulnerability scanner on target file (e.g. 'security:auth.py')"),
-        ("search:", "Fast retrieval-only search (no LLM, instant results)"),
-        ("info:", "Show indexed file details: size, chunk count, centrality"),
-        ("export:", "Save last AI answer to a Markdown file"),
-        ("why:", "Query historical design decisions and commit rationale (e.g. 'why:FAISS')"),
-        ("adrs", "List all Architectural Decision Records (ADRs) found in repo"),
-        ("learned", "Show self-improving agent few-shot repair memory and statistics"),
-        ("status", "Show full system status at a glance"),
-        ("version", "Show IntelliCodeX version"),
-        ("@", "Scope query to a specific file (one-shot)"),
-    ]
+    COMMANDS = _build_completer_commands()
 
     PERSONAS = ["general", "security", "reviewer", "refactor", "fixer"]
     BACKENDS = ["ollama", "tfidf"]
@@ -1824,7 +2777,22 @@ class IntelliCodeXCompleter(Completer if HAS_PROMPT_TOOLKIT else object):
                             yield Completion(basename, start_position=-len(arg), display=basename, display_meta="File")
             return
 
-        # 0b. Parameter completion: chunks:<file> or chunks <file>
+        # 0b. Parameter completion: run:<file> or run <file>
+        for prefix in ("run:", "run "):
+            if stripped.startswith(prefix):
+                raw_arg = stripped[len(prefix):]
+                clean_arg = raw_arg.lstrip("@").strip()
+                if self.get_files_fn:
+                    files = self.get_files_fn() or []
+                    for f in files:
+                        ext = os.path.splitext(f)[1].lower()
+                        if ext in (".java", ".py", ".js", ".mjs", ".cjs"):
+                            basename = os.path.basename(f)
+                            if not clean_arg or clean_arg.lower() in f.lower() or clean_arg.lower() in basename.lower():
+                                yield Completion(f"@{basename}", start_position=-len(raw_arg), display=f"@{basename}", display_meta="Run Target")
+                return
+
+        # 0c. Parameter completion: chunks:<file> or chunks <file>
         for prefix in ("chunks:", "chunks "):
             if stripped.startswith(prefix):
                 arg = stripped[len(prefix):]
@@ -1946,7 +2914,6 @@ def create_components(
             predict = 800 if num_predict is None else num_predict
             penalty = 1.1 if repeat_penalty is None else repeat_penalty
             print(f"[*] Backend: Ollama AI ({chosen_model} + nomic-embed-text)")
-            print(f"[*] Generation Config: temperature={temp}, num_predict={predict}, repeat_penalty={penalty}")
             llm = OllamaLLM(
                 model=chosen_model,
                 temperature=temp,
@@ -2702,6 +3669,8 @@ def main():
                         help="Force enable rich interactive TUI with auto-completion and toolbar")
     parser.add_argument("--no-tui", action="store_true", default=False,
                         help="Disable rich TUI and use standard terminal input")
+    parser.add_argument("--mascot-mouse", action="store_true", default=False,
+                        help="Opt-in to mouse interaction on the mascot (disabled by default to preserve native terminal scrolling and selection)")
     parser.add_argument("--benchmark", action="store_true",
                         help="Run performance benchmark on target repository and exit")
     parser.add_argument("--setup-hooks", action="store_true",
@@ -2736,6 +3705,9 @@ def main():
                         help="Security gate policy: 'strict' (default, rejects incomplete AST coverage) or 'secrets_only' (REQ-FUT-05)")
     parser.add_argument("-v", "--version", action="version", version=f"IntelliCodeX CLI v{VERSION}")
     args = parser.parse_args()
+
+    if getattr(args, "mascot_mouse", False):
+        os.environ["INTELLICODEX_MASCOT_MOUSE"] = "1"
 
     has_patch = bool(args.patch or args.patch_file)
     if args.ci or has_patch:
@@ -2999,7 +3971,8 @@ def main():
         current_path = resolve_repo_path(args.repo_path, full_history=args.full_history)
         print(f"[*] Ingesting repository: {current_path}")
         t0 = time.perf_counter()
-        result = ingest_repository(current_path, embedder, legacy_call_graph=args.legacy_call_graph, skip_overload_stubs=skip_overload_stubs)
+        with mascot_status("Indexing repository code"):
+            result = ingest_repository(current_path, embedder, allow_empty=True, legacy_call_graph=args.legacy_call_graph, skip_overload_stubs=skip_overload_stubs)
         elapsed = result.elapsed_seconds if getattr(result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t0)
     except KeyboardInterrupt:
         print("\n[!] Initial repository ingestion cancelled by user (Ctrl+C).")
@@ -3007,7 +3980,8 @@ def main():
             print("[*] Falling back to default 'sample_repo'...")
             try:
                 current_path = "sample_repo"
-                result = ingest_repository(current_path, embedder, legacy_call_graph=args.legacy_call_graph, skip_overload_stubs=skip_overload_stubs)
+                with mascot_status("Indexing repository code"):
+                    result = ingest_repository(current_path, embedder, allow_empty=True, legacy_call_graph=args.legacy_call_graph, skip_overload_stubs=skip_overload_stubs)
                 elapsed = result.elapsed_seconds if getattr(result, "elapsed_seconds", 0) > 0 else 0.1
             except Exception as e_inner:
                 print(f"[!] Fallback error: {e_inner}")
@@ -3019,7 +3993,8 @@ def main():
         print(f"[!] Error ingesting repository '{args.repo_path}': {e}")
         return 1
 
-    render_ingestion_panel(result, current_path, elapsed)
+    model_name = getattr(llm, "model", None) or (args.model if active_backend == "ollama" else None)
+    render_ingestion_panel(result, current_path, elapsed, backend=active_backend, model=model_name, file_filter=None)
 
     engine = QueryEngine(
         result.store,
@@ -3065,6 +4040,20 @@ def main():
             execute_graph_command(result, bq)
             return 0
 
+        if bq.lower().startswith("create:") or bq.lower().startswith("create "):
+            from core.code_creation import execute_create_command
+            execute_create_command(
+                bq, current_path, embedder, llm, args, session=None, use_tui=False, is_batch=True
+            )
+            return 0
+
+        if bq.lower().startswith("run:") or bq.lower().startswith("run "):
+            from core.code_runner import execute_run_command
+            all_indexed = [c.file_path for c in result.store.chunks] if hasattr(result, "store") and result.store and hasattr(result.store, "chunks") else None
+            return execute_run_command(
+                bq, current_path, args=args, session=None, use_tui=False, engine=engine, candidate_files=all_indexed
+            )
+
         # Parse @mention from batch query as well
         cleaned_query, mention_file = parse_mention(args.query)
         
@@ -3080,7 +4069,8 @@ def main():
         
         print(f"\n[*] Executing Batch Query: '{cleaned_query}'\n")
         t_batch = time.perf_counter()
-        response = engine.ask(cleaned_query, file_filter=effective_file_filter, append_sources=True)
+        with mascot_status("Searching repository & reasoning"):
+            response = engine.ask(cleaned_query, file_filter=effective_file_filter, append_sources=True)
         total_batch = response.get("elapsed_seconds", time.perf_counter() - t_batch)
 
         # Requirement F: Print retrieved chunks list before the answer (as in interactive mode)
@@ -3099,6 +4089,25 @@ def main():
 
         render_markdown_panel(response['answer'], title="Answer")
         print(f"[*] [Time Consumed]: {format_time_consumed(total_batch)} (Retrieval: {format_time_consumed(response.get('retrieval_seconds', 0.0))}, Generation: {format_time_consumed(response.get('llm_seconds', 0.0))})\n")
+        MascotController.render_success(f"Batch query completed in {format_time_consumed(total_batch)}")
+
+        from core.suggestion_engine import generate_contextual_suggestions
+        all_indexed_paths = [c.file_path for c in result.store.chunks] if hasattr(result, "store") and result.store and hasattr(result.store, "chunks") else None
+        batch_suggestions = generate_contextual_suggestions(
+            query=cleaned_query,
+            answer=response.get("answer", ""),
+            retrieved_chunks=retrieved_chunks,
+            effective_file_filter=effective_file_filter,
+            current_path=current_path,
+            candidate_files=all_indexed_paths,
+            unverified_files=response.get("unverified_files"),
+            unverified_symbols=response.get("unverified_symbols"),
+        )
+        if batch_suggestions:
+            print("\nSuggested Next Steps:")
+            for s_idx, (s_cmd, s_desc) in enumerate(batch_suggestions[:2], 1):
+                print(f"  [{s_idx}] {s_cmd} - {s_desc}")
+            print()
         return 0
 
     # Headless CI Pipeline Gate & Patch Verification (REQ-FUT-04)
@@ -3118,6 +4127,9 @@ def main():
             security_policy=args.security_policy.lower().strip(),
         )
 
+    session = None
+    from core.persistence import get_repo_id
+
     def on_auto_reindex(new_result, changed_paths, elapsed_s):
         nonlocal result, engine
         result = new_result
@@ -3135,7 +4147,26 @@ def main():
         if len(changed_paths) > 3:
             diff_desc += f" (+{len(changed_paths)-3} more)"
         t_str = format_time_consumed(elapsed_s)
-        # B4 fix: use rich console so the watchdog message doesn't corrupt the TUI prompt line
+
+        # Suppress competing watcher output while child application owns the terminal
+        if is_mascot_rendering_suspended():
+            return
+
+        # Coordinate watcher message with active prompt session to prevent cursor/table corruption
+        if session and hasattr(session, "app") and session.app and session.app.is_running:
+            try:
+                from prompt_toolkit.formatted_text import ANSI
+                msg = (
+                    f"\n\033[1;33m[Watchdog]\033[0m Detected changes in "
+                    f"\033[36m{diff_desc}\033[0m. Auto-reindexed "
+                    f"(\033[1m{result.num_chunks}\033[0m chunks in \033[32m{t_str}\033[0m).\n"
+                )
+                session.app.print_text(ANSI(msg))
+                session.app.invalidate()
+                return
+            except Exception:
+                pass
+
         if HAS_RICH and console:
             console.print(
                 f"\n[bold yellow][[Watchdog]][/bold yellow] Detected changes in "
@@ -3158,8 +4189,8 @@ def main():
             debounce_delay=0.5,
         )
         if watcher.start():
+            register_active_watcher(watcher)
             atexit.register(watcher.stop)
-            print("[*] Real-Time Watcher: Active (background auto-reindex enabled)")
     except Exception:
         pass
 
@@ -3200,22 +4231,43 @@ def main():
 
     session = None
     if use_tui:
-        _history_path = os.path.join(".storage", "cli_history")
-        os.makedirs(".storage", exist_ok=True)
+        storage_dir = os.environ.get("STORAGE_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".storage")
+        from core.persistence import get_repo_id
+        r_id = get_repo_id(current_path)
+        _history_path = os.path.join(storage_dir, f"cli_history_{r_id}.txt")
+        os.makedirs(storage_dir, exist_ok=True)
         try:
             _hist = FileHistory(_history_path) if FileHistory else InMemoryHistory()
         except Exception:
             _hist = InMemoryHistory() if InMemoryHistory else None
         session = create_interactive_session(completer=completer, history=_hist)
+        if session is not None and hasattr(session, "default_buffer") and session.default_buffer is not None and _hist is not None:
+            session.default_buffer.history = _hist
         if session is None:
             use_tui = False
 
-    print("\nIntelliCodeX ready. Type a question or 'help' for options, 'exit' to quit.\n")
+    render_welcome_actions(result, current_path)
+    if not (use_tui and is_animation_enabled()):
+        MascotController.render_ready("IntelliCodeX ready. Type a question or 'help' for options, 'exit' to quit.")
+        print()
+
+    from core.patch_generator import PatchEngine
+    patch_engine = PatchEngine(
+        result.store,
+        embedder,
+        llm,
+        graph=result.graph,
+        repo_path=current_path,
+        is_admin=True,
+        allow_local_sandbox=True,
+    )
+
 
     _last_answer: str = ""  # tracks last AI answer for the export: command
     active_file_filter: Optional[str] = None  # tracks active file scope for queries
 
     while True:
+        resume_mascot_rendering()
         try:
             if session is not None and use_tui:
                 def get_toolbar():
@@ -3230,15 +4282,25 @@ def main():
                         f"<b>Watcher:</b> {watcher_st} "
                     )
                 try:
-                    query = session.prompt(">> ", bottom_toolbar=get_toolbar).strip()
+                    mouse_enabled = is_mascot_mouse_enabled() and is_animation_enabled()
+                    refresh_rate = 0.25 if is_animation_enabled() else None
+                    query = session.prompt(
+                        ">> ",
+                        bottom_toolbar=get_toolbar,
+                        refresh_interval=refresh_rate,
+                        mouse_support=mouse_enabled,
+                    ).strip()
                 except Exception:
                     use_tui = False
                     query = input(">> ").strip()
             else:
                 query = input(">> ").strip()
         except (EOFError, KeyboardInterrupt):
+            cleanup_cli_resources(watcher)
             print("\nExiting IntelliCodeX CLI. Goodbye!")
             break
+        finally:
+            suspend_mascot_rendering()
 
         while query.startswith(">") or query.startswith("$"):
             query = query.lstrip(">").lstrip("$").strip()
@@ -3247,11 +4309,21 @@ def main():
             continue
 
         if query.lower() in ("exit", "quit"):
+            cleanup_cli_resources(watcher)
             print("Exiting IntelliCodeX CLI. Goodbye!")
             break
 
+        if query.lower() in ("wave", "hi", "hello", "hey", "greet", "mascot"):
+            MascotController.trigger_wave()
+            MascotController.render_greeting()
+            continue
+
         if query.lower() in ("help", "?"):
             render_help_panel()
+            continue
+
+        if query.lower() in ("welcome", "menu", "start"):
+            render_welcome_actions(result, current_path)
             continue
 
         if query.lower() == "version":
@@ -3411,7 +4483,15 @@ def main():
                     lexical_index=getattr(result, "lexical_index", None),
                     hybrid_search=getattr(engine, "hybrid_search", True),
                 )
-                render_ingestion_panel(result, current_path, elapsed_sw)
+                render_ingestion_panel(
+                    result,
+                    current_path,
+                    elapsed_sw,
+                    watcher=watcher,
+                    backend=active_backend,
+                    model=getattr(llm, "model", None),
+                    file_filter=active_file_filter,
+                )
                 print(f"[*] Backend updated to '{active_backend}'.\n")
                 if watcher:
                     watcher.embedder = embedder
@@ -3485,6 +4565,8 @@ def main():
                 elapsed_repo = new_result.elapsed_seconds if getattr(new_result, "elapsed_seconds", 0) > 0 else (time.perf_counter() - t_repo)
                 result = new_result
                 current_path = new_path
+                from core.persistence import get_repo_id
+                new_repo_id = get_repo_id(new_path)
                 engine = QueryEngine(
                     result.store,
                     embedder,
@@ -3493,9 +4575,40 @@ def main():
                     call_graph=getattr(result, "call_graph", None),
                     lexical_index=getattr(result, "lexical_index", None),
                     hybrid_search=getattr(engine, "hybrid_search", True),
+                    repo_path=new_path,
                 )
-                render_ingestion_panel(result, current_path, elapsed_repo)
+                from core.patch_generator import PatchEngine
+                patch_engine = PatchEngine(
+                    result.store,
+                    embedder,
+                    llm,
+                    graph=result.graph,
+                    repo_path=new_path,
+                    is_admin=True,
+                    allow_local_sandbox=True,
+                )
+                if session is not None and use_tui and FileHistory:
+                    storage_dir = os.environ.get("STORAGE_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".storage")
+                    _new_hist_path = os.path.join(storage_dir, f"cli_history_{new_repo_id}.txt")
+                    try:
+                        new_h = FileHistory(_new_hist_path)
+                        session.history = new_h
+                        if hasattr(session, "default_buffer") and session.default_buffer is not None:
+                            session.default_buffer.history = new_h
+                    except Exception:
+                        pass
+
+                render_ingestion_panel(
+                    result,
+                    current_path,
+                    elapsed_repo,
+                    watcher=watcher,
+                    backend=active_backend,
+                    model=getattr(llm, "model", None),
+                    file_filter=active_file_filter,
+                )
                 print(f"[*] Successfully switched active repository to '{new_path}'!\n")
+                render_welcome_actions(result, current_path)
 
                 if watcher:
                     watcher.stop()
@@ -3533,6 +4646,7 @@ def main():
         if query.lower() in ("watch:stop", "watch:pause"):
             if watcher and watcher.is_alive():
                 watcher.stop()
+                register_active_watcher(None)
                 print("\n[*] Real-Time Filesystem Watcher stopped.\n")
             else:
                 print("\n[*] Real-Time Filesystem Watcher is already inactive.\n")
@@ -3545,6 +4659,7 @@ def main():
                 try:
                     watcher = RepositoryWatcher(current_path, embedder, on_reindex=on_auto_reindex, debounce_delay=0.5)
                     if watcher.start():
+                        register_active_watcher(watcher)
                         print(f"\n[*] Real-Time Filesystem Watcher started on '{current_path}'.\n")
                     else:
                         print("\n[!] Watcher failed to start (watchdog package missing or unsupported).\n")
@@ -3603,23 +4718,37 @@ def main():
 
         if query.lower() in ("history", "chat"):
             hist = engine.memory.format_history()
-            if not hist:
+            act_log = engine.memory.format_activity_log()
+            if not hist and not act_log:
                 print("\n[*] Conversation history is empty.\n")
             else:
-                print(f"\n{hist}\n")
+                print()
+                if hist:
+                    print(hist)
+                else:
+                    print("--- Conversation History ---\n(No Q&A conversation turns recorded for this repository)")
+                print()
+                if act_log:
+                    print(act_log)
+                else:
+                    print("--- Activity History ---\n(No creation, repair, or execution activity recorded for this repository)")
+                print()
             continue
 
         if query.lower() in ("clear-chat", "clear:history", "clear-memory", "reset"):
-            engine.clear_memory()
+            engine.clear_memory(clear_persisted=True)
             print("\n[*] Conversation history cleared.\n")
             continue
 
         # Developer Review Gate: review / proposals
         if query.lower() in ("review", "proposals", "patches:pending"):
             from backend.database.mongo import db_manager
-            proposals = db_manager.find("generated_patches", {"status": "pending"})
+            from core.persistence import get_repo_id
+            curr_repo_id = get_repo_id(current_path)
+            all_proposals = db_manager.find("generated_patches", {"status": "pending"})
+            proposals = [p for p in all_proposals if p.get("repo_id") == curr_repo_id]
             if not proposals:
-                print("\n[*] No pending patch proposals awaiting review.\n")
+                print(f"\n[*] No pending patch proposals awaiting review for active repository.\n")
             else:
                 print("\n=======================================================================")
                 print(f"       PENDING PATCH PROPOSALS ({len(proposals)} awaiting review)")
@@ -3640,6 +4769,8 @@ def main():
         if query.lower().startswith("review "):
             p_arg = query.split(maxsplit=1)[1].strip()
             from backend.database.mongo import db_manager
+            from core.persistence import get_repo_id
+            curr_repo_id = get_repo_id(current_path)
             # Find by prefix or exact
             candidates = db_manager.find("generated_patches", {})
             matched = [p for p in candidates if p.get("patch_id", "").startswith(p_arg)]
@@ -3647,38 +4778,82 @@ def main():
                 print(f"[!] Proposal '{p_arg}' not found.\n")
             else:
                 p = matched[0]
-                render_patch_card(p, fix_time=0.0)
+                if p.get("repo_id") and p.get("repo_id") != curr_repo_id:
+                    print(f"[!] Access Denied: Proposal '{p['patch_id']}' belongs to another repository ({p.get('repo_id')}).\n")
+                else:
+                    render_patch_card(p, fix_time=0.0)
             continue
 
         if query.lower().startswith("approve "):
             p_arg = query.split(maxsplit=1)[1].strip()
             from backend.database.mongo import db_manager
+            from core.persistence import get_repo_id, save_repo_activity, load_conversation_memory
+            curr_repo_id = get_repo_id(current_path)
             candidates = db_manager.find("generated_patches", {})
             matched = [p for p in candidates if p.get("patch_id", "").startswith(p_arg)]
             if not matched:
                 print(f"[!] Proposal '{p_arg}' not found.\n")
             else:
                 p = matched[0]
-                updated = patch_engine.update_patch_status(p["patch_id"], status="applied", user="cli_developer")
-                res = updated.get("apply_result", {}) if updated else {}
-                if res.get("success"):
-                    print(f"[+] Approved and applied patch {p['patch_id']} to '{p.get('target_file')}'.\n")
+                if p.get("repo_id") and p.get("repo_id") != curr_repo_id:
+                    print(f"[!] Security Block: Proposal '{p['patch_id']}' belongs to a different repository ({p.get('repo_id')}). Cross-repository approval is prohibited.\n")
                 else:
-                    print(f"[!] Failed to apply patch: {res.get('message', 'unknown error')}\n")
+                    updated = patch_engine.update_patch_status(p["patch_id"], status="applied", user="cli_developer")
+                    res = updated.get("apply_result", {}) if updated else {}
+                    if res.get("success"):
+                        save_repo_activity(curr_repo_id, {
+                            "activity_type": p.get("activity_type", "repair"),
+                            "target_file": p.get("target_file", "unknown"),
+                            "proposal_id": p["patch_id"],
+                            "verification_outcome": p.get("sandbox_validation", {}).get("test_status", "passed"),
+                            "save_outcome": "applied",
+                            "summary": f"Approved and applied patch via CLI review",
+                            "timestamp": time.time(),
+                        })
+                        load_conversation_memory(curr_repo_id, engine.memory)
+                        print(f"[+] Approved and applied patch {p['patch_id']} to '{p.get('target_file')}'.\n")
+                    else:
+                        save_repo_activity(curr_repo_id, {
+                            "activity_type": p.get("activity_type", "repair"),
+                            "target_file": p.get("target_file", "unknown"),
+                            "proposal_id": p["patch_id"],
+                            "verification_outcome": p.get("sandbox_validation", {}).get("test_status", "failed"),
+                            "save_outcome": "failed",
+                            "summary": f"Failed to apply patch: {res.get('message', 'unknown error')}",
+                            "timestamp": time.time(),
+                        })
+                        load_conversation_memory(curr_repo_id, engine.memory)
+                        print(f"[!] Failed to apply patch: {res.get('message', 'unknown error')}\n")
             continue
 
         if query.lower().startswith("reject "):
             p_arg = query.split(maxsplit=1)[1].strip()
             from backend.database.mongo import db_manager
+            from core.persistence import get_repo_id, save_repo_activity, load_conversation_memory
+            curr_repo_id = get_repo_id(current_path)
             candidates = db_manager.find("generated_patches", {})
             matched = [p for p in candidates if p.get("patch_id", "").startswith(p_arg)]
             if not matched:
                 print(f"[!] Proposal '{p_arg}' not found.\n")
             else:
                 p = matched[0]
-                patch_engine.update_patch_status(p["patch_id"], status="rejected", user="cli_developer")
-                print(f"[-] Rejected proposal {p['patch_id']}.\n")
+                if p.get("repo_id") and p.get("repo_id") != curr_repo_id:
+                    print(f"[!] Security Block: Proposal '{p['patch_id']}' belongs to a different repository ({p.get('repo_id')}). Cross-repository rejection is prohibited.\n")
+                else:
+                    patch_engine.update_patch_status(p["patch_id"], status="rejected", user="cli_developer")
+                    save_repo_activity(curr_repo_id, {
+                        "activity_type": p.get("activity_type", "repair"),
+                        "target_file": p.get("target_file", "unknown"),
+                        "proposal_id": p["patch_id"],
+                        "verification_outcome": p.get("sandbox_validation", {}).get("test_status", "unverified"),
+                        "save_outcome": "rejected",
+                        "summary": f"Proposal rejected by developer via CLI review",
+                        "timestamp": time.time(),
+                    })
+                    load_conversation_memory(curr_repo_id, engine.memory)
+                    print(f"[-] Rejected proposal {p['patch_id']}.\n")
             continue
+
 
         # Documentation Generator: doc:<target>
         if query.lower().startswith("doc:") or query.lower().startswith("doc "):
@@ -3722,6 +4897,30 @@ def main():
         # Retrieval View: explain: <question> [--no-answer] [--json] [--full] [--compare] [--width N] [--top-k N]
         if query.lower().startswith("explain:") or query.lower().startswith("explain "):
             execute_explain_command(engine, result, query, active_file_filter=active_file_filter)
+            continue
+
+
+        # Explicit Code Creation Workflow: create: <task> Target: <file>
+        if query.lower().startswith("create:") or query.lower().startswith("create "):
+            from core.code_creation import execute_create_command
+            res_c, eng_c = execute_create_command(
+                query, current_path, embedder, llm, args, session=session, use_tui=use_tui, is_batch=False
+            )
+            if res_c is not None and eng_c is not None:
+                result = res_c
+                engine = eng_c
+            else:
+                from core.persistence import get_repo_id, load_conversation_memory
+                load_conversation_memory(get_repo_id(current_path), engine.memory)
+            continue
+
+        # Interactive Code Runner: run: @<file>
+        if query.lower().startswith("run:") or query.lower().startswith("run "):
+            from core.code_runner import execute_run_command
+            all_indexed = [c.file_path for c in result.store.chunks] if hasattr(result, "store") and result.store and hasattr(result.store, "chunks") else None
+            execute_run_command(
+                query, current_path, args=args, session=session, use_tui=use_tui, engine=engine, candidate_files=all_indexed
+            )
             continue
 
 
@@ -4023,8 +5222,20 @@ def main():
                         continue
                     elif action in ("a", "approve", "y", "yes"):
                         from core.patch_generator import evaluate_patch_approval_gate
+                        from core.persistence import get_repo_id, save_repo_activity, load_conversation_memory
+                        curr_repo_id = get_repo_id(current_path)
                         ok_gate, msg_gate = evaluate_patch_approval_gate(patch_rec)
                         if not ok_gate:
+                            save_repo_activity(curr_repo_id, {
+                                "activity_type": "repair",
+                                "target_file": target_rel,
+                                "proposal_id": patch_rec.get("patch_id", "unknown"),
+                                "verification_outcome": patch_rec.get("sandbox_validation", {}).get("test_status", "failed"),
+                                "save_outcome": "gate_rejected",
+                                "summary": f"Approval rejected by central gate: {msg_gate}",
+                                "timestamp": time.time(),
+                            })
+                            load_conversation_memory(curr_repo_id, engine.memory)
                             msg_reject = f"[!] APPROVAL REJECTED: {msg_gate}"
                             if HAS_RICH and console:
                                 console.print(f"\n[bold red]{msg_reject}[/bold red]\n")
@@ -4035,6 +5246,16 @@ def main():
                         # Staleness conflict detection
                         post_hash = compute_file_sha256(abs_target)
                         if initial_hash and post_hash and initial_hash != post_hash:
+                            save_repo_activity(curr_repo_id, {
+                                "activity_type": "repair",
+                                "target_file": target_rel,
+                                "proposal_id": patch_rec.get("patch_id", "unknown"),
+                                "verification_outcome": patch_rec.get("sandbox_validation", {}).get("test_status", "passed"),
+                                "save_outcome": "conflict",
+                                "summary": f"External conflict on '{target_rel}' during review",
+                                "timestamp": time.time(),
+                            })
+                            load_conversation_memory(curr_repo_id, engine.memory)
                             msg_stale = f"[!] CONFLICT: '{target_rel}' was modified externally during review! Aborting to prevent overwriting newer code."
                             if HAS_RICH and console:
                                 console.print(f"[bold red]{msg_stale}[/bold red]\n")
@@ -4044,6 +5265,16 @@ def main():
 
                         ok_app, msg_app = patch_engine.apply_patch(patch_rec)
                         if ok_app:
+                            save_repo_activity(curr_repo_id, {
+                                "activity_type": "repair",
+                                "target_file": target_rel,
+                                "proposal_id": patch_rec.get("patch_id", "unknown"),
+                                "verification_outcome": patch_rec.get("sandbox_validation", {}).get("test_status", "passed"),
+                                "save_outcome": "applied",
+                                "summary": f"Repair applied: {explanation[:80]}",
+                                "timestamp": time.time(),
+                            })
+                            load_conversation_memory(curr_repo_id, engine.memory)
                             if HAS_RICH and console:
                                 console.print(f"[bold green][✓][/bold green] {msg_app}")
                             else:
@@ -4063,14 +5294,37 @@ def main():
                                 else:
                                     print(f"[*] {msg_c}\n")
                         else:
+                            save_repo_activity(curr_repo_id, {
+                                "activity_type": "repair",
+                                "target_file": target_rel,
+                                "proposal_id": patch_rec.get("patch_id", "unknown"),
+                                "verification_outcome": patch_rec.get("sandbox_validation", {}).get("test_status", "passed"),
+                                "save_outcome": "failed",
+                                "summary": f"Repair application failed: {msg_app}",
+                                "timestamp": time.time(),
+                            })
+                            load_conversation_memory(curr_repo_id, engine.memory)
                             if HAS_RICH and console:
                                 console.print(f"[bold red][!][/bold red] {msg_app}\n")
                             else:
                                 print(f"[!] {msg_app}\n")
                         break
                     else:
+                        from core.persistence import get_repo_id, save_repo_activity, load_conversation_memory
+                        curr_repo_id = get_repo_id(current_path)
+                        save_repo_activity(curr_repo_id, {
+                            "activity_type": "repair",
+                            "target_file": target_rel,
+                            "proposal_id": patch_rec.get("patch_id", "unknown"),
+                            "verification_outcome": patch_rec.get("sandbox_validation", {}).get("test_status", "passed"),
+                            "save_outcome": "cancelled",
+                            "summary": "Repair proposal discarded by user",
+                            "timestamp": time.time(),
+                        })
+                        load_conversation_memory(curr_repo_id, engine.memory)
                         print("[*] Proposed changes discarded. Original files remain untouched.\n")
                         break
+
             continue
 
 
@@ -4108,10 +5362,13 @@ def main():
                 continue
             t_s = time.perf_counter()
             try:
-                s_results = engine.retrieve_expanded(sq, top_k=8)
+                with mascot_status(f"Searching code for '{sq}'"):
+                    s_results = engine.retrieve_expanded(sq, top_k=8)
                 render_search_results(sq, s_results, time.perf_counter() - t_s)
+                MascotController.render_success(f"Search retrieved {len(s_results)} matching chunks in {format_time_consumed(time.perf_counter() - t_s)}")
             except Exception as e_s:
                 print(f"[!] Search error: {e_s}\n")
+                MascotController.render_failure(str(e_s))
             continue
 
         # --- info:<file> : show file stats ---
@@ -4185,6 +5442,8 @@ def main():
             continue
 
         t_ask = time.perf_counter()
+        mascot_spinner = MascotSpinner("Searching repository & reasoning")
+        mascot_spinner.start()
         try:
             # Parse @mention from query for one-shot file scoping
             cleaned_query, mention_file = parse_mention(query)
@@ -4195,6 +5454,9 @@ def main():
             # Phase 1: Retrieve and display chunks immediately
             expanded_results = engine.retrieve_expanded(cleaned_query, top_k=5, file_filter=effective_file_filter)
             t_retrieval = time.perf_counter() - t_ask
+
+            # Stop mascot animation cleanly before displaying chunks and streaming tokens
+            mascot_spinner.stop()
 
             # Visual feedback: show which file was scoped to
             if mention_file:
@@ -4372,18 +5634,38 @@ def main():
                 t_llm = response.get("llm_seconds", 0.0)
 
             print(f"\n[*] [Time Consumed]: {format_time_consumed(total_time)} (Retrieval: {format_time_consumed(t_retrieval)}, Generation: {format_time_consumed(t_llm)})\n")
+            MascotController.render_success(f"Query completed in {format_time_consumed(total_time)}")
+            print()
+
+            # Contextual next-step suggestions (at most 2, only on observable issue or intent mismatch)
+            from core.suggestion_engine import generate_contextual_suggestions
+            all_indexed_paths = [c.file_path for c in result.store.chunks] if hasattr(result, "store") and result.store and hasattr(result.store, "chunks") else None
+            qa_suggestions = generate_contextual_suggestions(
+                query=cleaned_query,
+                answer=_last_answer,
+                retrieved_chunks=expanded_results if 'expanded_results' in locals() else [],
+                effective_file_filter=effective_file_filter,
+                current_path=current_path,
+                candidate_files=all_indexed_paths,
+                unverified_files=unv_f if 'unv_f' in locals() else None,
+                unverified_symbols=unv_s if 'unv_s' in locals() else None,
+            )
+            if qa_suggestions:
+                print("Suggested Next Steps:")
+                for s_idx, (s_cmd, s_desc) in enumerate(qa_suggestions[:2], 1):
+                    print(f"  [{s_idx}] {s_cmd} - {s_desc}")
+                print()
         except KeyboardInterrupt:
+            mascot_spinner.stop()
             print("\n[!] Query cancelled by user (Ctrl+C).\n")
             continue
         except Exception as e:
-            print(f"\n[!] Error processing query: {e}\n")
+            mascot_spinner.stop()
+            MascotController.render_failure(str(e))
+            print()
             continue
 
-    if watcher:
-        try:
-            watcher.stop()
-        except Exception:
-            pass
+    cleanup_cli_resources(watcher)
     return 0
 
 
@@ -4392,10 +5674,15 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
+        cleanup_cli_resources()
         print("\nExiting IntelliCodeX CLI. Goodbye!")
         sys.exit(0)
     except SystemExit as e:
+        cleanup_cli_resources()
         sys.exit(e.code)
     except Exception as e:
+        cleanup_cli_resources()
         sys.stderr.write(f"\n[!] Unexpected fatal error: {e}\n")
         sys.exit(1)
+    finally:
+        cleanup_cli_resources()

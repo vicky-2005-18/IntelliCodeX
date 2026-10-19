@@ -143,23 +143,67 @@ def partition_sources(answer: str, candidate_chunks: List[Any]) -> Tuple[List[An
 
 
 class ConversationMemory:
-    """Manages multi-turn conversation dialogue history for RAG queries."""
+    """Manages multi-turn conversation dialogue history and activity records for RAG queries."""
 
-    def __init__(self, max_turns: int = 5):
+    def __init__(self, max_turns: int = 5, repo_id: Optional[str] = None):
         self.max_turns = max_turns
+        self.repo_id = repo_id
         self.turns: List[Tuple[str, str]] = []  # [(user_query, assistant_response)]
         self.turn_files: List[Set[str]] = []
+        self.activities: List[Dict[str, Any]] = []
 
-    def add_turn(self, query: str, response: str, files: Optional[Set[str]] = None):
+    def add_turn(self, query: str, response: str, files: Optional[Set[str]] = None, persist: bool = True):
         self.turns.append((query, response))
         self.turn_files.append(set(files) if files else set())
         if len(self.turns) > self.max_turns:
             self.turns = self.turns[-self.max_turns:]
             self.turn_files = self.turn_files[-self.max_turns:]
+        if persist and self.repo_id:
+            try:
+                from core.persistence import save_repo_turn
+                save_repo_turn(self.repo_id, query, response, files=list(files) if files else [])
+            except Exception:
+                pass
 
-    def clear(self):
+    def add_activity(
+        self,
+        activity_type: str,
+        target_file: str,
+        proposal_id: str,
+        verification_outcome: str,
+        save_outcome: str,
+        summary: str = "",
+        details: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[float] = None,
+        persist: bool = True,
+    ):
+        act = {
+            "activity_type": activity_type,
+            "target_file": target_file,
+            "proposal_id": proposal_id,
+            "verification_outcome": verification_outcome,
+            "save_outcome": save_outcome,
+            "summary": summary,
+            "details": details or {},
+            "timestamp": timestamp or time.time(),
+        }
+        self.activities.append(act)
+        if persist and self.repo_id:
+            try:
+                from core.persistence import save_repo_activity
+                save_repo_activity(self.repo_id, act)
+            except Exception:
+                pass
+
+    def clear(self, clear_persisted: bool = False):
         self.turns.clear()
         self.turn_files.clear()
+        if clear_persisted and self.repo_id:
+            try:
+                from core.persistence import clear_repo_conversation
+                clear_repo_conversation(self.repo_id)
+            except Exception:
+                pass
 
     def is_topic_shifted(self, current_files: Set[str]) -> bool:
         """Detect if the newly retrieved context diverged completely from recent turns."""
@@ -205,8 +249,57 @@ class ConversationMemory:
         
         return "\n".join(history_lines)
 
+    def format_activity_log(self) -> str:
+        """Format concise creation, repair, and execution run activity records."""
+        if not self.activities:
+            return ""
+
+        has_creation_repair = any(
+            a.get("activity_type", "").lower() in ("creation", "repair", "patch", "create", "fix")
+            for a in self.activities
+        )
+        has_run = any(a.get("activity_type", "").lower() == "run" for a in self.activities)
+
+        if has_creation_repair and not has_run:
+            lines = ["--- Activity History (Code Creation & Repair) ---"]
+        elif has_run and not has_creation_repair:
+            lines = ["--- Activity History (Execution Runs) ---"]
+        else:
+            lines = ["--- Activity History ---"]
+
+        for idx, act in enumerate(self.activities, start=1):
+            raw_type = act.get("activity_type", "activity")
+            act_type = raw_type.upper()
+            target = act.get("target_file", "unknown")
+            pid = act.get("proposal_id", "unknown")
+            pid_short = f"{pid[:8]}...{pid[-4:]}" if len(pid) > 16 else pid
+            v_out = act.get("verification_outcome", "unknown").upper()
+            s_out = act.get("save_outcome", "unknown").upper()
+            ts = act.get("timestamp", 0)
+            ts_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) if ts else ""
+
+            if raw_type.lower() == "run":
+                details = act.get("details") or {}
+                code_val = details.get("exit_code")
+                if code_val is None:
+                    if v_out.lower().startswith("exit_code_"):
+                        code_val = v_out[len("exit_code_"):]
+                    else:
+                        code_val = v_out
+                lines.append(f"[{idx}] {act_type:<8} | Target: {target} | Run ID: {pid_short}")
+                lines.append(f"    Execution exit code: {code_val} | Run Outcome: {s_out} | Recorded: {ts_str}")
+            else:
+                lines.append(f"[{idx}] {act_type:<8} | Target: {target} | Proposal ID: {pid_short}")
+                lines.append(f"    Verification: {v_out} | Save Outcome: {s_out} | Recorded: {ts_str}")
+
+            summary = act.get("summary", "")
+            if summary:
+                lines.append(f"    Summary: {summary}")
+        return "\n".join(lines)
+
     def __len__(self):
         return len(self.turns)
+
 
 
 def reciprocal_rank_fusion(
@@ -517,6 +610,13 @@ class QueryEngine:
         self.call_graph = call_graph
         self.repo_path = repo_path
         self.memory = ConversationMemory(max_turns=max_turns)
+        if repo_path:
+            try:
+                from core.persistence import get_repo_id, load_conversation_memory
+                r_id = get_repo_id(repo_path)
+                load_conversation_memory(r_id, self.memory)
+            except Exception:
+                pass
         self.active_persona = "general"
         self.system_prompt = PERSONAS["general"]
         self.hybrid_search = hybrid_search
@@ -552,9 +652,10 @@ class QueryEngine:
         if self.llm and hasattr(self.llm, "set_model"):
             self.llm.set_model(model_name)
 
-    def clear_memory(self):
+    def clear_memory(self, clear_persisted: bool = False):
         """Clears current conversation history."""
-        self.memory.clear()
+        self.memory.clear(clear_persisted=clear_persisted)
+
 
     def _call_llm_generate(
         self,

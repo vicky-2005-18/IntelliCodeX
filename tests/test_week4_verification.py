@@ -123,8 +123,9 @@ def test_week4_patch_generator_engine(tmp_path):
     store = FaissVectorStore(dim=vecs.shape[1])
     store.add([chunk], vecs)
 
+    from core.persistence import get_repo_id
     patch_engine = PatchEngine(store, embedder, llm=None, repo_path=repo_dir)
-    rec = patch_engine.generate_patch("test_repo", "KeyError: 'name' in login", target_file=file_path)
+    rec = patch_engine.generate_patch(get_repo_id(repo_dir), "KeyError: 'name' in login", target_file=file_path)
 
     assert rec["patch_id"] is not None
     assert rec["target_file"] == file_path

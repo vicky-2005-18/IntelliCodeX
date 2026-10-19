@@ -412,7 +412,7 @@ def test_clone_url_validation(client, clean_users):
         assert resp.status_code == 400
 
 
-def test_patch_apply_permissions_owner_or_admin(client, clean_users):
+def test_patch_apply_permissions_owner_or_admin(client, clean_users, tmp_path):
     """Patch apply: owner or admin can apply; unrelated developer gets 403."""
     dev_a = _create_db_user("patch_dev_a", "developer")
     dev_b = _create_db_user("patch_dev_b", "developer")
@@ -426,13 +426,16 @@ def test_patch_apply_permissions_owner_or_admin(client, clean_users):
     headers_b = {"Authorization": f"Bearer {token_b}"}
     headers_admin = {"Authorization": f"Bearer {token_admin}"}
 
-    repo_id = f"repo_patch_{uuid.uuid4().hex[:6]}"
+    repo_dir = str(tmp_path / "patch_repo")
+    os.makedirs(repo_dir, exist_ok=True)
+    from core.persistence import get_repo_id
+    repo_id = get_repo_id(repo_dir)
     patch_id = f"patch_{uuid.uuid4().hex[:6]}"
 
     # Seed repository and patch owned by dev_a
     db_manager.insert("repositories", {
         "repo_id": repo_id,
-        "repo_path": os.path.abspath(settings.REPOS_DIR),
+        "repo_path": repo_dir,
         "backend": "tfidf",
         "owner_id": dev_a.id,
         "created_at": time.time(),

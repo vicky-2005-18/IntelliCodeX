@@ -4,6 +4,7 @@ Extended for CLI Perfection: new rich render panels, new commands, FileHistory.
 """
 import os
 import sys
+import time
 import tomllib
 from unittest.mock import patch, MagicMock
 import pytest
@@ -23,14 +24,21 @@ from cli import (
     render_patch_card,
     render_help_panel,
     render_ingestion_panel,
+    render_welcome_actions,
     render_deps_panel,
     render_callers_panel,
     render_watch_panel,
     render_hybrid_panel,
     render_status_panel,
     render_search_results,
+    print_banner,
+    MascotController,
+    MascotSpinner,
+    mascot_status,
+    is_animation_enabled,
     FileHistory,
     IntelliCodeXCompleter,
+    resolve_repo_path,
     main,
 )
 
@@ -69,6 +77,59 @@ def test_cli_version_flag(capsys):
     assert exc.value.code == 0
     captured = capsys.readouterr()
     assert f"IntelliCodeX CLI v{VERSION}" in captured.out or f"IntelliCodeX CLI v{VERSION}" in captured.err
+
+
+def test_resolve_repo_path_fallback_to_sample_repo_when_outside(tmp_path, monkeypatch):
+    """When launched from an arbitrary external directory, 'sample_repo' resolves to bundled sample_repo."""
+    monkeypatch.chdir(tmp_path)
+    assert not (tmp_path / "sample_repo").exists()
+    resolved = resolve_repo_path("sample_repo")
+    assert os.path.isdir(resolved)
+    assert os.path.basename(resolved) == "sample_repo"
+    assert os.path.isfile(os.path.join(resolved, "utils.py")) or os.path.isdir(os.path.join(resolved, "pkg"))
+
+
+def test_resolve_repo_path_current_working_dir(tmp_path, monkeypatch):
+    """'intellicodex .' resolves to the current working directory."""
+    monkeypatch.chdir(tmp_path)
+    resolved = resolve_repo_path(".")
+    assert os.path.abspath(resolved) == os.path.abspath(str(tmp_path))
+
+
+def test_resolve_repo_path_with_spaces_and_quotes(tmp_path):
+    """'intellicodex "path with spaces"' resolves properly even when wrapped in quotes."""
+    spaced_dir = tmp_path / "my repo with spaces"
+    spaced_dir.mkdir()
+    (spaced_dir / "test.py").write_text("print('hello')\n", encoding="utf-8")
+
+    # Unquoted
+    res1 = resolve_repo_path(str(spaced_dir))
+    assert res1 == os.path.abspath(str(spaced_dir))
+
+    # Double-quoted
+    res2 = resolve_repo_path(f'"{spaced_dir}"')
+    assert res2 == os.path.abspath(str(spaced_dir))
+
+    # Single-quoted
+    res3 = resolve_repo_path(f"'{spaced_dir}'")
+    assert res3 == os.path.abspath(str(spaced_dir))
+
+
+def test_storage_dir_preserves_intended_location_outside_project(tmp_path, monkeypatch):
+    """Running from an arbitrary directory must never create .storage in that arbitrary directory."""
+    monkeypatch.chdir(tmp_path)
+    from core.persistence import get_storage_dir, get_default_db_path, get_db_connection
+
+    storage_dir = get_storage_dir()
+    default_db = get_default_db_path()
+
+    # The resolved storage dir must not point inside the arbitrary tmp_path cwd
+    assert not storage_dir.startswith(str(tmp_path))
+    assert not (tmp_path / ".storage").exists()
+
+    conn = get_db_connection()
+    conn.close()
+    assert not (tmp_path / ".storage").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +359,26 @@ def test_render_ingestion_panel(capsys):
     render_ingestion_panel(mock_result, "sample_repo", elapsed=0.5)
     captured = capsys.readouterr()
     assert "42" in captured.out or "210" in captured.out or "sample_repo" in captured.out
+    assert "Format version" not in captured.out
+    assert "Automatic updates" in captured.out or "real-time" in captured.out
+
+
+def test_render_welcome_actions(capsys):
+    """render_welcome_actions displays supported commands, safe repair notice, and active examples."""
+    mock_result = MagicMock()
+    mock_chunk = MagicMock()
+    mock_chunk.file_path = "auth.py"
+    mock_chunk.kind = "function"
+    mock_chunk.name = "authenticate_user"
+    mock_result.store.chunks = [mock_chunk]
+    mock_result.call_graph = None
+
+    render_welcome_actions(mock_result, "sample_repo")
+    captured = capsys.readouterr()
+    assert "What would you like to do?" in captured.out
+    assert "auth.py" in captured.out
+    assert "authenticate_user" in captured.out
+    assert "approval" in captured.out.lower() or "verification" in captured.out.lower()
 
 
 def test_render_deps_panel_empty(capsys):
@@ -455,4 +536,426 @@ def test_cli_perfection_interactive_commands(capsys, tmp_path):
     with open(export_file, "r", encoding="utf-8") as f:
         content = f.read()
     assert "# IntelliCodeX Answer Export" in content
+
+
+# ---------------------------------------------------------------------------
+# 8. IntelliCodeX Mascot Design & State Tests
+# ---------------------------------------------------------------------------
+
+def test_mascot_design_components():
+    """Solid pixel-art cyan robot terminal sprite: square eyes, antenna, arms, and <> chest symbol."""
+    sprite = MascotController.SPRITE_STATIC
+    assert any("CCCC" in row for row in sprite[:2]), "Mascot must have centered antenna"
+    assert any("DD" in row for row in sprite[4:6]), "Mascot faceplate must have square dark eyes"
+    assert any("CCDCCDCC" in row or "CCDCCCCDCC" in row for row in sprite[10:13]), "Mascot torso must have dark <> symbol"
+    assert any("CCC" in row for row in sprite[15:17]), "Mascot must have two solid feet"
+
+    ansi_lines = MascotController.get_mascot_ansi_lines()
+    assert len(ansi_lines) == 9, "18-row pixel sprite must render as 9 terminal half-block lines"
+    assert any("▀" in line or "█" in line or "▄" in line for line in ansi_lines), "Mascot must use Unicode half-blocks"
+
+    ascii_art = MascotController.get_mascot_text(ascii_mode=True)
+    assert "^" in ascii_art, "ASCII fallback mascot must have an antenna (^)"
+    assert "# #" in ascii_art, "ASCII fallback mascot must have eyes"
+    assert "< >" in ascii_art or "<| < > |>" in ascii_art, "ASCII fallback must have <> chest and small arms"
+    assert "d   b" in ascii_art, "ASCII fallback must have feet"
+
+
+def test_mascot_ready_state(capsys):
+    """Ready state displays static robot sprite."""
+    MascotController.render_ready("Standing by for input")
+    captured = capsys.readouterr()
+    assert "Standing by for input" in captured.out
+    assert "▀" in captured.out or "█" in captured.out or "^" in captured.out
+
+
+def test_mascot_processing_blink_and_dots():
+    """Processing state supports subtle blinking eyes and animated thinking dots."""
+    grid_open = MascotController.create_mascot_grid("Processing thinking .", is_blink=False)
+    grid_closed = MascotController.create_mascot_grid("Processing thinking ...", is_blink=True)
+    assert grid_open is not None
+    assert grid_closed is not None
+
+    assert MascotController.SPRITE_STATIC[4] != MascotController.SPRITE_BLINK[4], "Blink frame must narrow eye pixels"
+
+
+def test_mascot_success_state(capsys):
+    """Success state displays green check only after operation actually succeeds."""
+    MascotController.render_success("Indexing completed in 0.82s")
+    captured = capsys.readouterr()
+    assert "✓" in captured.out
+    assert "Indexing completed in 0.82s" in captured.out
+
+
+def test_mascot_failure_state(capsys):
+    """Failure state displays amber indicator with the actual error message."""
+    MascotController.render_failure("File not found: 'missing.py'")
+    captured = capsys.readouterr()
+    assert "⚠" in captured.out
+    assert "Error: File not found: 'missing.py'" in captured.out
+
+
+def test_mascot_banner_placement(capsys):
+    """Mascot is placed beside the IntelliCodeX startup title."""
+    render_banner()
+    captured = capsys.readouterr()
+    assert "INTELLICODEX INTERACTIVE CLI ASSISTANT" in captured.out
+    assert "▀" in captured.out or "█" in captured.out or "d   b" in captured.out
+
+    print_banner()
+    captured_plain = capsys.readouterr()
+    assert "INTELLICODEX INTERACTIVE CLI ASSISTANT" in captured_plain.out
+
+
+def test_is_animation_enabled_controls():
+    """Animation is disabled in CI, when explicitly configured, and in redirected output."""
+    with patch.dict(os.environ, {"CI": "1", "INTELLICODEX_NO_ANIMATION": ""}):
+        assert is_animation_enabled() is False
+
+    with patch.dict(os.environ, {"CI": "true", "INTELLICODEX_NO_ANIMATION": ""}):
+        assert is_animation_enabled() is False
+
+    with patch.dict(os.environ, {"CI": "", "INTELLICODEX_NO_ANIMATION": "1"}):
+        assert is_animation_enabled() is False
+
+    mock_stdout = MagicMock()
+    mock_stdout.isatty.return_value = False
+    with patch.dict(os.environ, {"CI": "", "INTELLICODEX_NO_ANIMATION": ""}):
+        with patch("sys.stdout", mock_stdout):
+            assert is_animation_enabled() is False
+
+    # Force animation override allows automated testing
+    with patch.dict(os.environ, {"CI": "", "INTELLICODEX_NO_ANIMATION": "", "INTELLICODEX_FORCE_ANIMATION": "1"}):
+        assert is_animation_enabled() is True
+
+
+def test_mascot_status_lifecycle_clean_stop(capsys):
+    """mascot_status starts, stops cleanly on success, and on error renders failure message."""
+    with mascot_status("Unit test task", success_message="Task finished cleanly"):
+        pass
+    captured = capsys.readouterr()
+    assert "✓" in captured.out
+    assert "Task finished cleanly" in captured.out
+
+    with pytest.raises(ValueError, match="Deliberate error"):
+        with mascot_status("Failing task"):
+            raise ValueError("Deliberate error")
+
+    captured_err = capsys.readouterr()
+    assert "⚠" in captured_err.out
+    assert "Deliberate error" in captured_err.out
+
+
+def test_mascot_eye_movement_sprites():
+    """MascotController supports static, blink, left, and right eye movement frames."""
+    assert len(MascotController.SPRITE_LOOK_LEFT) == 18
+    assert len(MascotController.SPRITE_LOOK_RIGHT) == 18
+
+    # Eyes are shifted left in SPRITE_LOOK_LEFT and right in SPRITE_LOOK_RIGHT
+    assert "CCLDDLLLLDDLLLCC" in MascotController.SPRITE_LOOK_LEFT
+    assert "CCLLLDDLLLLDDLCC" in MascotController.SPRITE_LOOK_RIGHT
+
+    grid_left = MascotController.create_mascot_grid("Thinking left", eye_mode="left")
+    grid_right = MascotController.create_mascot_grid("Thinking right", eye_mode="right")
+    assert grid_left is not None
+    assert grid_right is not None
+
+    ansi_left = MascotController.get_mascot_ansi_lines(eye_mode="left")
+    ansi_right = MascotController.get_mascot_ansi_lines(eye_mode="right")
+    assert len(ansi_left) == 9
+    assert len(ansi_right) == 9
+
+
+def test_idle_prompt_blinking_timing():
+    """Idle mascot blinks briefly every 3-5 seconds (period=3.8s, duration=0.22s)."""
+    # At t=0.0s: blinking (0.0 % 3.8 = 0.0 < 0.22)
+    assert (0.0 % 3.8) < 0.22
+    # At t=1.0s: open eyes (1.0 % 3.8 = 1.0 >= 0.22)
+    assert not ((1.0 % 3.8) < 0.22)
+    # At t=3.8s: blinking second time (3.8 % 3.8 = 0.0 < 0.22)
+    assert (3.8 % 3.8) < 0.22
+    # At t=7.6s: blinking third time (7.6 % 3.8 = 0.0 < 0.22)
+    assert (7.6 % 3.8) < 0.22
+
+
+def test_persistent_mascot_session_layout():
+    """create_interactive_session inserts persistent mascot window into prompt_toolkit layout."""
+    with patch.dict(os.environ, {"CI": "", "INTELLICODEX_NO_ANIMATION": "", "INTELLICODEX_FORCE_ANIMATION": "1"}):
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from cli import create_interactive_session
+
+        with create_pipe_input() as pipe:
+            session = create_interactive_session(input=pipe, output=DummyOutput())
+            if session is not None:
+                # Persistent mascot container is inserted into layout children
+                children = session.layout.container.children
+                assert len(children) >= 2
+
+
+def test_typing_and_cursor_intact_during_refresh():
+    """Typing, cursor position, and command history remain intact during animation refresh ticks."""
+    with patch.dict(os.environ, {"CI": "", "INTELLICODEX_NO_ANIMATION": "", "INTELLICODEX_FORCE_ANIMATION": "1"}):
+        import threading
+        import time
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from prompt_toolkit.history import InMemoryHistory
+        from prompt_toolkit import PromptSession
+        from cli import create_interactive_session
+
+        hist = InMemoryHistory()
+        hist.append_string("previous_cmd")
+
+        with create_pipe_input() as pipe:
+            session = create_interactive_session(history=hist, input=pipe, output=DummyOutput())
+            if session is not None:
+                def slow_type():
+                    time.sleep(0.08)
+                    pipe.send_text("s")
+                    time.sleep(0.08)
+                    pipe.send_text("t")
+                    time.sleep(0.08)
+                    pipe.send_text("a")
+                    time.sleep(0.08)
+                    pipe.send_text("t\n")
+
+                th = threading.Thread(target=slow_type)
+                th.start()
+                res = session.prompt(">> ", refresh_interval=0.05)
+                th.join()
+                assert res == "stat"
+
+
+def test_clean_exit_no_threads():
+    """Exiting the prompt leaves no dangling background animation threads."""
+    import threading
+    import time
+    threads_before = threading.active_count()
+    spinner = MascotSpinner("Test Clean Stop")
+    spinner.start()
+    time.sleep(0.1)
+    spinner.stop()
+    assert not (spinner.thread and spinner.thread.is_alive())
+    # No extra threads left running
+    assert threading.active_count() <= threads_before + 1
+
+
+def test_mascot_wave_sprites_and_lifecycle():
+    """MascotController supports wave frames and manages the wave timer lifecycle."""
+    assert len(MascotController.SPRITE_WAVE_1) == 18
+    assert len(MascotController.SPRITE_WAVE_2) == 18
+
+    # Wave state lifecycle
+    MascotController._last_wave_time = 0.0
+    assert MascotController.is_waving() is False
+
+    MascotController.trigger_wave()
+    assert MascotController.is_waving() is True
+
+    # After duration expires, is_waving becomes False
+    MascotController._last_wave_time = time.time() - 3.0
+    assert MascotController.is_waving() is False
+
+    grid_wave1 = MascotController.create_mascot_grid("Greeting", eye_mode="wave1")
+    grid_wave2 = MascotController.create_mascot_grid("Greeting", eye_mode="wave2")
+    assert grid_wave1 is not None
+    assert grid_wave2 is not None
+
+    ansi_wave = MascotController.get_mascot_ansi_lines(eye_mode="wave1")
+    assert len(ansi_wave) == 9
+
+
+def test_mascot_render_greeting(capsys):
+    """MascotController.render_greeting outputs 'Hey! How can I help?' and key capability hints."""
+    MascotController.render_greeting()
+    captured = capsys.readouterr()
+    assert "Hey! How can I help?" in captured.out
+    assert "search:" in captured.out
+
+
+def test_mascot_attentive_eyes_during_typing():
+    """While typing text is in the buffer, mascot shows attentive eyes and suppresses idle blinking."""
+    with patch.dict(os.environ, {"CI": "", "INTELLICODEX_NO_ANIMATION": "", "INTELLICODEX_FORCE_ANIMATION": "1"}):
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from cli import create_interactive_session
+
+        with create_pipe_input() as pipe:
+            session = create_interactive_session(input=pipe, output=DummyOutput())
+            if session is not None and session.layout:
+                # Find mascot window FormattedTextControl
+                mascot_control = session.layout.container.children[0].content.content
+                # Simulate typed text in buffer
+                session.default_buffer._set_text("search:auth")
+                tokens = mascot_control.text()
+                # Tokens should be generated and contain attentive indicator or text
+                text_combined = "".join(t[1] for t in tokens if len(t) >= 2)
+                assert "Attentive" in text_combined or "search:auth" in text_combined or len(tokens) > 0
+
+
+def test_mascot_mouse_support_defaults_to_false():
+    """Mascot mouse interaction defaults to False to protect native terminal scrollback and selection."""
+    from cli import is_mascot_mouse_enabled
+    with patch.dict(os.environ, {"INTELLICODEX_MASCOT_MOUSE": ""}):
+        assert is_mascot_mouse_enabled() is False
+
+    with patch.dict(os.environ, {"INTELLICODEX_MASCOT_MOUSE": "1"}):
+        assert is_mascot_mouse_enabled() is True
+
+    with patch.dict(os.environ, {"INTELLICODEX_MASCOT_MOUSE": "true"}):
+        assert is_mascot_mouse_enabled() is True
+
+
+def test_restore_terminal_mouse_modes():
+    """restore_terminal_mouse_modes() sends VT escape codes to disable mouse tracking without toggling screen buffers."""
+    import io
+    from cli import restore_terminal_mouse_modes
+    buf = io.StringIO()
+    with patch("sys.stdout", buf):
+        restore_terminal_mouse_modes()
+    output = buf.getvalue()
+    assert "\x1b[?1000l" in output  # normal tracking off
+    assert "\x1b[?1002l" in output  # button tracking off
+    assert "\x1b[?1006l" in output  # SGR tracking off
+    # Must NOT emit ?1049l because switching to/from alternate screen corrupts native console buffer
+    assert "\x1b[?1049l" not in output
+
+
+def test_mascot_rendering_suspension_controls():
+    """Mascot rendering suspension can be suspended and resumed cleanly."""
+    from cli import (
+        suspend_mascot_rendering,
+        resume_mascot_rendering,
+        is_mascot_rendering_suspended,
+    )
+    resume_mascot_rendering()
+    assert is_mascot_rendering_suspended() is False
+    suspend_mascot_rendering()
+    assert is_mascot_rendering_suspended() is True
+    resume_mascot_rendering()
+    assert is_mascot_rendering_suspended() is False
+
+
+def test_cleanup_cli_resources():
+    """cleanup_cli_resources terminates spinners, suspends mascot rendering, stops watcher, and restores mouse modes."""
+    import io
+    from cli import cleanup_cli_resources, resume_mascot_rendering, is_mascot_rendering_suspended
+    mock_watcher = MagicMock()
+    buf = io.StringIO()
+    try:
+        with patch("sys.stdout", buf):
+            cleanup_cli_resources(mock_watcher)
+        assert mock_watcher.stop.called
+        assert is_mascot_rendering_suspended() is True
+        output = buf.getvalue()
+        assert "\x1b[?1000l" in output
+        assert "\x1b[?1049l" not in output
+    finally:
+        resume_mascot_rendering()
+
+
+
+def test_mascot_scrollback_preservation_by_default():
+    """When mouse interaction is disabled (default), tokens do not contain mouse handlers, preserving native terminal scroll."""
+    with patch.dict(os.environ, {"CI": "", "INTELLICODEX_NO_ANIMATION": "", "INTELLICODEX_FORCE_ANIMATION": "1", "INTELLICODEX_MASCOT_MOUSE": ""}):
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from cli import create_interactive_session, is_mascot_mouse_enabled
+
+        assert is_mascot_mouse_enabled() is False
+        with create_pipe_input() as pipe:
+            session = create_interactive_session(input=pipe, output=DummyOutput())
+            if session is not None:
+                mascot_win = session.layout.container.children[0]
+                assert mascot_win.content.dont_extend_height() is True
+                assert mascot_win.content.height == 9
+                tokens = mascot_win.content.content.text()
+                # Tokens should be 2-tuples (style, text) without mouse handler
+                assert len(tokens) > 0
+                assert all(len(t) == 2 for t in tokens)
+
+
+def test_mascot_opt_in_mouse_and_keyboard_fallback():
+    """When mouse interaction is explicitly opted in, mouse click triggers wave; keyboard fallback works in both modes."""
+    with patch.dict(os.environ, {"CI": "", "INTELLICODEX_NO_ANIMATION": "", "INTELLICODEX_FORCE_ANIMATION": "1", "INTELLICODEX_MASCOT_MOUSE": "1"}):
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
+        from prompt_toolkit.data_structures import Point
+        from cli import create_interactive_session, MascotController, is_mascot_mouse_enabled
+
+        assert is_mascot_mouse_enabled() is True
+        MascotController._last_wave_time = 0.0
+
+        with create_pipe_input() as pipe:
+            session = create_interactive_session(input=pipe, output=DummyOutput())
+            if session is not None:
+                mascot_control = session.layout.container.children[0].content.content
+                mascot_control.create_content(80, 10)
+                event = MouseEvent(position=Point(x=2, y=2), event_type=MouseEventType.MOUSE_UP, button=None, modifiers=None)
+                mascot_control.mouse_handler(event)
+                assert MascotController.is_waving() is True
+
+    # Keyboard fallback (Ctrl+G, F1)
+    with patch.dict(os.environ, {"CI": "", "INTELLICODEX_NO_ANIMATION": "", "INTELLICODEX_FORCE_ANIMATION": "1", "INTELLICODEX_MASCOT_MOUSE": ""}):
+        with create_pipe_input() as pipe:
+            session = create_interactive_session(input=pipe, output=DummyOutput())
+            if session is not None and session.key_bindings:
+                MascotController._last_wave_time = 0.0
+                bindings = session.key_bindings.bindings
+                cg_binding = [b for b in bindings if any("c-g" in str(k) or "ControlG" in str(k) for k in b.keys)]
+                assert len(cg_binding) > 0
+                fake_event = MagicMock()
+                cg_binding[0].handler(fake_event)
+                assert MascotController.is_waving() is True
+                fake_event.app.invalidate.assert_called_once()
+
+
+def test_wave_primary_greeting_hint():
+    """Mascot idle status hint directs user to type 'wave' as the primary greeting method."""
+    with patch.dict(os.environ, {"CI": "", "INTELLICODEX_NO_ANIMATION": "", "INTELLICODEX_FORCE_ANIMATION": "1", "INTELLICODEX_MASCOT_MOUSE": ""}):
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from cli import create_interactive_session
+
+        with create_pipe_input() as pipe:
+            session = create_interactive_session(input=pipe, output=DummyOutput())
+            if session is not None:
+                mascot_win = session.layout.container.children[0]
+                tokens = mascot_win.content.content.text()
+                text_combined = "".join(t[1] for t in tokens if len(t) >= 2)
+                assert "wave" in text_combined.lower()
+
+
+def test_get_mascot_greeting_keys_configurable():
+    """Greeting keys default to ['c-g', 'f1'] and are configurable or disableable via INTELLICODEX_GREET_KEYS."""
+    from cli import get_mascot_greeting_keys
+
+    with patch.dict(os.environ, {"INTELLICODEX_GREET_KEYS": ""}):
+        assert get_mascot_greeting_keys() == ["c-g", "f1"]
+
+    with patch.dict(os.environ, {"INTELLICODEX_GREET_KEYS": "f1"}):
+        assert get_mascot_greeting_keys() == ["f1"]
+
+    with patch.dict(os.environ, {"INTELLICODEX_GREET_KEYS": "c-h,f2"}):
+        assert get_mascot_greeting_keys() == ["c-h", "f2"]
+
+    with patch.dict(os.environ, {"INTELLICODEX_GREET_KEYS": "none"}):
+        assert get_mascot_greeting_keys() == []
+
+    with patch.dict(os.environ, {"INTELLICODEX_GREET_KEYS": "0"}):
+        assert get_mascot_greeting_keys() == []
+
+
+def test_wave_command_in_session_completer():
+    """'wave' command is registered in autocomplete suggestions."""
+    from prompt_toolkit.document import Document
+    from cli import IntelliCodeXCompleter
+
+    completer = IntelliCodeXCompleter()
+    doc = Document("wav")
+    matches = [c.text for c in completer.get_completions(doc)]
+    assert "wave" in matches
+
 

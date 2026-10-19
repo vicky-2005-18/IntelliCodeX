@@ -30,11 +30,21 @@ def _format_time(seconds: float) -> str:
         return f"{m}m {s:02d}s"
 
 
-def _get_embedding_cache(cache_dir: str = ".storage") -> Optional[sqlite3.Connection]:
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _resolve_storage_dir(cache_dir: Optional[str] = None) -> str:
+    if cache_dir and cache_dir != ".storage":
+        return os.path.abspath(cache_dir)
+    return os.environ.get("STORAGE_DIR") or os.path.join(repo_root, ".storage")
+
+
+def _get_embedding_cache(cache_dir: Optional[str] = None) -> Optional[sqlite3.Connection]:
     """Retrieves or initializes the SQLite embedding cache database."""
+    eff_dir = _resolve_storage_dir(cache_dir)
     try:
-        os.makedirs(cache_dir, exist_ok=True)
-        db_path = os.path.join(cache_dir, "embedding_cache.db")
+        os.makedirs(eff_dir, exist_ok=True)
+        db_path = os.path.join(eff_dir, "embedding_cache.db")
         conn = sqlite3.connect(db_path, timeout=30.0)
         with conn:
             conn.execute("""
@@ -61,11 +71,11 @@ class BaseEmbedder(ABC):
 
 
 class OllamaEmbedder(BaseEmbedder):
-    def __init__(self, model: str = "nomic-embed-text", host: str = "http://localhost:11434", cache_dir: str = ".storage"):
+    def __init__(self, model: str = "nomic-embed-text", host: str = "http://localhost:11434", cache_dir: Optional[str] = None):
         self.model = model
         self.host = host.rstrip("/")
         self.dim = 768  # nomic-embed-text output size
-        self.cache_dir = cache_dir
+        self.cache_dir = _resolve_storage_dir(cache_dir)
         self.embedder_name = "ollama"
         # Fix 1: Hot in-memory layer — avoids Ollama HTTP round-trip on repeated queries
         self._ram_cache: Dict[str, np.ndarray] = {}
@@ -267,6 +277,8 @@ class TfidfEmbedder(BaseEmbedder):
         try:
             tfidf = self._vectorizer.transform(texts)
             vecs = self._svd.transform(tfidf).astype("float32")
+            if not np.all(np.isfinite(vecs)):
+                vecs = np.nan_to_num(vecs, nan=0.0, posinf=0.0, neginf=0.0)
             if vecs.shape[1] < self.dim:
                 padded = np.zeros((len(texts), self.dim), dtype="float32")
                 padded[:, :vecs.shape[1]] = vecs

@@ -213,10 +213,15 @@ def validate_candidate_interface(
 def evaluate_patch_approval_gate(
     patch_record: Dict[str, Any],
     security_policy: Optional[str] = None,
+    target_repo_id: Optional[str] = None,
+    target_repo_path: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Central Approval Gate for applying patches to codebases.
 
     Enforces strict invariants before a proposed candidate patch can be applied:
+    0. Repository Isolation Gate:
+       - Proposals must have canonical repo_id matching target repository.
+       - Missing or non-matching repository identity strictly blocks application.
     1. Behavioral Verification Gate:
        - Requires consistent evidence of successful execution:
          verified=True, test_status='passed', success=True, exit_code=0.
@@ -239,104 +244,136 @@ def evaluate_patch_approval_gate(
         return False, "Approval rejected: invalid patch record (missing target_file or suggested_patch)."
 
     # ---------------------------------------------------------
+    # 0. Repository Isolation Gate
+    # ---------------------------------------------------------
+    effective_target_repo = target_repo_id
+    if not effective_target_repo and target_repo_path:
+        from core.persistence import get_repo_id
+        effective_target_repo = get_repo_id(target_repo_path)
+
+    if effective_target_repo:
+        from core.persistence import is_canonical_repo_id
+        prop_repo_id = patch_record.get("repo_id")
+        if not is_canonical_repo_id(prop_repo_id):
+            return False, f"Approval rejected: Proposal lacks canonical repository identity metadata (missing or basename-only repo_id: '{prop_repo_id}'). Cross-repository safety invariant requires canonical repository identity."
+        if prop_repo_id != effective_target_repo:
+            return False, f"Security Block: Cross-repository operation rejected. Proposal belongs to repository '{prop_repo_id}', but target repository is '{effective_target_repo}'."
+
+    # ---------------------------------------------------------
     # 1. Behavioral Verification Gate
     # ---------------------------------------------------------
+    beh_rejection: Optional[str] = None
     sb_val = patch_record.get("sandbox_validation")
     if not sb_val or not isinstance(sb_val, dict):
-        return False, "Approval rejected: missing sandbox verification metadata. Normal approval requires verified candidate patch."
+        beh_rejection = "Approval rejected: missing sandbox verification metadata. Normal approval requires verified candidate patch."
+    else:
+        infra_blocker = (
+            patch_record.get("infrastructure_blocker")
+            or (patch_record.get("infrastructure", {}).get("infrastructure_blocker") if isinstance(patch_record.get("infrastructure"), dict) else None)
+            or sb_val.get("infrastructure_blocker")
+            or (sb_val.get("test_result", {}).get("error_message") if isinstance(sb_val.get("test_result"), dict) and any(k in str(sb_val.get("test_result", {}).get("error_message", "")).lower() for k in ("docker", "daemon")) else None)
+        )
 
-    test_status = str(sb_val.get("test_status", "")).lower().strip()
-    if test_status in ("failed", "error", "rejected"):
-        return False, f"Approval rejected: candidate patch failed test verification (test_status: {test_status})."
+        test_status = str(sb_val.get("test_status", "")).lower().strip()
+        if test_status in ("failed", "error", "rejected", "blocked"):
+            if infra_blocker:
+                beh_rejection = f"Approval rejected: Docker infrastructure failure ({infra_blocker}). Zero tests executed as a consequence (verification requires at least one passing test)."
+            else:
+                beh_rejection = f"Approval rejected: candidate patch failed test verification (test_status: {test_status})."
+        elif test_status in ("timed-out", "timed_out", "timeout"):
+            beh_rejection = "Approval rejected: candidate patch failed test verification (sandbox test execution timed out)."
+        elif test_status in ("collection_error", "collection-error"):
+            beh_rejection = "Approval rejected: candidate patch failed test verification (test collection errors occurred during sandbox execution)."
+        elif test_status in ("pre_flight_rejected", "preflight_rejected"):
+            beh_rejection = "Approval rejected: candidate patch failed test verification (candidate pre-flight interface validation failed)."
+        elif sb_val.get("skipped") is True or test_status == "skipped":
+            if infra_blocker:
+                beh_rejection = f"Approval rejected: Docker infrastructure failure ({infra_blocker}). Zero tests executed as a consequence (verification requires at least one passing test)."
+            else:
+                beh_rejection = "Approval rejected: sandbox test execution was skipped. Normal approval requires executed and passing tests."
+        else:
+            top_total_count = sb_val.get("total_count")
+            top_passed_count = sb_val.get("passed_count")
+            if (top_total_count is not None and top_total_count <= 0) or (top_passed_count is not None and top_passed_count <= 0):
+                if infra_blocker:
+                    beh_rejection = f"Approval rejected: Docker infrastructure failure ({infra_blocker}). Zero tests executed as a consequence (verification requires at least one passing test)."
+                else:
+                    beh_rejection = "Approval rejected: zero tests executed. Verification requires at least one passing test."
+            elif sb_val.get("verified") is not True:
+                if infra_blocker:
+                    beh_rejection = f"Approval rejected: Docker infrastructure failure ({infra_blocker}). Zero tests executed as a consequence (verification requires at least one passing test)."
+                else:
+                    beh_rejection = f"Approval rejected: candidate patch failed test verification (verified={sb_val.get('verified')})."
+            elif test_status != "passed":
+                if infra_blocker:
+                    beh_rejection = f"Approval rejected: Docker infrastructure failure ({infra_blocker}). Zero tests executed as a consequence (verification requires at least one passing test)."
+                else:
+                    beh_rejection = f"Approval rejected: test_status must be 'passed', got '{test_status}'."
 
-    if test_status in ("timed-out", "timed_out", "timeout"):
-        return False, "Approval rejected: candidate patch failed test verification (sandbox test execution timed out)."
+        # Inspect test_result / execution evidence
+        if not beh_rejection:
+            test_res = sb_val.get("test_result")
+            if isinstance(test_res, dict):
+                if test_res.get("skipped") is True:
+                    beh_rejection = "Approval rejected: test execution result indicates tests were skipped."
+                elif test_res.get("success") is False:
+                    beh_rejection = "Approval rejected: test execution reported success=False."
+                else:
+                    exit_code = test_res.get("exit_code")
+                    if exit_code is not None and exit_code != 0:
+                        err_text = (str(test_res.get("error_message") or "") + " " + str(test_res.get("stderr") or "")).lower()
+                        if "candidate validation rejected" in err_text or "candidate_interface_validation" in (test_res.get("failed_tests") or []):
+                            beh_rejection = "Approval rejected: candidate pre-flight interface validation failed."
+                        elif "timeout" in err_text or "timed out" in err_text or exit_code == -1:
+                            beh_rejection = "Approval rejected: sandbox test execution timed out."
+                        else:
+                            beh_rejection = f"Approval rejected: test execution returned non-zero exit code ({exit_code})."
+                    elif (test_res.get("failed_count", 0) > 0) or (len(test_res.get("failed_tests") or []) > 0):
+                        failed_count = test_res.get("failed_count", 0)
+                        failed_tests = test_res.get("failed_tests") or []
+                        if "candidate_interface_validation" in failed_tests:
+                            beh_rejection = "Approval rejected: candidate pre-flight interface validation failed."
+                        else:
+                            beh_rejection = f"Approval rejected: test execution reported {failed_count or len(failed_tests)} failing test(s): {failed_tests}."
+                    elif len(test_res.get("collection_errors") or []) > 0:
+                        beh_rejection = f"Approval rejected: test execution encountered collection errors: {test_res.get('collection_errors')}."
+                    else:
+                        err_msg = str(test_res.get("error_message") or "")
+                        stderr_msg = str(test_res.get("stderr") or "")
+                        combined_err = (err_msg + " " + stderr_msg).lower()
+                        if "timeout" in combined_err or "timed out" in combined_err:
+                            beh_rejection = "Approval rejected: sandbox test execution timed out."
+                        elif "test file immutability violation" in combined_err:
+                            beh_rejection = "Approval rejected: test file immutability violation detected."
+                        elif "candidate validation rejected" in combined_err:
+                            beh_rejection = "Approval rejected: candidate pre-flight interface validation failed."
+                        else:
+                            passed_cnt = test_res.get("passed_count")
+                            passed_list = test_res.get("passed_tests")
+                            total_cnt = test_res.get("total_count")
+                            if passed_cnt is not None and passed_cnt <= 0:
+                                beh_rejection = "Approval rejected: zero tests passed. Verification requires at least one passing test."
+                            elif passed_list is not None and len(passed_list) == 0 and (passed_cnt is None or passed_cnt == 0):
+                                beh_rejection = "Approval rejected: zero tests passed. Verification requires at least one passing test."
+                            elif total_cnt is not None and total_cnt <= 0 and (passed_cnt is None or passed_cnt == 0):
+                                beh_rejection = "Approval rejected: zero tests executed. Verification requires at least one passing test."
 
-    if test_status in ("collection_error", "collection-error"):
-        return False, "Approval rejected: candidate patch failed test verification (test collection errors occurred during sandbox execution)."
-
-    if test_status in ("pre_flight_rejected", "preflight_rejected"):
-        return False, "Approval rejected: candidate patch failed test verification (candidate pre-flight interface validation failed)."
-
-    if sb_val.get("skipped") is True or test_status == "skipped":
-        return False, "Approval rejected: sandbox test execution was skipped. Normal approval requires executed and passing tests."
-
-    is_verified = sb_val.get("verified")
-    if is_verified is not True:
-        return False, f"Approval rejected: candidate patch failed test verification (verified={is_verified})."
-
-    if test_status != "passed":
-        return False, f"Approval rejected: test_status must be 'passed', got '{test_status}'."
-
-    # Inspect test_result / execution evidence
-    test_res = sb_val.get("test_result")
-    if isinstance(test_res, dict):
-        if test_res.get("skipped") is True:
-            return False, "Approval rejected: test execution result indicates tests were skipped."
-
-        if test_res.get("success") is False:
-            return False, "Approval rejected: test execution reported success=False."
-
-        exit_code = test_res.get("exit_code")
-        if exit_code is not None and exit_code != 0:
-            err_text = (str(test_res.get("error_message") or "") + " " + str(test_res.get("stderr") or "")).lower()
-            if "candidate validation rejected" in err_text or "candidate_interface_validation" in (test_res.get("failed_tests") or []):
-                return False, "Approval rejected: candidate pre-flight interface validation failed."
-            if "timeout" in err_text or "timed out" in err_text or exit_code == -1:
-                return False, "Approval rejected: sandbox test execution timed out."
-            return False, f"Approval rejected: test execution returned non-zero exit code ({exit_code})."
-
-        failed_count = test_res.get("failed_count", 0)
-        failed_tests = test_res.get("failed_tests") or []
-        if failed_count > 0 or len(failed_tests) > 0:
-            if "candidate_interface_validation" in failed_tests:
-                return False, "Approval rejected: candidate pre-flight interface validation failed."
-            return False, f"Approval rejected: test execution reported {failed_count or len(failed_tests)} failing test(s): {failed_tests}."
-
-        coll_errors = test_res.get("collection_errors") or []
-        if len(coll_errors) > 0:
-            return False, f"Approval rejected: test execution encountered collection errors: {coll_errors}."
-
-        err_msg = str(test_res.get("error_message") or "")
-        stderr_msg = str(test_res.get("stderr") or "")
-        combined_err = (err_msg + " " + stderr_msg).lower()
-        if "timeout" in combined_err or "timed out" in combined_err:
-            return False, "Approval rejected: sandbox test execution timed out."
-        if "test file immutability violation" in combined_err:
-            return False, "Approval rejected: test file immutability violation detected."
-        if "candidate validation rejected" in combined_err:
-            return False, "Approval rejected: candidate pre-flight interface validation failed."
-
-        passed_cnt = test_res.get("passed_count")
-        passed_list = test_res.get("passed_tests")
-        total_cnt = test_res.get("total_count")
-        if passed_cnt is not None and passed_cnt <= 0:
-            return False, "Approval rejected: zero tests passed. Verification requires at least one passing test."
-        if passed_list is not None and len(passed_list) == 0 and (passed_cnt is None or passed_cnt == 0):
-            return False, "Approval rejected: zero tests passed. Verification requires at least one passing test."
-        if total_cnt is not None and total_cnt <= 0 and (passed_cnt is None or passed_cnt == 0):
-            return False, "Approval rejected: zero tests executed. Verification requires at least one passing test."
-
-    top_failed_count = sb_val.get("failed_count", 0)
-    top_failed_tests = sb_val.get("failed_tests") or []
-    if top_failed_count > 0 or len(top_failed_tests) > 0:
-        return False, f"Approval rejected: candidate patch reported failing test(s): {top_failed_tests or top_failed_count}."
-
-    top_coll_errors = sb_val.get("collection_errors") or []
-    if len(top_coll_errors) > 0:
-        return False, f"Approval rejected: test collection errors occurred: {top_coll_errors}."
-
-    top_passed_count = sb_val.get("passed_count")
-    if top_passed_count is not None and top_passed_count <= 0:
-        return False, "Approval rejected: zero tests passed. Verification requires at least one passing test."
-
-    top_total_count = sb_val.get("total_count")
-    if top_total_count is not None and top_total_count <= 0 and (top_passed_count is None or top_passed_count == 0):
-        return False, "Approval rejected: zero tests executed. Verification requires at least one passing test."
+        if not beh_rejection:
+            top_failed_count = sb_val.get("failed_count", 0)
+            top_failed_tests = sb_val.get("failed_tests") or []
+            if top_failed_count > 0 or len(top_failed_tests) > 0:
+                beh_rejection = f"Approval rejected: candidate patch reported failing test(s): {top_failed_tests or top_failed_count}."
+            elif len(sb_val.get("collection_errors") or []) > 0:
+                beh_rejection = f"Approval rejected: test collection errors occurred: {sb_val.get('collection_errors')}."
+            elif sb_val.get("passed_count") is not None and sb_val.get("passed_count") <= 0:
+                beh_rejection = "Approval rejected: zero tests passed. Verification requires at least one passing test."
+            elif sb_val.get("total_count") is not None and sb_val.get("total_count") <= 0 and (sb_val.get("passed_count") is None or sb_val.get("passed_count") == 0):
+                beh_rejection = "Approval rejected: zero tests executed. Verification requires at least one passing test."
 
     # ---------------------------------------------------------
     # 2. Security Policy Gate (kept separate from behavioral)
     # ---------------------------------------------------------
+    sec_rejection: Optional[str] = None
     sec_val = patch_record.get("security_validation")
     sec_policy = (
         security_policy
@@ -360,30 +397,38 @@ def evaluate_patch_approval_gate(
 
     if sec_policy == "strict":
         if record_policy == "secrets_only":
-            return False, "Approval rejected: candidate patch was only approved under 'secrets_only' policy and cannot be applied under 'strict' security policy."
-        if sec_status == "unscanned":
-            return False, "Approval rejected: security scan status is 'unscanned'. Strict security policy requires completed security scan."
-        if sec_status == "incomplete":
-            return False, f"Approval rejected: incomplete security coverage ({sec_coverage}) under strict security policy."
-        if sec_status == "failed" or sec_findings > 0:
-            return False, f"Approval rejected: candidate patch failed security scan ({sec_findings} finding(s)). Security scan failed."
-        if sec_status == "error":
-            return False, "Approval rejected: security scanner encountered an error during scan."
-        if sec_status != "passed" or not sec_approved:
-            return False, f"Approval rejected: security verification not passed under strict policy (status: {sec_status}, approved: {sec_approved})."
+            sec_rejection = "Approval rejected: candidate patch was only approved under 'secrets_only' policy and cannot be applied under 'strict' security policy."
+        elif sec_status == "unscanned":
+            sec_rejection = "Approval rejected: security scan status is 'unscanned'. Strict security policy requires completed security scan."
+        elif sec_status == "incomplete":
+            sec_rejection = f"Approval rejected: incomplete security coverage ({sec_coverage}) under strict security policy."
+        elif sec_status == "failed" or sec_findings > 0:
+            sec_rejection = f"Approval rejected: candidate patch failed security scan ({sec_findings} finding(s)). Security scan failed."
+        elif sec_status == "error":
+            sec_rejection = "Approval rejected: security scanner encountered an error during scan."
+        elif sec_status != "passed" or not sec_approved:
+            sec_rejection = f"Approval rejected: security verification not passed under strict policy (status: {sec_status}, approved: {sec_approved})."
 
     elif sec_policy == "secrets_only":
         if sec_status == "unscanned":
-            return False, "Approval rejected: security scan status is 'unscanned'. Secrets-only policy requires completed secret scan."
-        if sec_status == "failed" or sec_findings > 0:
-            return False, f"Approval rejected: candidate patch failed secrets_only security scan ({sec_findings} secret finding(s))."
-        if sec_status == "error":
-            return False, "Approval rejected: security scanner encountered an error during scan."
-        if sec_status != "passed" or not sec_approved:
-            return False, f"Approval rejected: candidate patch is not explicitly approved under secrets_only policy (status: {sec_status}, approved: {sec_approved})."
+            sec_rejection = "Approval rejected: security scan status is 'unscanned'. Secrets-only policy requires completed secret scan."
+        elif sec_status == "failed" or sec_findings > 0:
+            sec_rejection = f"Approval rejected: candidate patch failed secrets_only security scan ({sec_findings} secret finding(s))."
+        elif sec_status == "error":
+            sec_rejection = "Approval rejected: security scanner encountered an error during scan."
+        elif sec_status != "passed" or not sec_approved:
+            sec_rejection = f"Approval rejected: candidate patch is not explicitly approved under secrets_only policy (status: {sec_status}, approved: {sec_approved})."
 
     else:
-        return False, f"Approval rejected: unknown security policy '{sec_policy}'."
+        sec_rejection = f"Approval rejected: unknown security policy '{sec_policy}'."
+
+    # Return combined or individual gate rejection reasons
+    if beh_rejection and sec_rejection:
+        return False, f"{beh_rejection} Additionally, {sec_rejection}"
+    if beh_rejection:
+        return False, beh_rejection
+    if sec_rejection:
+        return False, sec_rejection
 
     return True, "Approval gate passed."
 
@@ -1021,14 +1066,24 @@ class PatchEngine:
         if not target_file or not suggested:
             return False, "Invalid patch record"
 
+        # Invariant 0: Repository Identity Verification (force=True CANNOT bypass this)
+        from core.persistence import get_repo_id, is_canonical_repo_id
+        target_repo_id = get_repo_id(self.repo_path)
+        prop_repo_id = patch_record.get("repo_id")
+        if not is_canonical_repo_id(prop_repo_id):
+            return False, f"Approval rejected: Proposal lacks canonical repository identity metadata (missing or basename-only repo_id: '{prop_repo_id}'). Cross-repository safety invariant requires canonical repository identity."
+        if prop_repo_id != target_repo_id:
+            return False, f"Security Block: Cross-repository operation rejected. Proposal belongs to repository '{prop_repo_id}', but target repository is '{target_repo_id}'."
+
         # Central Approval Gate: Always enforce behavioral and security approval.
         # Normal user/API approval MUST NOT silently bypass verification via force=True.
         effective_sec_policy = security_policy or getattr(self, "security_policy", None)
         ok_gate, gate_msg = evaluate_patch_approval_gate(
-            patch_record, security_policy=effective_sec_policy
+            patch_record, security_policy=effective_sec_policy, target_repo_id=target_repo_id
         )
         if not ok_gate:
             return False, gate_msg
+
 
         is_disk_tracked = patch_record.get("file_read_from_disk", patch_record.get("using_full_file", False))
         expected_original = None if force or not is_disk_tracked else patch_record.get("original_code")
@@ -1112,6 +1167,15 @@ class PatchEngine:
         if not record:
             return None
 
+        # Enforce Repository Identity & Isolation:
+        # Cross-repo or legacy proposals cannot be updated, approved, or rejected from another repo.
+        if self.repo_path:
+            from core.persistence import get_repo_id, is_canonical_repo_id
+            target_repo_id = get_repo_id(self.repo_path)
+            prop_repo_id = record.get("repo_id")
+            if not is_canonical_repo_id(prop_repo_id) or prop_repo_id != target_repo_id:
+                return None
+
         update_fields: Dict[str, Any] = {"status": status}
         if manual_edit:
             update_fields["suggested_patch"] = manual_edit
@@ -1160,7 +1224,8 @@ class PatchEngine:
             from backend.config import settings
             storage_dir = settings.STORAGE_DIR
         except Exception:
-            storage_dir = ".storage"
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            storage_dir = os.environ.get("STORAGE_DIR") or os.path.join(repo_root, ".storage")
 
         os.makedirs(storage_dir, exist_ok=True)
         audit_path = os.path.join(storage_dir, "patch_audit.log")

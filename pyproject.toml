@@ -61,7 +61,10 @@ py-modules = ["cli"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "rag*", "backend*"]
+include = ["core*", "rag*", "backend*", "sample_repo*"]
+
+[tool.setuptools.package-data]
+sample_repo = ["**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

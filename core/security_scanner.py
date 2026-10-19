@@ -55,6 +55,14 @@ REMEDIATION_GUIDANCE: Dict[str, Dict[str, str]] = {
         "title": "Insecure cryptographic hash function (MD5/SHA1)",
         "remediation": "MD5 and SHA-1 are cryptographically broken. Use hashlib.sha256() or hashlib.sha3_256().",
     },
+    "B104": {
+        "title": "Hardcoded bind to all network interfaces (0.0.0.0)",
+        "remediation": "Binding to 0.0.0.0 exposes the service to all external network interfaces. Bind to 127.0.0.1 or a specific trusted host interface.",
+    },
+    "B201": {
+        "title": "Flask app running in debug mode (debug=True)",
+        "remediation": "Running Flask in debug mode enables the interactive Werkzeug debugger which allows arbitrary code execution. Disable debug mode in production (debug=False).",
+    },
     # Secret Detection Rules
     "SEC101": {
         "title": "AWS Access Key ID exposed",

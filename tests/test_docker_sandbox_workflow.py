@@ -189,7 +189,7 @@ def test_disposable_repo_no_runnable_tests_reported_unverified():
         )
 
         assert result.skipped is True
-        assert result.success is True  # skipped runs return success=True in result object but skipped=True
+        assert result.success is False  # skipped=True with zero executed tests must not imply success=True
         assert result.framework == "none"
         assert "No automated test suite discovered" in (result.error_message or "")
 

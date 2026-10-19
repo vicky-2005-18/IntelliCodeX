@@ -338,10 +338,13 @@ def test_rejection_of_failed_candidate_approval():
         with open(target, "w", encoding="utf-8") as f:
             f.write(original_content)
 
+        from core.persistence import get_repo_id
+        r_id = get_repo_id(tmpdir)
         engine = PatchEngine(store=None, embedder=None, llm=None, repo_path=tmpdir)
 
         failed_patch_rec = {
             "patch_id": "test-fail-1",
+            "repo_id": r_id,
             "target_file": "app.py",
             "original_code": original_content,
             "suggested_patch": "def run(): return 'broken_candidate'\n",
@@ -367,6 +370,7 @@ def test_rejection_of_failed_candidate_approval():
         # 2. Verified patch CAN be applied
         verified_patch_rec = {
             "patch_id": "test-pass-1",
+            "repo_id": r_id,
             "target_file": "app.py",
             "original_code": original_content,
             "suggested_patch": "def run(): return 'verified_fix'\n",

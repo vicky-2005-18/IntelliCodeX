@@ -67,9 +67,11 @@ def disposable_repo():
 
 def _make_base_candidate(disposable_repo, suggested_patch=None) -> Dict[str, Any]:
     suggested = suggested_patch or "def handle(val):\n    return val.strip() if val else ''\n"
+    from core.persistence import get_repo_id
+    r_id = get_repo_id(disposable_repo["tmp_dir"]) if (disposable_repo and "tmp_dir" in disposable_repo) else "test_repo"
     return {
         "patch_id": f"patch-{uuid.uuid4().hex[:8]}",
-        "repo_id": "test_repo",
+        "repo_id": r_id,
         "target_file": disposable_repo["target_rel"],
         "original_code": disposable_repo["original_code"],
         "original_hash": disposable_repo["original_hash"],
@@ -547,8 +549,10 @@ def test_saved_proposal_approval_enforces_central_gate(disposable_repo):
 def test_api_patch_approval_enforces_central_gate(disposable_repo):
     """REST API /api/patches/apply endpoint rejects unverified candidate with 400 Bad Request."""
     cand = _make_base_candidate(disposable_repo)
+    from core.persistence import get_repo_id
+    canon_r_id = get_repo_id(disposable_repo["tmp_dir"])
     cand["owner_id"] = "test_user_id"
-    cand["repo_id"] = "test_repo_id"
+    cand["repo_id"] = canon_r_id
     cand["sandbox_validation"] = {
         "verified": False,
         "test_status": "failed",
@@ -563,7 +567,7 @@ def test_api_patch_approval_enforces_central_gate(disposable_repo):
     })
     db_manager.insert("generated_patches", cand)
     db_manager.insert("repositories", {
-        "repo_id": "test_repo_id",
+        "repo_id": canon_r_id,
         "owner_id": "test_user_id",
         "repo_path": disposable_repo["tmp_dir"],
     })
@@ -648,8 +652,10 @@ def test_zero_test_sandbox_result_invariance_and_experience_rejection(disposable
             is_admin=True,
         )
 
+        from core.persistence import get_repo_id
+        canon_r_id = get_repo_id(tmp_dir)
         record = engine.generate_and_verify_patch(
-            repo_id="zero-test-repo",
+            repo_id=canon_r_id,
             error_report="Test error on orphan module",
             target_file="orphan_module.py",
             max_iterations=1,
@@ -658,7 +664,7 @@ def test_zero_test_sandbox_result_invariance_and_experience_rejection(disposable
         # Invariant: Must not be marked verified
         assert record["status"] != "verified", f"Zero-test repair must not be marked verified: {record['status']}"
         assert record["sandbox_validation"]["verified"] is False
-        recorded_new = [e for e in exp_bank.experiences.values() if e.repo_id == "zero-test-repo"]
+        recorded_new = [e for e in exp_bank.experiences.values() if e.repo_id == canon_r_id]
         assert len(recorded_new) == 0, "Unverified candidate was incorrectly recorded in experience bank"
 
         # 3. Central Approval Gate rejects candidate

@@ -20,6 +20,7 @@ from core.persistence import (
     get_db_connection,
 )
 import sys
+import networkx as nx
 from core.lexical_index import BM25Index
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,8 @@ def ingest_repository(
     save_to_disk: bool = True,
     legacy_call_graph: bool = False,
     skip_overload_stubs: bool = True,
-    db_path: str = DEFAULT_DB_PATH,
+    db_path: str | None = None,
+    allow_empty: bool = True,
 ) -> IngestedRepository:
     """
     Ingests a repository directory with incremental re-indexing & disk caching support:
@@ -75,13 +77,34 @@ def ingest_repository(
     3. If partially changed -> Re-chunks & re-embeds changed/added files only, reusing retained FAISS vectors.
     4. If fresh index, graph format version mismatch, or force_reindex -> Performs full end-to-end ingestion.
     """
+    eff_db = db_path if db_path is not None else DEFAULT_DB_PATH
     start_t = time.perf_counter()
     if not os.path.exists(repo_path):
         raise FileNotFoundError(f"Repository path does not exist: '{repo_path}'")
 
     source_files = walk_repository(repo_path)
     if not source_files:
-        raise ValueError(f"No indexable source files found in '{repo_path}'")
+        if not allow_empty:
+            raise ValueError(f"No indexable source files found in '{repo_path}'")
+        dim = getattr(embedder, "dim", 0) or 384
+        store = FaissVectorStore(dim=dim)
+        graph = nx.DiGraph()
+        call_g = nx.DiGraph()
+        lex_idx = BM25Index([])
+        elapsed = time.perf_counter() - start_t
+        return IngestedRepository(
+            store=store,
+            graph=graph,
+            num_files=0,
+            num_chunks=0,
+            languages_found={},
+            ast_chunks_count=0,
+            files=[],
+            call_graph=call_g,
+            elapsed_seconds=round(elapsed, 3),
+            indexing_mode="fresh",
+            lexical_index=lex_idx,
+        )
 
     languages_found: Dict[str, int] = {}
     for sf in source_files:
@@ -95,9 +118,9 @@ def ingest_repository(
     expected_skip_overloads = 1 if skip_overload_stubs else 0
 
     if not force_reindex:
-        delta = detect_repository_changes(repo_path, source_files, db_path=db_path)
+        delta = detect_repository_changes(repo_path, source_files, db_path=eff_db)
         if not delta.is_fresh_index:
-            cached_data = load_index(repo_path, db_path=db_path)
+            cached_data = load_index(repo_path, db_path=eff_db)
             if cached_data is not None:
                 meta, cached_chunks, cached_store = cached_data
                 cached_backend = meta.get("backend")
@@ -234,7 +257,7 @@ def ingest_repository(
                             source_files,
                             all_chunks,
                             store,
-                            db_path=db_path,
+                            db_path=eff_db,
                             graph_version=expected_graph_version,
                             skip_overload_stubs=skip_overload_stubs,
                             embedding_dim=current_dim,
@@ -260,7 +283,27 @@ def ingest_repository(
     # Full Ingestion (Fresh or force_reindex)
     chunks = chunk_repository(source_files, skip_overload_stubs=skip_overload_stubs)
     if not chunks:
-        raise ValueError(f"No code chunks could be extracted from files in '{repo_path}'")
+        if not allow_empty:
+            raise ValueError(f"No code chunks could be extracted from files in '{repo_path}'")
+        dim = getattr(embedder, "dim", 0) or 384
+        store = FaissVectorStore(dim=dim)
+        graph = build_dependency_graph(source_files)
+        call_g = nx.DiGraph()
+        lex_idx = BM25Index([])
+        elapsed = time.perf_counter() - start_t
+        return IngestedRepository(
+            store=store,
+            graph=graph,
+            num_files=len(source_files),
+            num_chunks=0,
+            languages_found=languages_found,
+            ast_chunks_count=0,
+            files=source_files,
+            call_graph=call_g,
+            elapsed_seconds=round(elapsed, 3),
+            indexing_mode="fresh",
+            lexical_index=lex_idx,
+        )
 
     ast_chunks_count = sum(1 for c in chunks if c.kind in ("function", "class", "method", "interface", "enum", "type", "struct", "section"))
     graph = build_dependency_graph(source_files)
@@ -279,7 +322,7 @@ def ingest_repository(
             source_files,
             chunks,
             store,
-            db_path=db_path,
+            db_path=eff_db,
             graph_version=expected_graph_version,
             skip_overload_stubs=skip_overload_stubs,
             embedding_dim=current_dim,

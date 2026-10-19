@@ -9,7 +9,7 @@ import json
 import sqlite3
 import hashlib
 import time
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple, Any, Set
 from dataclasses import dataclass
 
 # Ensure repository root is on sys.path for direct script execution
@@ -21,7 +21,21 @@ from core.parser import SourceFile
 from core.chunker import CodeChunk
 from core.vectorstore import FaissVectorStore
 
-DEFAULT_DB_PATH = os.path.join(".storage", "metadata.db")
+
+def get_storage_dir() -> str:
+    """Returns the intended application storage directory (.storage), respecting STORAGE_DIR or project root."""
+    env_dir = os.environ.get("STORAGE_DIR")
+    if env_dir:
+        return os.path.abspath(env_dir)
+    return os.path.join(repo_root, ".storage")
+
+
+def get_default_db_path() -> str:
+    """Returns the default SQLite database path (.storage/metadata.db)."""
+    return os.path.join(get_storage_dir(), "metadata.db")
+
+
+DEFAULT_DB_PATH = get_default_db_path()
 GRAPH_FORMAT_VERSION: int = 3
 
 
@@ -30,12 +44,13 @@ def compute_file_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
 
 
-def get_db_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
+def get_db_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     """Creates database directory if missing and returns a connected SQLite instance."""
-    db_dir = os.path.dirname(os.path.abspath(db_path))
+    eff_db_path = db_path if db_path is not None else get_default_db_path()
+    db_dir = os.path.dirname(os.path.abspath(eff_db_path))
     os.makedirs(db_dir, exist_ok=True)
     
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(eff_db_path)
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     return conn
@@ -110,6 +125,35 @@ def init_schema(conn: sqlite3.Connection):
                 unregistered_at REAL NOT NULL
             );
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id TEXT NOT NULL,
+                turn_index INTEGER NOT NULL,
+                query TEXT NOT NULL,
+                response TEXT NOT NULL,
+                files_json TEXT,
+                timestamp REAL NOT NULL
+            );
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS activity_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id TEXT NOT NULL,
+                activity_type TEXT NOT NULL,
+                target_file TEXT NOT NULL,
+                proposal_id TEXT NOT NULL,
+                verification_outcome TEXT NOT NULL,
+                save_outcome TEXT NOT NULL,
+                summary TEXT,
+                details_json TEXT,
+                timestamp REAL NOT NULL
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_repo ON conversation_turns(repo_id, id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_act_repo ON activity_records(repo_id, id);")
 
 
 
@@ -248,6 +292,27 @@ def get_repo_id(repo_path: str) -> str:
     return f"{clean_base}_{path_hash}"
 
 
+def is_canonical_repo_id(repo_id: Optional[str]) -> bool:
+    """
+    Checks whether a repository ID is a canonical, path-hashed identity
+    (i.e., formatted as '<base>_<8-char-hex-hash>'), rejecting missing,
+    empty, or legacy basename-only identifiers.
+    """
+    if not repo_id or not isinstance(repo_id, str):
+        return False
+    parts = repo_id.rsplit("_", 1)
+    if len(parts) != 2:
+        return False
+    base, hash_part = parts
+    if not base or len(hash_part) != 8:
+        return False
+    try:
+        int(hash_part, 16)
+        return True
+    except ValueError:
+        return False
+
+
 def unregister_repo(repo_path: str, db_path: str = DEFAULT_DB_PATH) -> bool:
     """Removes a repository's registration from the persistent registry without deleting source files, Git history, or cache."""
     abs_p = os.path.abspath(repo_path)
@@ -336,13 +401,14 @@ def is_repo_unregistered(repo_path: str, db_path: str = DEFAULT_DB_PATH) -> bool
 
 
 
-def get_faiss_index_path(repo_id: str, storage_dir: str = ".storage") -> str:
+def get_faiss_index_path(repo_id: str, storage_dir: Optional[str] = None) -> str:
     """Returns absolute file path for a repository's FAISS index (.storage/<repo_id>.faiss)."""
-    os.makedirs(storage_dir, exist_ok=True)
-    return os.path.abspath(os.path.join(storage_dir, f"{repo_id}.faiss"))
+    target_dir = storage_dir if (storage_dir is not None and storage_dir != ".storage") else get_storage_dir()
+    os.makedirs(target_dir, exist_ok=True)
+    return os.path.abspath(os.path.join(target_dir, f"{repo_id}.faiss"))
 
 
-def save_faiss_index(store: FaissVectorStore, repo_id: str, storage_dir: str = ".storage") -> str:
+def save_faiss_index(store: FaissVectorStore, repo_id: str, storage_dir: Optional[str] = None) -> str:
     """Serializes the FAISS vector index to disk (.storage/<repo_id>.faiss)."""
     faiss_path = get_faiss_index_path(repo_id, storage_dir)
     return store.save(faiss_path)
@@ -351,7 +417,7 @@ def save_faiss_index(store: FaissVectorStore, repo_id: str, storage_dir: str = "
 def load_faiss_index(
     repo_id: str,
     chunks: Optional[List[CodeChunk]] = None,
-    storage_dir: str = ".storage"
+    storage_dir: Optional[str] = None
 ) -> Optional[FaissVectorStore]:
     """Deserializes a FAISS vector index from disk if it exists."""
     faiss_path = get_faiss_index_path(repo_id, storage_dir)
@@ -370,8 +436,8 @@ def save_index(
     source_files: List[SourceFile],
     chunks: List[CodeChunk],
     store: FaissVectorStore,
-    db_path: str = DEFAULT_DB_PATH,
-    storage_dir: str = ".storage",
+    db_path: Optional[str] = None,
+    storage_dir: Optional[str] = None,
     graph_version: int = GRAPH_FORMAT_VERSION,
     skip_overload_stubs: bool = True,
     embedding_dim: Optional[int] = None,
@@ -384,9 +450,13 @@ def save_index(
     3. Validates invariants: unique chunk IDs, SQLite rows == FAISS ntotal == in-memory chunks.
     Returns (db_path, faiss_path).
     """
+    eff_db = db_path if db_path is not None else get_default_db_path()
+    eff_storage = storage_dir if (storage_dir is not None and storage_dir != ".storage") else (
+        os.path.dirname(os.path.abspath(eff_db)) if eff_db else get_storage_dir()
+    )
     repo_id = get_repo_id(repo_path)
     eff_dim = embedding_dim if embedding_dim is not None else (store.dim if (store and hasattr(store, "dim")) else 0)
-    conn = get_db_connection(db_path)
+    conn = get_db_connection(eff_db)
     try:
         save_repo_metadata(
             conn,
@@ -404,7 +474,7 @@ def save_index(
     finally:
         conn.close()
 
-    faiss_path = save_faiss_index(store, repo_id, storage_dir)
+    faiss_path = save_faiss_index(store, repo_id, eff_storage)
 
     faiss_ntotal = store.index.ntotal if (store and hasattr(store, "index")) else len(chunks)
     in_mem_count = len(chunks)
@@ -418,13 +488,13 @@ def save_index(
         )
         raise ValueError(msg)
 
-    return db_path, faiss_path
+    return eff_db, faiss_path
 
 
 def load_index(
     repo_path: str,
-    db_path: str = DEFAULT_DB_PATH,
-    storage_dir: str = ".storage"
+    db_path: Optional[str] = None,
+    storage_dir: Optional[str] = None
 ) -> Optional[Tuple[Dict[str, Any], List[CodeChunk], FaissVectorStore]]:
     """
     Unified high-level load function:
@@ -432,11 +502,15 @@ def load_index(
     2. Loads corresponding FAISS vector store from disk.
     Returns (meta_dict, chunks_list, faiss_store) if found, else None.
     """
+    eff_db = db_path if db_path is not None else get_default_db_path()
+    eff_storage = storage_dir if (storage_dir is not None and storage_dir != ".storage") else (
+        os.path.dirname(os.path.abspath(eff_db)) if eff_db else get_storage_dir()
+    )
     repo_id = get_repo_id(repo_path)
-    if not os.path.exists(db_path):
+    if not os.path.exists(eff_db):
         return None
 
-    conn = get_db_connection(db_path)
+    conn = get_db_connection(eff_db)
     try:
         meta = load_repo_metadata(conn, repo_id)
         if not meta:
@@ -445,7 +519,7 @@ def load_index(
     finally:
         conn.close()
 
-    store = load_faiss_index(repo_id, chunks=chunks, storage_dir=storage_dir)
+    store = load_faiss_index(repo_id, chunks=chunks, storage_dir=eff_storage)
     if not store:
         return None
 
@@ -471,14 +545,15 @@ class RepositoryDelta:
 def detect_repository_changes(
     repo_path: str,
     current_source_files: List[SourceFile],
-    db_path: str = DEFAULT_DB_PATH
+    db_path: Optional[str] = None
 ) -> RepositoryDelta:
     """
     Compares current repository source files against stored SHA-256 hashes in SQLite.
     Categorizes files into added, modified, deleted, and unchanged.
     """
+    eff_db = db_path if db_path is not None else get_default_db_path()
     repo_id = get_repo_id(repo_path)
-    if not os.path.exists(db_path):
+    if not os.path.exists(eff_db):
         return RepositoryDelta(
             added=current_source_files,
             modified=[],
@@ -487,7 +562,7 @@ def detect_repository_changes(
             is_fresh_index=True
         )
 
-    conn = get_db_connection(db_path)
+    conn = get_db_connection(eff_db)
     try:
         stored_hashes = load_stored_file_hashes(conn, repo_id)
     finally:
@@ -539,8 +614,196 @@ def delete_files_from_db(conn: sqlite3.Connection, repo_id: str, rel_paths: List
         conn.execute(f"DELETE FROM files WHERE repo_id = ? AND rel_path IN ({placeholders})", [repo_id] + rel_paths)
 
 
+def save_repo_turn(
+    repo_id: str,
+    query: str,
+    response: str,
+    files: Optional[List[str]] = None,
+    max_stored_turns: int = 50,
+    db_path: Optional[str] = None,
+):
+    """Persists a Q&A conversation turn scoped to a canonical repo_id."""
+    conn = get_db_connection(db_path)
+    now = time.time()
+    files_json = json.dumps(files or [])
+    try:
+        with conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM conversation_turns WHERE repo_id = ?", (repo_id,))
+            cnt = cursor.fetchone()[0]
+            turn_idx = cnt + 1
+            conn.execute(
+                """
+                INSERT INTO conversation_turns (repo_id, turn_index, query, response, files_json, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?);
+                """,
+                (repo_id, turn_idx, query, response, files_json, now),
+            )
+            # Prune oldest turns if exceeding max_stored_turns
+            if cnt + 1 > max_stored_turns:
+                excess = (cnt + 1) - max_stored_turns
+                conn.execute(
+                    """
+                    DELETE FROM conversation_turns WHERE id IN (
+                        SELECT id FROM conversation_turns WHERE repo_id = ? ORDER BY id ASC LIMIT ?
+                    );
+                    """,
+                    (repo_id, excess),
+                )
+    finally:
+        conn.close()
+
+    # Mirror to db_manager for compatibility
+    try:
+        from backend.database.mongo import db_manager
+        db_manager.insert("chat_history", {
+            "repo_id": repo_id,
+            "question": query,
+            "answer": response,
+            "files": files or [],
+            "timestamp": now,
+        })
+    except Exception:
+        pass
+
+
+def save_repo_activity(
+    repo_id: str,
+    activity: Dict[str, Any],
+    max_stored_activities: int = 100,
+    db_path: Optional[str] = None,
+):
+    """Persists a creation or repair activity record scoped to a canonical repo_id."""
+    conn = get_db_connection(db_path)
+    now = activity.get("timestamp") or time.time()
+    act_type = activity.get("activity_type", "activity")
+    tgt = activity.get("target_file", "unknown")
+    pid = activity.get("proposal_id", "unknown")
+    v_out = activity.get("verification_outcome", "unknown")
+    s_out = activity.get("save_outcome", "unknown")
+    summary = activity.get("summary", "")
+    details_json = json.dumps(activity.get("details") or {})
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO activity_records (repo_id, activity_type, target_file, proposal_id, verification_outcome, save_outcome, summary, details_json, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (repo_id, act_type, tgt, pid, v_out, s_out, summary, details_json, now),
+            )
+            cursor = conn.execute("SELECT COUNT(*) FROM activity_records WHERE repo_id = ?", (repo_id,))
+            cnt = cursor.fetchone()[0]
+            if cnt > max_stored_activities:
+                excess = cnt - max_stored_activities
+                conn.execute(
+                    """
+                    DELETE FROM activity_records WHERE id IN (
+                        SELECT id FROM activity_records WHERE repo_id = ? ORDER BY id ASC LIMIT ?
+                    );
+                    """,
+                    (repo_id, excess),
+                )
+    finally:
+        conn.close()
+
+    try:
+        from backend.database.mongo import db_manager
+        db_manager.insert("activity_history", {
+            "repo_id": repo_id,
+            "activity_type": act_type,
+            "target_file": tgt,
+            "proposal_id": pid,
+            "verification_outcome": v_out,
+            "save_outcome": s_out,
+            "summary": summary,
+            "timestamp": now,
+        })
+    except Exception:
+        pass
+
+
+def load_repo_conversation(
+    repo_id: str,
+    db_path: Optional[str] = None,
+    max_turns: int = 10,
+) -> Tuple[List[Tuple[str, str]], List[Set[str]], List[Dict[str, Any]]]:
+    """Loads persisted turns and activity records for a canonical repo_id."""
+    conn = get_db_connection(db_path)
+    turns: List[Tuple[str, str]] = []
+    turn_files: List[Set[str]] = []
+    activities: List[Dict[str, Any]] = []
+    try:
+        cursor = conn.execute(
+            """
+            SELECT query, response, files_json FROM (
+                SELECT id, query, response, files_json FROM conversation_turns
+                WHERE repo_id = ? ORDER BY id DESC LIMIT ?
+            ) ORDER BY id ASC;
+            """,
+            (repo_id, max_turns),
+        )
+        for row in cursor.fetchall():
+            turns.append((row["query"], row["response"]))
+            files_list = json.loads(row["files_json"]) if row["files_json"] else []
+            turn_files.append(set(files_list))
+
+        cur_act = conn.execute(
+            """
+            SELECT activity_type, target_file, proposal_id, verification_outcome, save_outcome, summary, details_json, timestamp
+            FROM activity_records WHERE repo_id = ? ORDER BY id ASC;
+            """,
+            (repo_id,),
+        )
+        for row in cur_act.fetchall():
+            details = json.loads(row["details_json"]) if row["details_json"] else {}
+            activities.append({
+                "activity_type": row["activity_type"],
+                "target_file": row["target_file"],
+                "proposal_id": row["proposal_id"],
+                "verification_outcome": row["verification_outcome"],
+                "save_outcome": row["save_outcome"],
+                "summary": row["summary"],
+                "details": details,
+                "timestamp": row["timestamp"],
+            })
+    finally:
+        conn.close()
+
+    return turns, turn_files, activities
+
+
+def clear_repo_conversation(
+    repo_id: str,
+    clear_activities: bool = False,
+    db_path: Optional[str] = None,
+):
+    """Clears conversation turns (and optionally activity records) for a single canonical repo_id."""
+    conn = get_db_connection(db_path)
+    try:
+        with conn:
+            conn.execute("DELETE FROM conversation_turns WHERE repo_id = ?", (repo_id,))
+            if clear_activities:
+                conn.execute("DELETE FROM activity_records WHERE repo_id = ?", (repo_id,))
+    finally:
+        conn.close()
+
+
+def load_conversation_memory(
+    repo_id: str,
+    memory_obj: Any,
+    db_path: Optional[str] = None,
+):
+    """Populates an in-memory ConversationMemory instance from persistent storage."""
+    max_turns = getattr(memory_obj, "max_turns", 10)
+    turns, turn_files, activities = load_repo_conversation(repo_id, db_path=db_path, max_turns=max_turns)
+    memory_obj.repo_id = repo_id
+    memory_obj.turns = turns
+    memory_obj.turn_files = turn_files
+    memory_obj.activities = activities
+
 
 if __name__ == "__main__":
+
     db_test_path = os.path.join(".storage", "test_metadata.db")
     if os.path.exists(db_test_path):
         os.remove(db_test_path)

@@ -1442,7 +1442,7 @@ class SandboxRunner:
 
         if not framework and not test_command and not extra_files:
             return SandboxTestResult(
-                success=True,
+                success=False,
                 exit_code=0,
                 stdout="",
                 stderr="",
@@ -2853,15 +2853,22 @@ class SandboxRunner:
                 pass
 
             target_base = os.path.splitext(os.path.basename(target_file))[0]
+            safe_slug = re.sub(r'[^a-zA-Z0-9_]+', '_', target_base).strip('_')
             target_dir = os.path.dirname(target_file)
             cand_test_paths = [
                 os.path.join(sandbox_dir, target_file) if ("test" in os.path.basename(target_file).lower()) else None,
                 os.path.join(sandbox_dir, f"test_{target_base}.py"),
+                os.path.join(sandbox_dir, f"test_{safe_slug}.py") if safe_slug != target_base else None,
                 os.path.join(sandbox_dir, f"{target_base}_test.py"),
+                os.path.join(sandbox_dir, f"{safe_slug}_test.py") if safe_slug != target_base else None,
                 os.path.join(sandbox_dir, "tests", f"test_{target_base}.py"),
+                os.path.join(sandbox_dir, "tests", f"test_{safe_slug}.py") if safe_slug != target_base else None,
                 os.path.join(sandbox_dir, target_dir, f"test_{target_base}.py") if target_dir else None,
+                os.path.join(sandbox_dir, target_dir, f"test_{safe_slug}.py") if target_dir and safe_slug != target_base else None,
                 os.path.join(sandbox_dir, target_dir, "tests", f"test_{target_base}.py") if target_dir else None,
+                os.path.join(sandbox_dir, target_dir, "tests", f"test_{safe_slug}.py") if target_dir and safe_slug != target_base else None,
                 os.path.join(sandbox_dir, target_dir, f"{target_base}_test.py") if target_dir else None,
+                os.path.join(sandbox_dir, target_dir, f"{safe_slug}_test.py") if target_dir and safe_slug != target_base else None,
             ]
             for cand in cand_test_paths:
                 if cand and os.path.isfile(cand):
@@ -2900,15 +2907,15 @@ class SandboxRunner:
         traceback_lines = []
 
         # 1. Parse collection errors (e.g. ERROR collecting test_schedule.py, ImportError, etc.)
-        for line in stdout.splitlines():
+        for line in (stdout + "\n" + stderr).splitlines():
             line_str = line.strip()
             if "ERROR collecting " in line_str:
-                m = re.search(r"ERROR collecting\s+([^\s_]+)", line_str)
+                m = re.search(r"ERROR collecting\s+(.+?)(?:\s+[_=\-!*~#]+|[_=\-!*~#]{3,})?\s*$", line_str)
                 if m:
                     target = m.group(1).strip()
                     if target and not any(target in ce for ce in collection_errors):
                         collection_errors.append(f"Error collecting {target}")
-            elif line_str.startswith("E   ") and any(err in line_str for err in ("ImportError:", "SyntaxError:", "ModuleNotFoundError:", "NameError:")):
+            elif line_str.startswith("E   ") and any(err in line_str for err in ("ImportError:", "SyntaxError:", "ModuleNotFoundError:", "NameError:", "IndentationError:", "AttributeError:")):
                 err_detail = line_str[4:].strip()
                 if collection_errors and not any(err_detail in ce for ce in collection_errors):
                     collection_errors[-1] = f"{collection_errors[-1]}: {err_detail}"

@@ -195,7 +195,12 @@ class RepairExperienceBank:
     """
 
     def __init__(self, storage_path: Optional[str] = None):
-        self.storage_path = storage_path or os.path.join(".storage", "repair_experiences.json")
+        if storage_path:
+            self.storage_path = storage_path
+        else:
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            storage_dir = os.environ.get("STORAGE_DIR") or os.path.join(repo_root, ".storage")
+            self.storage_path = os.path.join(storage_dir, "repair_experiences.json")
         self.experiences: Dict[str, RepairExperience] = {}
         self._lock = threading.Lock()
         self._load()

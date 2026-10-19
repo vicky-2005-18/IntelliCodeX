@@ -153,8 +153,10 @@ def test_apply_patch_records_into_experience_bank():
             experience_bank=bank,
         )
 
+        from core.persistence import get_repo_id
         patch_rec = {
             "patch_id": "test-patch-123",
+            "repo_id": get_repo_id(tmp_dir),
             "target_file": target_rel,
             "original_code": "def div(a, b):\n    return a / b\n",
             "suggested_patch": "def div(a, b):\n    return a / b if b != 0 else 0.0\n",
@@ -179,7 +181,7 @@ def test_apply_patch_records_into_experience_bank():
         # Verify experience was recorded
         stats = bank.get_stats()
         assert stats["total_successful_repairs"] > 4
-        shots = bank.retrieve_few_shots(error_type="ZeroDivisionError")
+        shots = bank.retrieve_few_shots(error_type="ZeroDivisionError", repo_id=get_repo_id(tmp_dir))
         assert any("if b != 0" in s.fixed_code for s in shots)
 
 

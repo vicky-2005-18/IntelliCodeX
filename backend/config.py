@@ -76,6 +76,11 @@ def get_jwt_secret(storage_dir: str) -> str:
     return secret
 
 
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+default_storage = os.path.join(repo_root, ".storage")
+default_repos = os.path.join(repo_root, ".repos")
+
+
 class Settings(BaseModel):
     PROJECT_NAME: str = "IntelliCodeX"
     VERSION: str = "1.0.0"
@@ -84,7 +89,8 @@ class Settings(BaseModel):
     # Database & Persistence Settings
     MONGO_URI: str = os.getenv("MONGO_URI", "mongodb://localhost:27017")
     MONGO_DB_NAME: str = os.getenv("MONGO_DB_NAME", "intellicodex_db")
-    STORAGE_DIR: str = os.getenv("STORAGE_DIR", os.path.abspath(".storage"))
+    STORAGE_DIR: str = os.getenv("STORAGE_DIR", default_storage)
+    REPOS_DIR: str = os.getenv("REPOS_DIR", default_repos)
 
     # Auth & JWT Settings
     ALGORITHM: str = "HS256"
