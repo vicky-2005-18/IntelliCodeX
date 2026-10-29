@@ -4969,6 +4969,52 @@ def main():
             execute_explain_command(engine, result, query, active_file_filter=active_file_filter)
             continue
 
+        # Dynamic Spectrum Fault Localization: locate: <error_report> [--cov <path>] or sbfl: <coverage.json>
+        if query.lower().startswith("locate:") or query.lower().startswith("locate ") or query.lower().startswith("sbfl:") or query.lower().startswith("sbfl "):
+            from core.bug_localizer import BugLocalizer, DynamicCoverageMatrix
+            raw_input = query.split(":", 1)[1].strip() if ":" in query else query.split(maxsplit=1)[1].strip()
+            cov_path = None
+            err_text = raw_input
+            if "--cov" in raw_input:
+                parts = raw_input.split("--cov", 1)
+                err_text = parts[0].strip()
+                cov_path = parts[1].strip().strip('"').strip("'")
+
+            localizer = BugLocalizer(result.store, embedder, graph=result.graph)
+            if cov_path and os.path.exists(cov_path):
+                print(f"[*] Ingesting dynamic coverage matrix from: {cov_path}")
+                localizer.load_pytest_cov_report(cov_path)
+            elif query.lower().startswith("sbfl") and os.path.exists(err_text):
+                print(f"[*] Ingesting dynamic coverage matrix from: {err_text}")
+                matrix = DynamicCoverageMatrix.from_pytest_cov_json(err_text)
+                localizer.load_coverage_matrix(matrix)
+                err_text = "Dynamic spectrum fault localization from test coverage matrix"
+
+            loc_report = localizer.localize(err_text or "General fault localization", top_k=5)
+            print("\n" + "=" * 70)
+            print("         SPECTRUM-BASED BUG LOCALIZATION REPORT (OCHIAI SBFL)")
+            print("=" * 70)
+            print(f"Diagnosed Error: {loc_report.get('error_type', 'Fault')}: {loc_report.get('error_message', '')}\n")
+            cands = loc_report.get("candidates", [])
+            for idx, c in enumerate(cands, 1):
+                f_p = c.get("file_path", "")
+                ln = c.get("line_number", "")
+                och = c.get("ochiai_score", 0.0)
+                conf = c.get("confidence_score", 0.0)
+                print(f"[{idx}] {f_p}:{ln} (Ochiai: {och:.3f}, Confidence: {conf:.1%})")
+                print(f"    Explanation: {c.get('explanation', '')}")
+                if c.get("spectrum_analysis"):
+                    sa = c["spectrum_analysis"]
+                    print(f"    Metrics: ef={sa.get('ef')} | ep={sa.get('ep')} | nf={sa.get('nf')} | np={sa.get('np')} | Tarantula={sa.get('tarantula')} | DStar={sa.get('dstar')}")
+            rec = loc_report.get("recommended_focus")
+            if rec:
+                print(f"\n[*] Recommended Focus: {rec.get('file_path')}:{rec.get('line_number')}")
+            root_c = loc_report.get("root_cause_explanation")
+            if root_c:
+                print(f"\n[*] Root Cause Diagnosis:\n{root_c}")
+            print("=" * 70 + "\n")
+            continue
+
 
         # Explicit Code Creation Workflow: create: <task> Target: <file>
         if query.lower().startswith("create:") or query.lower().startswith("create "):

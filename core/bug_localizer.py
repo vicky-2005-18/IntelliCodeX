@@ -49,7 +49,7 @@ class CoverageRecord:
 def calculate_ochiai_spectrum(
     coverage_records: List[CoverageRecord],
     total_failing: int,
-    total_passing: int
+    total_passing: int,
 ) -> Dict[str, float]:
     """Calculates Ochiai suspiciousness scores across all covered code elements."""
     scores = {}
@@ -58,10 +58,280 @@ def calculate_ochiai_spectrum(
             ef=record.failing_exec_count,
             ep=record.passing_exec_count,
             nf=total_failing,
-            np=total_passing
+            np=total_passing,
         )
         scores[record.element_id] = score
     return scores
+
+
+def calculate_tarantula_score(ef: int, ep: int, nf: int, np: int) -> float:
+    """
+    Calculates Tarantula suspiciousness score for a code element.
+    Formula: Tarantula = (ef / nf) / ((ef / nf) + (ep / np))
+    """
+    if nf <= 0 or ef <= 0:
+        return 0.0
+    failed_ratio = float(ef) / float(nf)
+    passed_ratio = float(ep) / float(np) if np > 0 else 0.0
+    denom = failed_ratio + passed_ratio
+    if denom <= 0.0:
+        return 0.0
+    return round(failed_ratio / denom, 4)
+
+
+def calculate_dstar_score(ef: int, ep: int, nf: int, np: int, star_power: int = 2) -> float:
+    """
+    Calculates DStar suspiciousness score for a code element.
+    Formula: DStar = (ef ** star_power) / (ep + (nf - ef))
+    """
+    if nf <= 0 or ef <= 0:
+        return 0.0
+    denom = float(ep) + float(nf - ef)
+    if denom <= 0.0:
+        return round(float(ef ** star_power), 4)
+    return round(float(ef ** star_power) / denom, 4)
+
+
+@dataclass
+class ElementCoverageMetrics:
+    """Complete SBFL metrics for a single code element (file, function, or line)."""
+    element_id: str
+    ef: int = 0  # failing executions covering element
+    ep: int = 0  # passing executions covering element
+    nf: int = 0  # total failing executions
+    np: int = 0  # total passing executions
+    ochiai: float = 0.0
+    tarantula: float = 0.0
+    dstar: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "element_id": self.element_id,
+            "ef": self.ef,
+            "ep": self.ep,
+            "nf": self.nf,
+            "np": self.np,
+            "ochiai": self.ochiai,
+            "tarantula": self.tarantula,
+            "dstar": self.dstar,
+        }
+
+
+class DynamicCoverageMatrix:
+    """
+    Dynamic Execution Spectrum Matrix for Spectrum-Based Fault Localization (SBFL).
+    Ingests live test execution data and coverage reports, tracks exact execution
+    profiles (ef, ep, nf, np) across statements/lines, functions, and files, and
+    generates Ochiai, Tarantula, and DStar ranking spectrums.
+    """
+
+    def __init__(self):
+        # test_id -> {"passed": bool, "covered": Set[str]}
+        self.tests: Dict[str, Dict[str, Any]] = {}
+        self.element_failing_counts: Dict[str, int] = {}
+        self.element_passing_counts: Dict[str, int] = {}
+        self.total_failing: int = 0
+        self.total_passing: int = 0
+        self._dirty: bool = True
+        self._metrics_cache: Dict[str, ElementCoverageMetrics] = {}
+
+    def record_test(self, test_id: str, passed: bool, covered_elements: Any) -> None:
+        """Records the execution of a test and its set of covered code elements."""
+        self._dirty = True
+        elements = set(covered_elements)
+        self.tests[test_id] = {
+            "passed": passed,
+            "covered": elements,
+        }
+        self._recount()
+
+    def record_test_lines(self, test_id: str, passed: bool, file_path: str, lines: Any) -> None:
+        """Records executed line numbers for a test in a file."""
+        norm_path = file_path.replace("\\", "/").lstrip("./")
+        covered = {norm_path}
+        for ln in lines:
+            covered.add(f"{norm_path}:{ln}")
+        self.record_test(test_id, passed, covered)
+
+    def _recount(self) -> None:
+        """Recomputes global counts from recorded tests."""
+        self.element_failing_counts.clear()
+        self.element_passing_counts.clear()
+        self.total_failing = 0
+        self.total_passing = 0
+
+        for t_info in self.tests.values():
+            if t_info["passed"]:
+                self.total_passing += 1
+                for el in t_info["covered"]:
+                    self.element_passing_counts[el] = self.element_passing_counts.get(el, 0) + 1
+            else:
+                self.total_failing += 1
+                for el in t_info["covered"]:
+                    self.element_failing_counts[el] = self.element_failing_counts.get(el, 0) + 1
+
+    def compute_metrics(self) -> Dict[str, ElementCoverageMetrics]:
+        """Calculates Ochiai, Tarantula, and DStar metrics for every covered element."""
+        if not self._dirty and self._metrics_cache:
+            return self._metrics_cache
+
+        all_elements = set(self.element_failing_counts.keys()) | set(self.element_passing_counts.keys())
+        metrics: Dict[str, ElementCoverageMetrics] = {}
+
+        for el in all_elements:
+            ef = self.element_failing_counts.get(el, 0)
+            ep = self.element_passing_counts.get(el, 0)
+            och = calculate_ochiai_score(ef, ep, self.total_failing, self.total_passing)
+            tar = calculate_tarantula_score(ef, ep, self.total_failing, self.total_passing)
+            dst = calculate_dstar_score(ef, ep, self.total_failing, self.total_passing)
+
+            metrics[el] = ElementCoverageMetrics(
+                element_id=el,
+                ef=ef,
+                ep=ep,
+                nf=self.total_failing,
+                np=self.total_passing,
+                ochiai=och,
+                tarantula=tar,
+                dstar=dst,
+            )
+
+        self._metrics_cache = metrics
+        self._dirty = False
+        return metrics
+
+    def get_metrics(self, element_id: str) -> Optional[ElementCoverageMetrics]:
+        """Retrieves metrics for a specific code element."""
+        metrics = self.compute_metrics()
+        return metrics.get(element_id)
+
+    def to_spectrum_scores(self, metric: str = "ochiai", min_score: float = 0.0) -> Dict[str, float]:
+        """Exports dictionary mapping element_id to score for the chosen metric."""
+        metrics = self.compute_metrics()
+        scores: Dict[str, float] = {}
+        for el, m in metrics.items():
+            val = getattr(m, metric.lower(), m.ochiai)
+            if val >= min_score:
+                scores[el] = val
+        return scores
+
+    def to_coverage_records(self) -> List[CoverageRecord]:
+        """Exports elements as CoverageRecord dataclasses."""
+        all_elements = set(self.element_failing_counts.keys()) | set(self.element_passing_counts.keys())
+        return [
+            CoverageRecord(
+                element_id=el,
+                failing_exec_count=self.element_failing_counts.get(el, 0),
+                passing_exec_count=self.element_passing_counts.get(el, 0),
+            )
+            for el in sorted(all_elements)
+        ]
+
+    def get_top_suspicious_elements(self, metric: str = "ochiai", top_k: int = 20) -> List[Dict[str, Any]]:
+        """Returns top-k most suspicious code elements sorted by metric."""
+        metrics = self.compute_metrics()
+        attr = metric.lower()
+        sorted_m = sorted(
+            metrics.values(),
+            key=lambda m: getattr(m, attr, m.ochiai),
+            reverse=True,
+        )
+        return [m.to_dict() for m in sorted_m[:top_k]]
+
+    def summary(self) -> Dict[str, Any]:
+        """Summarizes test counts and coverage statistics."""
+        metrics = self.compute_metrics()
+        top_ochiai = self.get_top_suspicious_elements("ochiai", top_k=5)
+        return {
+            "total_tests": len(self.tests),
+            "total_failing": self.total_failing,
+            "total_passing": self.total_passing,
+            "total_covered_elements": len(metrics),
+            "top_suspicious_elements": top_ochiai,
+        }
+
+    @classmethod
+    def from_test_runs(cls, runs: List[Dict[str, Any]]) -> "DynamicCoverageMatrix":
+        """
+        Creates a DynamicCoverageMatrix from a list of test run dictionaries.
+        Each run dict: {"test_id": str, "passed": bool, "covered_elements": List[str]}
+        """
+        matrix = cls()
+        for idx, run in enumerate(runs):
+            t_id = run.get("test_id", f"test_{idx}")
+            passed = bool(run.get("passed", False))
+            covered = run.get("covered_elements") or run.get("covered") or []
+            matrix.record_test(t_id, passed, covered)
+        return matrix
+
+    @classmethod
+    def from_pytest_cov_json(
+        cls,
+        report_data: Any,
+        test_results: Optional[Dict[str, bool]] = None,
+        failing_files: Optional[List[str]] = None,
+    ) -> "DynamicCoverageMatrix":
+        """
+        Parses standard pytest-cov / coverage.py JSON report data.
+        report_data can be a JSON file path, a JSON string, or a parsed dictionary.
+        Correlates covered lines with passing and failing test outcomes.
+        """
+        import json
+        if isinstance(report_data, (str, os.PathLike)) and os.path.exists(str(report_data)):
+            with open(str(report_data), "r", encoding="utf-8") as f:
+                data = json.load(f)
+        elif isinstance(report_data, str):
+            data = json.loads(report_data)
+        elif isinstance(report_data, dict):
+            data = report_data
+        else:
+            raise ValueError(f"Unsupported report_data type: {type(report_data)}")
+
+        matrix = cls()
+        files_data = data.get("files", {})
+        norm_failing_files = {f.replace("\\", "/").lstrip("./") for f in (failing_files or [])}
+
+        # If test_results provided: e.g. {"test_auth": False, "test_order": True}
+        if test_results:
+            for t_id, passed in test_results.items():
+                all_covered: Set[str] = set()
+                for f_path, f_info in files_data.items():
+                    norm_f = f_path.replace("\\", "/").lstrip("./")
+                    # Attribute files matching failure pattern or all covered files
+                    exec_lines = f_info.get("executed_lines", [])
+                    if not passed and norm_failing_files and norm_f not in norm_failing_files:
+                        continue
+                    all_covered.add(norm_f)
+                    for ln in exec_lines:
+                        all_covered.add(f"{norm_f}:{ln}")
+                matrix.record_test(t_id, passed, all_covered)
+        else:
+            # Synthetic distribution based on failing_files
+            for f_path, f_info in files_data.items():
+                norm_f = f_path.replace("\\", "/").lstrip("./")
+                exec_lines = f_info.get("executed_lines", [])
+                covered = {norm_f} | {f"{norm_f}:{ln}" for ln in exec_lines}
+
+                is_fail = norm_f in norm_failing_files if norm_failing_files else False
+                if is_fail:
+                    matrix.record_test(f"fail_trace_{norm_f}", False, covered)
+                else:
+                    matrix.record_test(f"pass_trace_{norm_f}", True, covered)
+
+        return matrix
+
+    @classmethod
+    def from_matrix_dict(cls, matrix_dict: Dict[str, Dict[str, Any]]) -> "DynamicCoverageMatrix":
+        """
+        Creates a matrix from a dictionary mapping test_id to details:
+        {"test_1": {"passed": False, "covered": ["auth.py:12", "auth.py::login"]}}
+        """
+        matrix = cls()
+        for t_id, info in matrix_dict.items():
+            passed = bool(info.get("passed", False))
+            covered = info.get("covered", [])
+            matrix.record_test(t_id, passed, covered)
+        return matrix
 
 
 @dataclass
@@ -217,6 +487,7 @@ class BugLocalizer:
         graph: Optional[nx.DiGraph] = None,
         spectrum_scores: Optional[Dict[str, float]] = None,
         coverage_records: Optional[List[CoverageRecord]] = None,
+        coverage_matrix: Optional[DynamicCoverageMatrix] = None,
         total_failing: int = 0,
         total_passing: int = 0,
     ):
@@ -224,10 +495,35 @@ class BugLocalizer:
         self.embedder = embedder
         self.graph = graph
         self.spectrum_scores = dict(spectrum_scores) if spectrum_scores else {}
+        self.coverage_matrix = coverage_matrix
+
+        if coverage_matrix:
+            self.spectrum_scores.update(coverage_matrix.to_spectrum_scores(metric="ochiai"))
+
         if coverage_records and total_failing > 0:
             calculated = calculate_ochiai_spectrum(coverage_records, total_failing, total_passing)
             self.spectrum_scores.update(calculated)
         self.parser = StackTraceParser()
+
+    def load_coverage_matrix(self, matrix: DynamicCoverageMatrix) -> None:
+        """Loads a DynamicCoverageMatrix and incorporates its Ochiai spectrum scores."""
+        self.coverage_matrix = matrix
+        self.spectrum_scores.update(matrix.to_spectrum_scores(metric="ochiai"))
+
+    def load_pytest_cov_report(
+        self,
+        report_data: Any,
+        test_results: Optional[Dict[str, bool]] = None,
+        failing_files: Optional[List[str]] = None,
+    ) -> DynamicCoverageMatrix:
+        """Parses a pytest-cov report and loads it as the active coverage matrix."""
+        matrix = DynamicCoverageMatrix.from_pytest_cov_json(
+            report_data=report_data,
+            test_results=test_results,
+            failing_files=failing_files,
+        )
+        self.load_coverage_matrix(matrix)
+        return matrix
 
     def localize(self, error_report: str, top_k: int = 5) -> Dict[str, Any]:
         trace = self.parser.parse(error_report)
@@ -310,24 +606,54 @@ class BugLocalizer:
             graph_boost = min(0.15, graph_ctx["in_degree"] * self.GRAPH_CENTRALITY_WEIGHT)
             confidence = min(0.99, max(0.1, confidence + graph_boost))
 
-            # Apply Ochiai spectrum score boost if available (checks symbol-level, chunk_id, and file-level keys)
+            norm_file = chunk.file_path.replace("\\", "/").lstrip("./")
+            base_file = os.path.basename(chunk.file_path)
+
+            # Check line-level spectrum scores if lines are covered
+            best_line = matched_frame.line_number if matched_frame else chunk.start_line
+            best_line_score = 0.0
+            if chunk.start_line and chunk.end_line and chunk.end_line >= chunk.start_line:
+                for ln in range(chunk.start_line, chunk.end_line + 1):
+                    ln_score = max(
+                        self.spectrum_scores.get(f"{norm_file}:{ln}", 0.0),
+                        self.spectrum_scores.get(f"{base_file}:{ln}", 0.0),
+                    )
+                    if ln_score > best_line_score:
+                        best_line_score = ln_score
+                        best_line = ln
+
+            # Apply Ochiai spectrum score boost if available
             ochiai_score = max(
+                best_line_score,
                 self.spectrum_scores.get(chunk.chunk_id, 0.0),
-                self.spectrum_scores.get(f"{chunk.file_path}::{chunk.name}", 0.0),
-                self.spectrum_scores.get(chunk.file_path, 0.0),
-                self.spectrum_scores.get(f"{os.path.basename(chunk.file_path)}::{chunk.name}", 0.0),
-                self.spectrum_scores.get(os.path.basename(chunk.file_path), 0.0),
+                self.spectrum_scores.get(f"{norm_file}::{chunk.name}", 0.0),
+                self.spectrum_scores.get(norm_file, 0.0),
+                self.spectrum_scores.get(f"{base_file}::{chunk.name}", 0.0),
+                self.spectrum_scores.get(base_file, 0.0),
                 self.spectrum_scores.get(chunk.name, 0.0),
             )
             if ochiai_score > 0:
                 confidence = min(0.99, confidence + (ochiai_score * 0.2))
 
-            line_num = matched_frame.line_number if matched_frame else chunk.start_line
+            line_num = best_line if best_line_score > 0 else (matched_frame.line_number if matched_frame else chunk.start_line)
             func_name = matched_frame.function if matched_frame else chunk.name
+
+            # Retrieve rich spectrum breakdown if coverage matrix is loaded
+            spectrum_metrics = None
+            if self.coverage_matrix:
+                m = (
+                    self.coverage_matrix.get_metrics(f"{norm_file}:{line_num}")
+                    or self.coverage_matrix.get_metrics(f"{norm_file}::{func_name}")
+                    or self.coverage_matrix.get_metrics(norm_file)
+                )
+                if m:
+                    spectrum_metrics = m.to_dict()
 
             explanation = self._candidate_explanation(
                 trace, chunk, matched_frame, graph_ctx, base_score, ochiai_score
             )
+            if best_line_score > 0 and not matched_frame:
+                explanation = f"Dynamic line {line_num} executed in failing tests (Ochiai={best_line_score:.2f}). " + explanation
 
             candidates.append({
                 "file_path": chunk.file_path,
@@ -339,6 +665,7 @@ class BugLocalizer:
                 "explanation": explanation,
                 "snippet": chunk.code,
                 "kind": chunk.kind,
+                "spectrum_analysis": spectrum_metrics,
                 "graph_context": {
                     "callers": graph_ctx["callers"],
                     "callees": graph_ctx["callees"],

@@ -260,3 +260,33 @@ def test_generate_ide_config_snippets():
     assert "mcpServers" in claude_cfg
     assert "intellicodex" in claude_cfg["mcpServers"]
     assert claude_cfg["mcpServers"]["intellicodex"]["args"][:3] == ["-m", "core.mcp_server", "--repo"]
+
+
+def test_mcp_tool_locate_bug_with_coverage(mcp_server):
+    """Verifies calling locate_bug with coverage_json dynamically incorporates SBFL metrics."""
+    cov_json_str = json.dumps({
+        "files": {
+            "pkg/auth.py": {
+                "executed_lines": [10, 11, 12],
+                "missing_lines": [],
+                "summary": {"covered_lines": 3}
+            }
+        }
+    })
+    request = {
+        "jsonrpc": "2.0",
+        "id": 12,
+        "method": "tools/call",
+        "params": {
+            "name": "locate_bug",
+            "arguments": {
+                "error_message": "Session token verification failure",
+                "coverage_json": cov_json_str
+            }
+        }
+    }
+    resp = mcp_server.dispatch(request)
+    assert resp is not None
+    assert resp["id"] == 12
+    text = resp["result"]["content"][0]["text"]
+    assert "Fault Localization Report (Ochiai SBFL)" in text

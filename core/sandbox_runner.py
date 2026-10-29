@@ -2687,6 +2687,67 @@ class SandboxRunner:
             extra_files=extra_files,
         )
 
+    def run_tests_with_coverage(
+        self,
+        repo_path: str,
+        test_command: Optional[Union[str, List[str]]] = None,
+        timeout: Optional[Union[int, float]] = None,
+    ) -> Tuple[SandboxTestResult, Optional[Any]]:
+        """
+        Executes test suite with coverage collection inside isolated sandbox.
+        Parses resulting coverage JSON into a DynamicCoverageMatrix.
+        """
+        from core.bug_localizer import DynamicCoverageMatrix
+        import json
+
+        cmd = test_command
+        if not cmd:
+            cmd = "pytest --cov=. --cov-report=json:.coverage_report.json"
+        elif isinstance(cmd, list) and "pytest" in cmd[0]:
+            cmd = list(cmd) + ["--cov=.", "--cov-report=json:.coverage_report.json"]
+        elif isinstance(cmd, str) and "pytest" in cmd:
+            cmd = cmd + " --cov=. --cov-report=json:.coverage_report.json"
+
+        first_py = None
+        for root_dir, _, f_names in os.walk(repo_path):
+            for fn in f_names:
+                if fn.endswith(".py"):
+                    first_py = os.path.relpath(os.path.join(root_dir, fn), repo_path)
+                    break
+            if first_py:
+                break
+        target = first_py or "conftest.py"
+
+        res = self.run_baseline_tests(
+            repo_path=repo_path,
+            target_file=target,
+            test_command=cmd,
+            timeout=timeout,
+        )
+
+        matrix = None
+        cov_file = os.path.join(repo_path, ".coverage_report.json")
+        if os.path.isfile(cov_file):
+            try:
+                test_results = {}
+                for t in res.passed_tests:
+                    test_results[t] = True
+                for t in res.failed_tests:
+                    test_results[t] = False
+                matrix = DynamicCoverageMatrix.from_pytest_cov_json(
+                    cov_file,
+                    test_results=test_results,
+                )
+            except Exception as e:
+                logger.warning("Failed to parse coverage JSON report: %s", e)
+            finally:
+                try:
+                    os.remove(cov_file)
+                except Exception:
+                    pass
+
+        return res, matrix
+
     def _read_stream_bounded(self, stream, max_bytes: int) -> Tuple[str, bool]:
         """
         Reads from a stream in chunks, capping at max_bytes.

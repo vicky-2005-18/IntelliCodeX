@@ -10,5 +10,9 @@ from core.bug_localizer import (
     calculate_ochiai_score,
     calculate_ochiai_spectrum,
     CoverageRecord,
+    DynamicCoverageMatrix,
+    ElementCoverageMetrics,
+    calculate_tarantula_score,
+    calculate_dstar_score,
 )
 

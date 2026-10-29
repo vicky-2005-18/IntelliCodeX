@@ -99,6 +99,10 @@ AVAILABLE_TOOLS = [
                 "stack_trace": {
                     "type": "string",
                     "description": "Optional multi-line stack trace or error log."
+                },
+                "coverage_json": {
+                    "type": "string",
+                    "description": "Optional pytest-cov JSON report string or path for dynamic SBFL scoring."
                 }
             },
             "required": ["error_message"]
@@ -323,8 +327,14 @@ class IntelliCodeXMcpServer:
             return "\n".join(output)
         return str(res)
 
-    def tool_locate_bug(self, error_message: str, stack_trace: str = "") -> str:
+    def tool_locate_bug(self, error_message: str, stack_trace: str = "", coverage_json: str = "") -> str:
         self.initialize_engines()
+        if coverage_json:
+            try:
+                self.bug_localizer.load_pytest_cov_report(coverage_json)
+            except Exception as e:
+                logger.warning(f"Failed to load dynamic coverage in MCP locate_bug: {e}")
+
         error_report = f"{error_message}\n{stack_trace}".strip()
         report = self.bug_localizer.localize(error_report=error_report)
         lines = [f"## Fault Localization Report (Ochiai SBFL)\n"]
@@ -336,9 +346,14 @@ class IntelliCodeXMcpServer:
             for cand in candidates[:5]:
                 f_path = cand.get("file_path", "unknown")
                 score = cand.get("confidence_score", 0.0)
-                sym = cand.get("symbol") or cand.get("name", "")
+                och = cand.get("ochiai_score", 0.0)
+                ln = cand.get("line_number", "")
+                sym = cand.get("function") or cand.get("symbol") or cand.get("name", "")
                 sym_str = f" in `{sym}`" if sym else ""
-                lines.append(f"- `{f_path}`{sym_str} (Suspiciousness: {score:.3f})")
+                lines.append(f"- `{f_path}:{ln}`{sym_str} (Suspiciousness: {score:.3f}, Ochiai: {och:.3f})")
+                if cand.get("spectrum_analysis"):
+                    sa = cand["spectrum_analysis"]
+                    lines.append(f"  * SBFL Metrics: ef={sa.get('ef')}, ep={sa.get('ep')}, Tarantula={sa.get('tarantula')}, DStar={sa.get('dstar')}")
             lines.append("")
 
         root_cause = report.get("root_cause_explanation", "")
@@ -347,7 +362,7 @@ class IntelliCodeXMcpServer:
 
         rec = report.get("recommended_focus")
         if rec:
-            lines.append(f"**Recommended Focus**: `{rec.get('file_path')}`")
+            lines.append(f"**Recommended Focus**: `{rec.get('file_path')}:{rec.get('line_number', '')}`")
 
         return "\n".join(lines)
 
