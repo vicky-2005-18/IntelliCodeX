@@ -148,7 +148,7 @@ def test_ci_pipeline_failing_fixture(disposable_python_repo):
         "--target-file", "pkg/calc.py",
         "--patch", buggy_patch,
         "--runtime", "python",
-        "--sandbox", "docker",
+        "--sandbox", "local",
         "--output-json", report_file,
     ]
 
@@ -185,7 +185,7 @@ def test_ci_pipeline_zero_tests_fixture():
             "--target-file", "dummy.py",
             "--patch", patch_text,
             "--runtime", "python",
-            "--sandbox", "docker",
+            "--sandbox", "local",
             "--output-json", report_file,
         ]
 

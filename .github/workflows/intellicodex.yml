@@ -36,7 +36,7 @@ jobs:
 
       - name: Run IntelliCodeX Headless Analysis & Security Scan
         run: |
-          python cli.py . --backend tfidf --ci --output-json ci-analysis-report-py${{ matrix.python-version }}.json
+          python cli.py . --backend tfidf --ci --security-policy secrets_only --output-json ci-analysis-report-py${{ matrix.python-version }}.json
 
       - name: Run Deterministic Unit Tests
         run: |
