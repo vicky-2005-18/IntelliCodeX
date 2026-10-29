@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-21 00:50:14",
+  "timestamp": "2026-10-29 13:30:20",
   "quick_mode": true,
   "models": {
     "codellama:7b": {
@@ -149,7 +149,7 @@
     },
     "qwen2.5-coder:7b": {
       "parameter_tier": "7B Parameter Tier",
-      "overall_score": 90.0,
+      "overall_score": 100.0,
       "track1": {
         "total_cases": 7,
         "tp": 4,
@@ -160,8 +160,8 @@
         "recall": 1.0,
         "f1": 1.0,
         "false_alarm_rate": 0.0,
-        "avg_latency_s": 9.589,
-        "avg_tokens_per_sec": 8.22,
+        "avg_latency_s": 8.359,
+        "avg_tokens_per_sec": 9.13,
         "details": [
           {
             "name": "calculate_total",
@@ -169,7 +169,7 @@
             "expected": "Buggy",
             "verdict": "Buggy",
             "status": "TP",
-            "latency": 20.342
+            "latency": 12.701
           },
           {
             "name": "bug2_undefined_variable",
@@ -177,7 +177,7 @@
             "expected": "Buggy",
             "verdict": "Buggy",
             "status": "TP",
-            "latency": 5.062
+            "latency": 4.742
           },
           {
             "name": "bug3_zero_division",
@@ -185,7 +185,7 @@
             "expected": "Buggy",
             "verdict": "Buggy",
             "status": "TP",
-            "latency": 5.981
+            "latency": 5.561
           },
           {
             "name": "bug4_off_by_one",
@@ -193,7 +193,7 @@
             "expected": "Buggy",
             "verdict": "Buggy",
             "status": "TP",
-            "latency": 7.772
+            "latency": 6.97
           },
           {
             "name": "clean1_sum",
@@ -201,7 +201,7 @@
             "expected": "Clean",
             "verdict": "Clean",
             "status": "TN",
-            "latency": 7.246
+            "latency": 9.412
           },
           {
             "name": "clean2_is_even",
@@ -209,7 +209,7 @@
             "expected": "Clean",
             "verdict": "Clean",
             "status": "TN",
-            "latency": 10.225
+            "latency": 9.461
           },
           {
             "name": "clean3_format_name",
@@ -217,7 +217,7 @@
             "expected": "Clean",
             "verdict": "Clean",
             "status": "TN",
-            "latency": 10.498
+            "latency": 9.669
           }
         ]
       },
@@ -230,8 +230,8 @@
         "closed_loop_passed_count": 2,
         "closed_loop_pass_rate": 1.0,
         "test_pass_rate": 1.0,
-        "avg_latency_s": 21.645,
-        "avg_tokens_per_sec": 8.24,
+        "avg_latency_s": 19.715,
+        "avg_tokens_per_sec": 8.97,
         "details": [
           {
             "case_id": "bench_keyerror_nested_prefs",
@@ -240,8 +240,8 @@
             "first_attempt_passed": false,
             "closed_loop_passed": true,
             "attempts_used": 2,
-            "latency": 35.313,
-            "tokens_per_sec": 7.75
+            "latency": 32.033,
+            "tokens_per_sec": 8.78
           },
           {
             "case_id": "bench_indexerror_first_token",
@@ -250,18 +250,18 @@
             "first_attempt_passed": true,
             "closed_loop_passed": true,
             "attempts_used": 1,
-            "latency": 7.977,
-            "tokens_per_sec": 8.19
+            "latency": 7.396,
+            "tokens_per_sec": 9.01
           }
         ]
       },
       "track3": {
         "total_questions": 2,
-        "grounded_count": 1,
-        "grounding_rate": 0.5,
-        "avg_tokens_per_sec": 7.72,
-        "avg_latency_s": 85.51,
-        "avg_completion_tokens": 642.5,
+        "grounded_count": 2,
+        "grounding_rate": 1.0,
+        "avg_tokens_per_sec": 8.86,
+        "avg_latency_s": 88.246,
+        "avg_completion_tokens": 760.5,
         "details": [
           {
             "id": "qa_flask_request_context",
@@ -269,23 +269,25 @@
               "requestcontext",
               "ctx.py",
               "push",
-              "pop",
-              "_request_ctx_stack"
+              "pop"
             ],
             "is_grounded": true,
-            "eval_count": 724,
-            "latency": 94.415,
-            "tokens_per_sec": 7.88
+            "eval_count": 681,
+            "latency": 79.93,
+            "tokens_per_sec": 8.79
           },
           {
             "id": "qa_flask_url_rules",
             "matched_keywords": [
-              "rule"
+              "rule",
+              "map",
+              "endpoint",
+              "url_map"
             ],
-            "is_grounded": false,
-            "eval_count": 561,
-            "latency": 76.604,
-            "tokens_per_sec": 7.57
+            "is_grounded": true,
+            "eval_count": 840,
+            "latency": 96.562,
+            "tokens_per_sec": 8.92
           }
         ]
       }
@@ -448,8 +450,8 @@
         "recall": 1.0,
         "f1": 1.0,
         "false_alarm_rate": 0.0,
-        "avg_latency_s": 3.64,
-        "avg_tokens_per_sec": 68.82,
+        "avg_latency_s": 5.561,
+        "avg_tokens_per_sec": 74.88,
         "details": [
           {
             "name": "calculate_total",
@@ -457,7 +459,7 @@
             "expected": "Buggy",
             "verdict": "Buggy",
             "status": "TP",
-            "latency": 7.441
+            "latency": 21.537
           },
           {
             "name": "bug2_undefined_variable",
@@ -465,7 +467,7 @@
             "expected": "Buggy",
             "verdict": "Buggy",
             "status": "TP",
-            "latency": 2.892
+            "latency": 2.806
           },
           {
             "name": "bug3_zero_division",
@@ -473,7 +475,7 @@
             "expected": "Buggy",
             "verdict": "Buggy",
             "status": "TP",
-            "latency": 2.812
+            "latency": 2.739
           },
           {
             "name": "bug4_off_by_one",
@@ -481,7 +483,7 @@
             "expected": "Buggy",
             "verdict": "Buggy",
             "status": "TP",
-            "latency": 2.797
+            "latency": 2.696
           },
           {
             "name": "clean1_sum",
@@ -489,7 +491,7 @@
             "expected": "Clean",
             "verdict": "Clean",
             "status": "TN",
-            "latency": 3.139
+            "latency": 3.06
           },
           {
             "name": "clean2_is_even",
@@ -497,7 +499,7 @@
             "expected": "Clean",
             "verdict": "Clean",
             "status": "TN",
-            "latency": 3.264
+            "latency": 3.152
           },
           {
             "name": "clean3_format_name",
@@ -505,7 +507,7 @@
             "expected": "Clean",
             "verdict": "Clean",
             "status": "TN",
-            "latency": 3.138
+            "latency": 2.934
           }
         ]
       },
@@ -518,8 +520,8 @@
         "closed_loop_passed_count": 2,
         "closed_loop_pass_rate": 1.0,
         "test_pass_rate": 1.0,
-        "avg_latency_s": 7.271,
-        "avg_tokens_per_sec": 73.25,
+        "avg_latency_s": 7.161,
+        "avg_tokens_per_sec": 75.26,
         "details": [
           {
             "case_id": "bench_keyerror_nested_prefs",
@@ -528,8 +530,8 @@
             "first_attempt_passed": false,
             "closed_loop_passed": true,
             "attempts_used": 2,
-            "latency": 7.737,
-            "tokens_per_sec": 73.49
+            "latency": 7.629,
+            "tokens_per_sec": 74.99
           },
           {
             "case_id": "bench_indexerror_first_token",
@@ -538,8 +540,8 @@
             "first_attempt_passed": false,
             "closed_loop_passed": true,
             "attempts_used": 2,
-            "latency": 6.804,
-            "tokens_per_sec": 72.75
+            "latency": 6.693,
+            "tokens_per_sec": 75.59
           }
         ]
       },
@@ -547,9 +549,9 @@
         "total_questions": 2,
         "grounded_count": 2,
         "grounding_rate": 1.0,
-        "avg_tokens_per_sec": 72.43,
-        "avg_latency_s": 9.163,
-        "avg_completion_tokens": 512.5,
+        "avg_tokens_per_sec": 75.02,
+        "avg_latency_s": 8.517,
+        "avg_completion_tokens": 482.0,
         "details": [
           {
             "id": "qa_flask_request_context",
@@ -557,13 +559,12 @@
               "requestcontext",
               "ctx.py",
               "push",
-              "pop",
-              "_request_ctx_stack"
+              "pop"
             ],
             "is_grounded": true,
-            "eval_count": 571,
-            "latency": 9.926,
-            "tokens_per_sec": 72.91
+            "eval_count": 502,
+            "latency": 8.775,
+            "tokens_per_sec": 75.09
           },
           {
             "id": "qa_flask_url_rules",
@@ -575,9 +576,9 @@
               "url_map"
             ],
             "is_grounded": true,
-            "eval_count": 454,
-            "latency": 8.401,
-            "tokens_per_sec": 71.95
+            "eval_count": 462,
+            "latency": 8.258,
+            "tokens_per_sec": 74.95
           }
         ]
       }

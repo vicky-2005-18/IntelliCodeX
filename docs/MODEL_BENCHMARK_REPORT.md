@@ -1,6 +1,6 @@
 # IntelliCodeX — Multi-Model Empirical Benchmark Report
 
-> **Generated**: 2026-10-21 00:52:57
+> **Generated**: 2026-10-29 13:36:08
 > **Benchmark Target**: Empirical comparison across local coding models under realistic hardware constraints (RTX 3050 4GB VRAM / Local Ollama).
 
 ---
@@ -9,10 +9,10 @@
 
 | Rank | Model | Parameters | Bug F1 | Repair Pass Rate | Q&A Grounding | Generation Speed | Avg Latency | Overall Score |
 | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| 🥇 **#1** | `deepseek-coder:6.7b` | 7B Parameter Tier | 100.00% | 100.00% | 100.00% | 8.1 tok/s | 12.61s | **100.00 / 100** |
-| 🥈 **#2** | `qwen2.5-coder:3b` | 3B Parameter Tier | 100.00% | 100.00% | 100.00% | 72.4 tok/s | 3.64s | **100.00 / 100** |
-| 🥉 **#3** | `codellama:7b` | 7B Parameter Tier | 80.00% | 100.00% | 100.00% | 7.0 tok/s | 12.37s | **93.00 / 100** |
-| **#4** | `qwen2.5-coder:7b` | 7B Parameter Tier | 100.00% | 100.00% | 50.00% | 7.7 tok/s | 9.59s | **90.00 / 100** |
+| 🥇 **#1** | `qwen2.5-coder:7b` | 7B Parameter Tier | 100.00% | 100.00% | 100.00% | 8.9 tok/s | 8.36s | **100.00 / 100** |
+| 🥈 **#2** | `deepseek-coder:6.7b` | 7B Parameter Tier | 100.00% | 100.00% | 100.00% | 8.1 tok/s | 12.61s | **100.00 / 100** |
+| 🥉 **#3** | `qwen2.5-coder:3b` | 3B Parameter Tier | 100.00% | 100.00% | 100.00% | 75.0 tok/s | 5.56s | **100.00 / 100** |
+| **#4** | `codellama:7b` | 7B Parameter Tier | 80.00% | 100.00% | 100.00% | 7.0 tok/s | 12.37s | **93.00 / 100** |
 | **#5** | `starcoder2:3b` | 3B Parameter Tier | 0.00% | 50.00% | 100.00% | 84.1 tok/s | 5.51s | **42.50 / 100** |
 
 ---
@@ -23,10 +23,10 @@ Measures model sensitivity to intentional planted defects (syntax errors, undefi
 
 | Model | TP | FP (False Alarms) | FN (Missed) | TN | Precision | Recall | F1 Score | Detection Latency |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `qwen2.5-coder:7b` | 4 | 0 | 0 | 3 | 100.00% | 100.00% | **100.00%** | 8.36s |
 | `deepseek-coder:6.7b` | 4 | 0 | 0 | 3 | 100.00% | 100.00% | **100.00%** | 12.61s |
-| `qwen2.5-coder:3b` | 4 | 0 | 0 | 3 | 100.00% | 100.00% | **100.00%** | 3.64s |
+| `qwen2.5-coder:3b` | 4 | 0 | 0 | 3 | 100.00% | 100.00% | **100.00%** | 5.56s |
 | `codellama:7b` | 4 | 2 | 0 | 1 | 66.67% | 100.00% | **80.00%** | 12.37s |
-| `qwen2.5-coder:7b` | 4 | 0 | 0 | 3 | 100.00% | 100.00% | **100.00%** | 9.59s |
 | `starcoder2:3b` | 0 | 0 | 4 | 3 | 0.00% | 0.00% | **0.00%** | 5.51s |
 
 ---
@@ -37,10 +37,10 @@ Evaluates patch synthesis directly against unit test suites in temporary isolate
 
 | Model | Cases Evaluated | Valid AST Syntax | Single-Shot Pass Rate | Closed-Loop Pass Rate | Tests Passed | Repair Latency |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `qwen2.5-coder:7b` | 2 | 100.00% | 50.00% | **100.00%** | 2 / 2 | 19.71s |
 | `deepseek-coder:6.7b` | 2 | 100.00% | 50.00% | **100.00%** | 2 / 2 | 39.19s |
-| `qwen2.5-coder:3b` | 2 | 100.00% | 0.00% | **100.00%** | 2 / 2 | 7.27s |
+| `qwen2.5-coder:3b` | 2 | 100.00% | 0.00% | **100.00%** | 2 / 2 | 7.16s |
 | `codellama:7b` | 2 | 100.00% | 100.00% | **100.00%** | 2 / 2 | 23.86s |
-| `qwen2.5-coder:7b` | 2 | 100.00% | 50.00% | **100.00%** | 2 / 2 | 21.64s |
 | `starcoder2:3b` | 2 | 100.00% | 50.00% | **50.00%** | 1 / 2 | 6.21s |
 
 ---
@@ -51,10 +51,10 @@ Evaluates multi-file context understanding and architectural comprehension (Flas
 
 | Model | Total Qs | Grounded Citations | Grounding Rate | Generation Speed | Output Tokens |
 | :--- | :---: | :---: | :---: | :---: | :---: |
+| `qwen2.5-coder:7b` | 2 | 2 | **100.00%** | 8.9 tok/s | 760.5 |
 | `deepseek-coder:6.7b` | 2 | 2 | **100.00%** | 8.1 tok/s | 533.5 |
-| `qwen2.5-coder:3b` | 2 | 2 | **100.00%** | 72.4 tok/s | 512.5 |
+| `qwen2.5-coder:3b` | 2 | 2 | **100.00%** | 75.0 tok/s | 482.0 |
 | `codellama:7b` | 2 | 2 | **100.00%** | 7.0 tok/s | 535.5 |
-| `qwen2.5-coder:7b` | 2 | 1 | **50.00%** | 7.7 tok/s | 642.5 |
 | `starcoder2:3b` | 2 | 2 | **100.00%** | 84.1 tok/s | 595.5 |
 
 ---
