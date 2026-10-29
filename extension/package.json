@@ -1,0 +1,162 @@
+{
+  "name": "intellicodex-vscode",
+  "displayName": "IntelliCodeX — AI Repository Intelligence & Autonomous Code Repair",
+  "description": "AI-powered repository intelligence, Tree-sitter AST navigation, automated bug fixing, static security scanning, and architectural cycle optimization directly in VS Code and Cursor.",
+  "version": "1.0.0",
+  "publisher": "intellicodex",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Testing",
+    "Education"
+  ],
+  "keywords": [
+    "ai",
+    "code repair",
+    "ast",
+    "mcp",
+    "security",
+    "codebase search",
+    "bug localizer"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:intellicodex.sidebarView"
+  ],
+  "icon": "media/icon.svg",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "intellicodex-sidebar",
+          "title": "IntelliCodeX",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "intellicodex-sidebar": [
+        {
+          "type": "webview",
+          "id": "intellicodex.sidebarView",
+          "name": "IntelliCodeX Assistant"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "intellicodex.ask",
+        "title": "IntelliCodeX: Ask Question About Codebase",
+        "category": "IntelliCodeX"
+      },
+      {
+        "command": "intellicodex.explain",
+        "title": "IntelliCodeX: Explain Selected Code / Symbol",
+        "category": "IntelliCodeX"
+      },
+      {
+        "command": "intellicodex.fix",
+        "title": "IntelliCodeX: Autonomous Bug Fix on Selected Symbol",
+        "category": "IntelliCodeX"
+      },
+      {
+        "command": "intellicodex.scanSecurity",
+        "title": "IntelliCodeX: Scan Active File for Vulnerabilities & Secrets",
+        "category": "IntelliCodeX"
+      },
+      {
+        "command": "intellicodex.auditArchitecture",
+        "title": "IntelliCodeX: Audit Workspace Dependency Cycles & Coupling",
+        "category": "IntelliCodeX"
+      },
+      {
+        "command": "intellicodex.getCallHierarchy",
+        "title": "IntelliCodeX: Inspect Callers & Callees for Symbol",
+        "category": "IntelliCodeX"
+      },
+      {
+        "command": "intellicodex.openTerminal",
+        "title": "IntelliCodeX: Launch Interactive CLI Terminal Session",
+        "category": "IntelliCodeX"
+      },
+      {
+        "command": "intellicodex.restartServer",
+        "title": "IntelliCodeX: Restart MCP Server Process",
+        "category": "IntelliCodeX"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "intellicodex.explain",
+          "when": "editorHasSelection",
+          "group": "intellicodex@1"
+        },
+        {
+          "command": "intellicodex.fix",
+          "when": "editorTextFocus",
+          "group": "intellicodex@2"
+        },
+        {
+          "command": "intellicodex.getCallHierarchy",
+          "when": "editorHasSelection",
+          "group": "intellicodex@3"
+        },
+        {
+          "command": "intellicodex.scanSecurity",
+          "when": "editorTextFocus",
+          "group": "intellicodex@4"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "intellicodex.scanSecurity",
+          "group": "intellicodex@1"
+        },
+        {
+          "command": "intellicodex.auditArchitecture",
+          "group": "intellicodex@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "IntelliCodeX",
+      "properties": {
+        "intellicodex.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to Python executable with IntelliCodeX installed."
+        },
+        "intellicodex.backend": {
+          "type": "string",
+          "enum": [
+            "tfidf",
+            "ollama"
+          ],
+          "default": "tfidf",
+          "description": "Embedding and LLM backend: 'tfidf' (offline fallback) or 'ollama' (local neural)."
+        },
+        "intellicodex.model": {
+          "type": "string",
+          "default": "qwen2.5-coder:3b",
+          "description": "Local Ollama LLM model name (e.g. qwen2.5-coder:3b, qwen2.5-coder:7b)."
+        },
+        "intellicodex.autoStartServer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically spawn the background IntelliCodeX MCP stdio server on workspace activation."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node test/mcp_integration_test.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0"
+  }
+}
