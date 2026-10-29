@@ -1,0 +1,40 @@
+FROM intellicodex-sandbox:latest
+
+USER root
+
+# Install headful Java 21 JRE, Xvfb virtual framebuffer, Openbox window manager,
+# x11vnc server, noVNC web client, websockify, x11-utils, and xdotool for automation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openjdk-21-jre \
+    xvfb \
+    openbox \
+    x11vnc \
+    novnc \
+    websockify \
+    xdotool \
+    scrot \
+    procps \
+    fonts-dejavu-core \
+    libfontconfig1 \
+    libxrender1 \
+    libxtst6 \
+    libxi6 \
+    x11-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fix noVNC web root path (Debian places noVNC files at /usr/share/novnc)
+RUN if [ -f /usr/share/novnc/vnc.html ] && [ ! -f /usr/share/novnc/index.html ]; then \
+        ln -s /usr/share/novnc/vnc.html /usr/share/novnc/index.html; \
+    fi
+
+RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+
+# Create start script for Xvfb, Openbox, x11vnc, noVNC, and the target Java GUI application
+COPY scripts/start_gui_preview.sh /usr/local/bin/start_gui_preview.sh
+RUN chmod +x /usr/local/bin/start_gui_preview.sh
+
+USER sandbox
+WORKDIR /work
+EXPOSE 6080
+
+ENTRYPOINT ["/usr/local/bin/start_gui_preview.sh"]

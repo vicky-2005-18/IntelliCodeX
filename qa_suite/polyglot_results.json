@@ -1,0 +1,50 @@
+[
+  {
+    "lang": "java",
+    "task": "task1",
+    "orig_hash": "3f8a6190a4e3edaa7b3be2174403cc33774a323d1ffa9673c1bb134e35362f37",
+    "after_hash": "8c68f1fab4c3ce847129f9abafe0c6cf5cfd273fca7f4ce75442407b137f7d9d",
+    "cancellation_preserved": true,
+    "approval_applied": true,
+    "independent_exit_code": 0,
+    "independent_success": true,
+    "explanation_captured": true,
+    "diagnosis_captured": true
+  },
+  {
+    "lang": "java",
+    "task": "task2",
+    "orig_hash": "43b6552f79ac4776dbc339bd2bf02b894618a577800928be4f62dfbc3bfc4766",
+    "after_hash": "6ec4b25f3f1c9a54d1215444c1539c2be52c3dc1a41592bd2f4a91348f41e579",
+    "cancellation_preserved": true,
+    "approval_applied": true,
+    "independent_exit_code": 0,
+    "independent_success": true,
+    "explanation_captured": true,
+    "diagnosis_captured": true
+  },
+  {
+    "lang": "go",
+    "task": "task1",
+    "orig_hash": "ed49b45491dbfded54c3ff908cc881bfb674322ca04efff4516ef12ca05537f0",
+    "after_hash": "2a9de185d791deab55b1398e3daa9ea3b4795d35a337a3cf9693cf1aad7c6696",
+    "cancellation_preserved": true,
+    "approval_applied": true,
+    "independent_exit_code": 0,
+    "independent_success": true,
+    "explanation_captured": true,
+    "diagnosis_captured": true
+  },
+  {
+    "lang": "go",
+    "task": "task2",
+    "orig_hash": "b83e846c0ccfff2411b0f75baa224b4486a3e59a6787b08c0b7e07d730d40b4e",
+    "after_hash": "85a79d3eab3e08f50c425514c6c5881ca242248b66852e6a8e5686e103bb063b",
+    "cancellation_preserved": true,
+    "approval_applied": true,
+    "independent_exit_code": 0,
+    "independent_success": true,
+    "explanation_captured": true,
+    "diagnosis_captured": true
+  }
+]

@@ -177,7 +177,7 @@ class SandboxRunner:
         self,
         default_timeout: Optional[Union[int, float]] = None,
         sandbox_mode: str = "local",
-        docker_image: str = "python:3.11-slim",
+        docker_image: Optional[str] = None,
         allow_local_sandbox: bool = True,
         is_admin: bool = False,
     ):
@@ -188,7 +188,7 @@ class SandboxRunner:
             self.default_timeout = DEFAULT_TIMEOUT
             self._explicit_default_timeout = False
         self.sandbox_mode = sandbox_mode
-        self.docker_image = docker_image
+        self.docker_image = docker_image or os.environ.get("SANDBOX_DOCKER_IMAGE") or "intellicodex-sandbox:latest"
         self.allow_local_sandbox = allow_local_sandbox
         self.is_admin = is_admin
         self.last_container_name: Optional[str] = None
@@ -441,7 +441,7 @@ class SandboxRunner:
                 "--cpus", "1",
                 "--pids-limit", "256",
                 "--read-only",
-                "--tmpfs", "/tmp",
+                "--tmpfs", "/tmp:exec",
                 "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges",
                 "--user", "1000:1000",
@@ -2292,7 +2292,6 @@ class SandboxRunner:
                         "import os, subprocess, sys\n"
                         "os.makedirs('/tmp/gotmp', exist_ok=True)\n"
                         "os.makedirs('/tmp/go-cache', exist_ok=True)\n"
-                        "os.makedirs('/work/.bin', exist_ok=True)\n"
                         "try:\n"
                         "    packages = subprocess.check_output(['go', 'list', './...'], text=True, stderr=subprocess.PIPE).strip().splitlines()\n"
                         "except subprocess.CalledProcessError as e:\n"
@@ -2300,28 +2299,13 @@ class SandboxRunner:
                         "    sys.exit(e.returncode)\n"
                         "overall_exit = 0\n"
                         "for pkg in packages:\n"
-                        "    bin_name = pkg.replace('/', '_').replace('.', '_') + '.test'\n"
-                        "    bin_path = f'/work/.bin/{bin_name}'\n"
-                        "    c = subprocess.run(['go', 'test', '-c', '-o', bin_path, pkg], capture_output=True, text=True)\n"
-                        "    if c.returncode != 0:\n"
-                        "        if '[no test files]' in c.stdout or '[no test files]' in c.stderr or 'no Go files' in c.stderr:\n"
-                        "            print(f'{{\"Action\":\"output\",\"Package\":\"{pkg}\",\"Output\":\"?   \\\\t{pkg}\\\\t[no test files]\\\\n\"}}')\n"
-                        "            print(f'{{\"Action\":\"skip\",\"Package\":\"{pkg}\",\"Elapsed\":0}}')\n"
-                        "            continue\n"
-                        "        print(f'{{\"ImportPath\":\"{pkg}\",\"Action\":\"build-fail\"}}')\n"
-                        "        for line in (c.stdout + '\\n' + c.stderr).splitlines():\n"
-                        "            if line.strip():\n"
-                        "                print(f'{{\"ImportPath\":\"{pkg}\",\"Action\":\"build-output\",\"Output\":\"{line}\\\\n\"}}')\n"
-                        "        print(f'{{\"Action\":\"fail\",\"Package\":\"{pkg}\",\"FailedBuild\":\"{pkg}\"}}')\n"
-                        "        overall_exit = 1\n"
-                        "        continue\n"
-                        "    p = subprocess.run([bin_path, '-test.v', '-test.count=1'], capture_output=True, text=True)\n"
-                        "    combined = p.stdout + '\\n' + p.stderr\n"
-                        "    t2j = subprocess.run(['go', 'tool', 'test2json', '-p', pkg, '-t'], input=combined, capture_output=True, text=True)\n"
-                        "    sys.stdout.write(t2j.stdout)\n"
+                        "    p = subprocess.run(['go', 'test', '-count=1', '-json', pkg], capture_output=True, text=True)\n"
+                        "    if p.stdout:\n"
+                        "        sys.stdout.write(p.stdout)\n"
+                        "    if p.stderr:\n"
+                        "        sys.stderr.write(p.stderr)\n"
                         "    if p.returncode != 0:\n"
-                        "        print(f'{{\"Action\":\"fail\",\"Package\":\"{pkg}\"}}')\n"
-                        "        overall_exit = 1\n"
+                        "        overall_exit = p.returncode\n"
                         "sys.exit(overall_exit)\n"
                     )
 
@@ -2540,6 +2524,21 @@ class SandboxRunner:
 
                 # Default Python execution (pytest / unittest)
                 cmd = self._resolve_command(sandbox_dir, framework, test_command, target_file)
+                if cmd is None:
+                    elapsed = time.perf_counter() - t_start
+                    return SandboxTestResult(
+                        success=False,
+                        exit_code=0,
+                        stdout="",
+                        stderr="",
+                        duration_seconds=elapsed,
+                        framework=framework or "pytest",
+                        skipped=True,
+                        passed_count=0,
+                        failed_count=0,
+                        total_count=0,
+                        error_message=f"No relevant automated tests discovered for target file '{target_file}'.",
+                    )
                 if isinstance(cmd, str):
                     cmd, parse_error = self._parse_command(cmd)
                     if parse_error:
@@ -2848,7 +2847,7 @@ class SandboxRunner:
                 from core.canonical_path import discover_relevant_tests
                 discovered = discover_relevant_tests(sandbox_dir, target_file)
                 if discovered:
-                    return [py_exec, "-m", "pytest", discovered[0], "-v", "--tb=short", "-p", "no:cacheprovider", "-o", "cache_dir=/tmp/.pytest_cache"]
+                    return [py_exec, "-m", "pytest"] + discovered + ["-v", "--tb=short", "-p", "no:cacheprovider", "-o", "cache_dir=/tmp/.pytest_cache"]
             except Exception:
                 pass
 
@@ -2870,10 +2869,19 @@ class SandboxRunner:
                 os.path.join(sandbox_dir, target_dir, f"{target_base}_test.py") if target_dir else None,
                 os.path.join(sandbox_dir, target_dir, f"{safe_slug}_test.py") if target_dir and safe_slug != target_base else None,
             ]
+            matched = []
             for cand in cand_test_paths:
                 if cand and os.path.isfile(cand):
                     rel_test = os.path.relpath(cand, sandbox_dir).replace("\\", "/")
-                    return [py_exec, "-m", "pytest", rel_test, "-v", "--tb=short", "-p", "no:cacheprovider", "-o", "cache_dir=/tmp/.pytest_cache"]
+                    if rel_test not in matched:
+                        matched.append(rel_test)
+            if matched:
+                return [py_exec, "-m", "pytest"] + matched + ["-v", "--tb=short", "-p", "no:cacheprovider", "-o", "cache_dir=/tmp/.pytest_cache"]
+
+            # If target_file is explicitly provided, never run un-scoped tests across the entire repository!
+            if target_file and not any(k in os.path.basename(target_file).lower() for k in ("test", "suite")):
+                return None
+
             return [py_exec, "-m", "pytest", "-v", "--tb=short", "-p", "no:cacheprovider", "-o", "cache_dir=/tmp/.pytest_cache"]
 
         if framework == "npm":

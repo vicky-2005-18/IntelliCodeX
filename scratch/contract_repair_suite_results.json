@@ -1,0 +1,20 @@
+[
+  {
+    "case": "Boundary & Return-Value Contract",
+    "status": "autonomously repaired",
+    "verified": true,
+    "diff": "diff --git a/validator.py b/validator.py\n--- a/validator.py\n+++ b/validator.py\n@@ -1,9 +1,9 @@\n def clamp_value(val, low, high, fallback=-1):\n     \"\"\"Clamps val between low and high. If val is None, returns fallback.\"\"\"\n     if val is None:\n-        return 0  # BUG: returns 0 instead of fallback\n+        return fallback  # Fixed: returns fallback instead of 0\n     if val < low:\n-        return high  # BUG: returns high instead of low\n+        return low  # Fixed: returns low instead of high\n     if val > high:\n         return high\n-    return val\n+    return val"
+  },
+  {
+    "case": "Specific Exception Contract (KeyError)",
+    "status": "autonomously repaired",
+    "verified": true,
+    "diff": "diff --git a/config_parser.py b/config_parser.py\n--- a/config_parser.py\n+++ b/config_parser.py\n@@ -3,5 +3,5 @@\n     if not isinstance(config_dict, dict):\n         raise TypeError('Expected dict')\n     if 'username' not in config_dict:\n-        raise ValueError('Missing username')  # BUG: raises ValueError instead of KeyError\n-    return config_dict['username'].strip().lower()\n+        raise KeyError('username')  # Fixed: raises KeyError instead of ValueError\n+    return config_dict['username'].strip().lower()"
+  },
+  {
+    "case": "Cross-File Repair (format_records for export_service)",
+    "status": "safely unresolved",
+    "verified": false,
+    "diff": "diff --git a/utils/formatter.py b/utils/formatter.py\n--- a/utils/formatter.py\n+++ b/utils/formatter.py\n@@ -1,4 +1,4 @@\n def format_records(items, delimiter=','):\n     \"\"\"Joins items using delimiter. Strips whitespace from each item.\"\"\"\n-    # BUG: joins with hardcoded space instead of delimiter, misses item stripping\n-    return ' '.join(str(x) for x in items)\n+    # Corrected to use the provided delimiter and strip whitespace\n+    return delimiter.join(str(x).strip() for x in items)"
+  }
+]

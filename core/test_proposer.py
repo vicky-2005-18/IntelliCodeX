@@ -110,6 +110,7 @@ AI_TEST_HEADER_BANNER = "# [AI-GENERATED TEST PROPOSAL - REQUIRES USER REVIEW]"
 
 class TestProposer:
     """Engine for contract extraction, ambiguity clarification, test proposal, and Docker validation."""
+    __test__ = False
 
     def __init__(self, scratch_dir: Optional[str] = None):
         self.scratch_dir = scratch_dir or os.path.join(tempfile.gettempdir(), "icx_proposed_tests")
@@ -211,6 +212,8 @@ class TestProposer:
         matches = []
         spec_files = ["README.md", "SPECS.md", "SPEC.md", "docs.md", "API.md"]
         target_base = os.path.splitext(os.path.basename(target_file))[0]
+        generic_names = {"main", "add", "run", "get", "set", "init", "start", "stop", "test"}
+        non_generic_funcs = [fn for fn in func_names if fn.lower() not in generic_names]
 
         all_files = get_all_repo_files(repo_path)
         for f in all_files:
@@ -224,7 +227,10 @@ class TestProposer:
                         curr_block = []
                         relevant = False
                         for line in lines:
-                            if any(fn in line for fn in func_names) or target_base in line:
+                            target_match = bool(re.search(r"\b" + re.escape(target_base) + r"\b", line, re.IGNORECASE))
+                            func_match = any(re.search(r"\b" + re.escape(fn) + r"\b", line) for fn in non_generic_funcs)
+                            code_fn_match = any(f"`{fn}`" in line or f"{fn}(" in line for fn in func_names)
+                            if target_match or func_match or code_fn_match:
                                 relevant = True
                             if line.startswith("# ") and curr_block:
                                 if relevant:
@@ -239,12 +245,16 @@ class TestProposer:
         return matches[:3]
 
     def _find_call_sites(self, repo_path: str, target_file: str, func_names) -> List[Dict[str, Any]]:
-        """Finds AST call sites invoking functions of target_file in other files."""
+        """Finds AST call sites invoking functions of target_file in other files.
+        Requires that the calling file actually imports target_file/module or its symbols."""
         call_sites = []
         if not func_names:
             return call_sites
 
         target_norm = normalize_repo_relative_path(target_file)
+        target_base = os.path.splitext(os.path.basename(target_norm))[0]
+        target_mod = os.path.splitext(target_norm)[0].replace("/", ".")
+        target_dir = os.path.dirname(target_norm)
         all_files = get_all_repo_files(repo_path)
 
         for f in all_files:
@@ -258,22 +268,66 @@ class TestProposer:
                 with open(abs_f, "r", encoding="utf-8", errors="replace") as cf:
                     c_src = cf.read()
                 tree = ast.parse(c_src, filename=abs_f)
+
+                # Grounding invariant: caller file must explicitly import target module or symbols
+                f_dir = os.path.dirname(f_norm)
+                imported_modules = set()
+                imported_symbols = {}  # local_name -> target_function_name
+
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            mod_name = alias.name
+                            as_name = alias.asname or alias.name
+                            if mod_name == target_base or mod_name == target_mod or mod_name.endswith("." + target_base):
+                                imported_modules.add(as_name)
+                    elif isinstance(node, ast.ImportFrom):
+                        mod = node.module or ""
+                        is_target_module = False
+                        if mod == target_base or mod == target_mod or mod.endswith("." + target_base):
+                            is_target_module = True
+                        elif node.level and node.level > 0:
+                            # Relative import check
+                            if f_dir == target_dir:
+                                if not mod and any(a.name == target_base for a in node.names):
+                                    for a in node.names:
+                                        if a.name == target_base:
+                                            imported_modules.add(a.asname or a.name)
+                                elif mod == target_base:
+                                    is_target_module = True
+
+                        if is_target_module:
+                            for alias in node.names:
+                                if alias.name == "*":
+                                    for fn in func_names:
+                                        imported_symbols[fn] = fn
+                                else:
+                                    imported_symbols[alias.asname or alias.name] = alias.name
+
+                if not imported_modules and not imported_symbols:
+                    # Unrelated file without import relationship to target_file
+                    continue
+
                 lines = c_src.splitlines()
                 for node in ast.walk(tree):
                     if isinstance(node, ast.Call):
-                        name = None
+                        target_func_name = None
                         if isinstance(node.func, ast.Name):
-                            name = node.func.id
+                            local_id = node.func.id
+                            if local_id in imported_symbols:
+                                target_func_name = imported_symbols[local_id]
                         elif isinstance(node.func, ast.Attribute):
-                            name = node.func.attr
-                        if name in func_names:
+                            if isinstance(node.func.value, ast.Name) and node.func.value.id in imported_modules:
+                                target_func_name = node.func.attr
+
+                        if target_func_name and target_func_name in func_names:
                             ln = getattr(node, "lineno", 1)
-                            snip = lines[ln - 1].strip() if ln <= len(lines) else f"{name}(...)"
+                            snip = lines[ln - 1].strip() if ln <= len(lines) else f"{target_func_name}(...)"
                             call_sites.append({
                                 "caller_file": f_norm,
                                 "line": ln,
                                 "call_snippet": snip,
-                                "function": name,
+                                "function": target_func_name,
                             })
                             if len(call_sites) >= 5:
                                 return call_sites
@@ -333,6 +387,20 @@ class TestProposer:
                             "Raise ValueError on negative values",
                             "Clamp negative values to 0",
                             "Allow negative values as reductions",
+                        ]
+                    }
+
+            # 4. Unstated division or boundary semantics without docstring or explicit contract
+            if any(k in fn.name.lower() for k in ("divide", "div", "truediv", "ratio")) and len(fn.args.args) == 2:
+                has_doc_spec = any(w in fn_doc.lower() for w in ("float", "integer", "floor", "true division", "zerodivision", "raises", "zero"))
+                if not has_doc_spec:
+                    return {
+                        "reason": f"Function '{fn.name}' has unstated division semantics (true float division vs integer floor division, and zero division error handling).",
+                        "question": f"For '{fn.name}', which contract semantics are required?",
+                        "options": [
+                            "True float division (a / b), raising ZeroDivisionError on 0",
+                            "Integer floor division (a // b), raising ZeroDivisionError on 0",
+                            "Safe division returning None or 0 on zero division",
                         ]
                     }
 
@@ -404,7 +472,8 @@ class TestProposer:
         target_base = os.path.splitext(os.path.basename(target_file))[0]
         explicit_str = "\n".join(f"- {eb}" for eb in analysis.explicit_behaviors) if analysis.explicit_behaviors else "- Function signatures and AST"
         inferred_str = "\n".join(f"- {ib}" for ib in analysis.inferred_behaviors) if analysis.inferred_behaviors else "- Standard Python idioms"
-        readme_str = "\n".join(analysis.readme_sections) if analysis.readme_sections else "None"
+        readme_snippets = [rm[:1000] for rm in analysis.readme_sections] if analysis.readme_sections else []
+        readme_str = "\n".join(readme_snippets) if readme_snippets else "None"
         clarif_str = f"\nUser Contract Clarification: {analysis.user_clarification}\n" if analysis.user_clarification else ""
 
         return (
@@ -421,7 +490,10 @@ class TestProposer:
             f"3. Add `# Grounded in: <source citation>` comment above each test function.\n"
             f"4. Import from '{target_base}'.\n"
             f"5. Include meaningful assertions checking actual output vs contract specifications.\n"
-            f"6. Output the Python test code inside a single fenced code block."
+            f"6. For asymmetric operations (e.g. subtraction, division, comparisons), generate assertions with distinct asymmetric inputs (a != b) to verify operand order.\n"
+            f"7. For division, test true float division (e.g. 5 / 2 == 2.5 vs integer floor division 5 // 2 == 2) and test expected exception on division by zero (pytest.raises(ZeroDivisionError)).\n"
+            f"8. For interactive functions or entry points like main() that invoke input(), test that the entry point is callable or mock input using monkeypatch; DO NOT leave unmocked input() calls that block execution.\n"
+            f"9. Output the Python test code inside a single fenced code block."
         )
 
     def _generate_ast_contract_tests(
@@ -456,6 +528,8 @@ class TestProposer:
             lines.append("    assert True")
             return "\n".join(lines)
 
+        asymmetric_numeric_defaults = ["10", "3", "2", "4"]
+
         for fn in funcs:
             fn_name = fn.name
             doc = analysis.docstrings.get(fn_name, "")
@@ -465,26 +539,101 @@ class TestProposer:
             # Grounding citation comment
             citation = f"docstring of {fn_name}" if doc else f"signature of {fn_name}"
 
-            # 1. Happy path test
-            lines.append(f"def test_{fn_name}_contract_happy_path():")
-            lines.append(f"    # Grounded in: {citation}")
-            # Try to infer simple dummy values based on arg names
+            # 0. Entry points / interactive functions (e.g. main, cli, or functions using input())
+            is_entry_point = fn_name in ("main", "cli", "run_app", "entry_point")
+            uses_input = any(
+                isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("input", "raw_input")
+                for n in ast.walk(fn)
+            )
+            if is_entry_point or uses_input:
+                lines.append(f"def test_{fn_name}_is_callable():")
+                lines.append(f"    # Grounded in: entry point contract for {fn_name}")
+                lines.append(f"    assert callable({fn_name})")
+                lines.append("")
+                continue
+
+            # Infer distinct non-zero values based on argument names to test asymmetry
             call_args = []
+            num_idx = 0
             for a in args:
-                if any(k in a for k in ("list", "arr", "items", "intervals")):
+                if any(k in a for k in ("list", "arr", "items", "intervals", "data")):
                     call_args.append("[1, 2, 3]")
-                elif any(k in a for k in ("n", "count", "idx", "num", "val", "price", "rate", "amount")):
-                    call_args.append("10")
+                elif any(k in a for k in ("n", "count", "idx", "num", "val", "price", "rate", "amount", "a", "b", "x", "y")):
+                    val = asymmetric_numeric_defaults[num_idx % len(asymmetric_numeric_defaults)]
+                    num_idx += 1
+                    call_args.append(val)
                 elif any(k in a for k in ("s", "text", "str", "name")):
                     call_args.append("'sample'")
                 elif any(k in a for k in ("flag", "is_", "has_")):
                     call_args.append("True")
                 else:
-                    call_args.append("0")
+                    val = asymmetric_numeric_defaults[num_idx % len(asymmetric_numeric_defaults)]
+                    num_idx += 1
+                    call_args.append(val)
             args_str = ", ".join(call_args)
-            lines.append(f"    result = {fn_name}({args_str})")
-            lines.append("    assert result is not None, 'Function should return a valid result according to contract'")
-            lines.append("")
+
+            # Specific arithmetic contract tests with high-fidelity assertions
+            if fn_name in ("subtract", "sub", "difference") and len(args) == 2:
+                lines.append(f"def test_{fn_name}_contract_asymmetry():")
+                lines.append(f"    # Grounded in: standard arithmetic subtraction (first operand minus second operand)")
+                lines.append(f"    assert {fn_name}(10, 3) == 7, 'Expected 10 - 3 == 7 (first minus second), not second minus first'")
+                lines.append(f"    assert {fn_name}(3, 10) == -7, 'Expected 3 - 10 == -7'")
+                lines.append("")
+            elif fn_name in ("divide", "div", "division") and len(args) == 2:
+                clarif = (analysis.user_clarification or "").lower()
+                doc_lower = (doc or "").lower()
+                # Documented or user-approved contract for true float division
+                if "true division" in clarif or "float" in clarif or "float" in doc_lower or "/" in clarif:
+                    lines.append(f"def test_{fn_name}_contract_true_division():")
+                    lines.append(f"    # Grounded in: user-approved or documented true float division contract")
+                    lines.append(f"    assert {fn_name}(10, 4) == 2.5, 'Expected true division 10 / 4 == 2.5'")
+                    lines.append("")
+                elif "floor" in clarif or "integer" in clarif or "//" in clarif or "floor" in doc_lower:
+                    lines.append(f"def test_{fn_name}_contract_floor_division():")
+                    lines.append(f"    # Grounded in: user-approved or documented integer floor division contract")
+                    lines.append(f"    assert {fn_name}(10, 4) == 2, 'Expected floor division 10 // 4 == 2'")
+                    lines.append("")
+                else:
+                    lines.append(f"def test_{fn_name}_contract_happy_path():")
+                    lines.append(f"    # Grounded in: {citation}")
+                    lines.append(f"    res = {fn_name}(10, 2)")
+                    lines.append(f"    assert res is not None, 'Function should return a valid result'")
+                    lines.append("")
+
+                # Exception handling grounded in user clarification or doc
+                if "zerodivision" in clarif or "raise" in clarif or "zerodivision" in doc_lower or "raises" in doc_lower:
+                    lines.append(f"def test_{fn_name}_zero_division_raises():")
+                    lines.append(f"    # Grounded in: documented or user-approved division by zero exception contract")
+                    lines.append(f"    with pytest.raises(ZeroDivisionError):")
+                    lines.append(f"        {fn_name}(10, 0)")
+                    lines.append("")
+                elif "none" in clarif or "safe" in clarif:
+                    lines.append(f"def test_{fn_name}_zero_division_safe():")
+                    lines.append(f"    # Grounded in: user-approved safe zero division contract")
+                    lines.append(f"    assert {fn_name}(10, 0) in (None, 0)")
+                    lines.append("")
+            elif fn_name in ("add", "plus", "sum") and len(args) == 2:
+                lines.append(f"def test_{fn_name}_contract_happy_path():")
+                lines.append(f"    # Grounded in: standard arithmetic addition contract")
+                lines.append(f"    assert {fn_name}(10, 3) == 13")
+                lines.append("")
+            elif fn_name in ("multiply", "mul", "prod", "binary_multiply") and len(args) == 2:
+                lines.append(f"def test_{fn_name}_contract_happy_path():")
+                lines.append(f"    # Grounded in: standard arithmetic multiplication contract")
+                lines.append(f"    assert {fn_name}(10, 3) == 30")
+                lines.append("")
+            elif fn_name in ("mod", "modulo", "remainder") and len(args) == 2:
+                lines.append(f"def test_{fn_name}_contract_happy_path():")
+                lines.append(f"    # Grounded in: standard modulo contract")
+                lines.append(f"    assert {fn_name}(10, 3) == 1")
+                lines.append("")
+            else:
+                # 1. Happy path test for general function
+                lines.append(f"def test_{fn_name}_contract_happy_path():")
+                lines.append(f"    # Grounded in: {citation}")
+                lines.append(f"    result = {fn_name}({args_str})")
+                lines.append("    assert result is not None, 'Function should return a valid result according to contract'")
+                lines.append("")
 
             # 2. Edge case / empty input test if collections are used
             has_coll_arg = any(any(k in a for k in ("list", "arr", "items", "intervals", "data")) for a in args)

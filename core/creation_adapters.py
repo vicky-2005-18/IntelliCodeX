@@ -64,17 +64,38 @@ def analyze_requirements(instruction: str) -> RequirementSpec:
 
     # Check if concrete input/output test vectors are provided in the instruction
     test_vectors = []
-    vector_matches = re.finditer(r'(?i)(?:when\s+given|given|input)\s+([a-zA-Z0-9_\-\.\'\"\[\]]+).+?(?:must\s+return|returns|output|expected)\s+([a-zA-Z0-9_\-\.\'\"\[\]]+)', clean)
-    for vm in vector_matches:
-        test_vectors.append({
-            "input": vm.group(1).strip().rstrip(".,;"),
-            "expected": vm.group(2).strip().rstrip(".,;"),
-        })
+    text_no_target = re.sub(r'(?i)\btarget\s*:\s*["\']?[^"\']+["\']?', '', clean)
+
+    # Pattern 1: fn(args) (must return|returns|==) expected
+    p1 = re.finditer(
+        r'(?i)\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]*)\)\s*(?:must\s+return|returns|==)\s*([^\n;]+?)(?=\.\s+[A-Z]|\.\s*$|[;\n]|$)',
+        text_no_target
+    )
+    for m in p1:
+        fn_name = m.group(1).strip()
+        if fn_name.lower() in ("given", "when", "input", "if"):
+            continue
+        args_str = m.group(2).strip()
+        expected = m.group(3).strip().rstrip(".,;")
+        test_vectors.append({"fn": fn_name, "input": args_str, "expected": expected})
+
+    # Pattern 2: (when given|given|input) <input> [fn] (must return|returns|output|expected|==) <expected>
+    p2 = re.finditer(
+        r'(?i)(?:when\s+given|given|input)\s+([^\n]+?)\s*(?:,\s*|\s+)(?:([a-zA-Z_][a-zA-Z0-9_]*)\s+)?(?:must\s+return|returns|output|expected|==)\s+([^\n;]+?)(?=\.\s+[A-Z]|\.\s*$|[;\n]|$)',
+        text_no_target
+    )
+    for m in p2:
+        inp = m.group(1).strip().rstrip(".,;")
+        fn = m.group(2).strip() if m.group(2) else None
+        if fn and fn.lower() in ("must", "should", "shall", "to", "returns", "output", "expected"):
+            fn = None
+        exp = m.group(3).strip().rstrip(".,;")
+        inp_clean = inp[1:-1].strip() if (inp.startswith("(") and inp.endswith(")")) else inp
+        if not any(v["input"] in (inp, inp_clean) and v["expected"] == exp for v in test_vectors):
+            test_vectors.append({"fn": fn, "input": inp_clean, "expected": exp})
 
     has_assertions = bool(re.search(r'\bassert\s+', clean) or re.search(r'==\s*[\d"\'\[\{]', clean))
-    has_io_vectors = bool(test_vectors) or bool(re.search(r'(?i)\b(?:input|given|when)\b.+?\b(?:output|returns|then|expected)\b', clean))
-
-    concrete = has_assertions or has_io_vectors
+    concrete = bool(test_vectors) or has_assertions
     limitations = []
     if not concrete:
         limitations.append(
@@ -281,19 +302,17 @@ _spec.loader.exec_module(_mod)'''
             # Top-level view/helper functions defined in module
             for fn, fn_args in functions:
                 symbol_imports.append(f'{fn} = getattr(_mod, "{fn}", None)')
-                if len(fn_args) >= 2:
+                test_cases.append(f'''def test_{fn}_function_is_callable():
+    assert callable({fn}), "Candidate module must define callable '{fn}'"''')
+                if any(k in (fn.lower() + " " + reqs.instruction.lower()) for k in ("calc", "calculator", "math")) and len(fn_args) >= 2:
                     test_cases.append(f'''def test_{fn}_function_happy_path():
     assert callable({fn}), "Candidate module must define callable '{fn}'"
-    # Interface validation: function accepts declared parameters and returns result
     res = {fn}(2, 3, "add")
     assert res is not None''')
                     test_cases.append(f'''def test_{fn}_function_error_cases():
     assert callable({fn}), "Candidate module must define callable '{fn}'"
     with pytest.raises(Exception):
         {fn}(5, 0, "divide")''')
-                else:
-                    test_cases.append(f'''def test_{fn}_function_is_callable():
-    assert callable({fn}), "Candidate module must define callable '{fn}'"''')
 
             # HTTP Route endpoint validation via test client
             for r in routes:
@@ -301,8 +320,9 @@ _spec.loader.exec_module(_mod)'''
                 http_methods = r[2] if len(r) > 2 else []
                 is_post = "POST" in [m.upper() for m in http_methods] or not http_methods
                 route_slug = re.sub(r'[^a-zA-Z0-9_]+', '_', route_path.strip("/")).strip("_") or (handler_name or "root")
+                is_calc_route = any(k in (route_slug.lower() + " " + (handler_name or "").lower() + " " + reqs.instruction.lower()) for k in ("calc", "calculator", "math", "divide", "arithmetic"))
 
-                if is_post:
+                if is_calc_route and is_post:
                     test_cases.append(f'''def test_{route_slug}_endpoint():
     assert {app_var} is not None, "Candidate module must define '{app_var}'"
     client = {app_var}.test_client()
@@ -320,8 +340,14 @@ _spec.loader.exec_module(_mod)'''
     client = {app_var}.test_client()
     resp = client.post("{route_path}", json={{"a": 10, "b": 5, "op": "unknown", "operation": "unknown"}})
     assert resp.status_code in (400, 500) or resp.status_code < 500''')
+                elif is_post:
+                    test_cases.append(f'''def test_{route_slug}_endpoint_smoke():
+    assert {app_var} is not None, "Candidate module must define '{app_var}'"
+    client = {app_var}.test_client()
+    resp = client.post("{route_path}", json={{}})
+    assert resp.status_code < 500, f"Endpoint {route_path} crashed with 500 internal server error"''')
                 else:
-                    test_cases.append(f'''def test_{route_slug}_endpoint():
+                    test_cases.append(f'''def test_{route_slug}_endpoint_smoke():
     assert {app_var} is not None, "Candidate module must define '{app_var}'"
     client = {app_var}.test_client()
     resp = client.get("{route_path}")
@@ -343,6 +369,15 @@ _spec.loader.exec_module(_mod)'''
     method = getattr(instance, "{m}", None)
     assert callable(method), "Expected method '{m}' on '{cls_name}' to be callable"''')
 
+                # Natural-language contract for task manager domain component
+                if any(k in reqs.instruction.lower() for k in ("todo", "to-do", "task")):
+                    if "add_task" in methods and "list_tasks" in methods:
+                        test_cases.append(f'''def test_{cls_name.lower()}_add_and_list_tasks_behavior():
+    instance = {cls_name}()
+    instance.add_task("Sample Task")
+    tasks = instance.list_tasks()
+    assert len(tasks) >= 1, "TaskManager must store and list added tasks"''')
+
         # Case 3: Pure functions
         elif functions:
             for fn, fn_args in functions:
@@ -355,8 +390,33 @@ _spec.loader.exec_module(_mod)'''
                 for idx, tv in enumerate(reqs.test_vectors, start=1):
                     inp = tv["input"]
                     exp = tv["expected"]
-                    for fn, fn_args in functions:
-                        test_cases.append(f'''def test_{fn}_user_requirement():
+                    fn_target = tv.get("fn")
+                    # Match function by explicit name, or match candidate functions by arity
+                    matching_funcs = []
+                    if fn_target:
+                        matching_funcs = [f for f in functions if f[0] == fn_target]
+                        if not matching_funcs:
+                            reqs.limitations_noted.append(
+                                f"Unbound requirement vector: target function '{fn_target}' is not defined in candidate module."
+                            )
+                    else:
+                        arg_count = len([a for a in inp.split(",") if a.strip()])
+                        candidates = [f for f in functions if len(f[1]) == arg_count]
+                        if len(candidates) == 1:
+                            matching_funcs = candidates
+                        elif len(candidates) > 1:
+                            candidate_names = [f[0] for f in candidates]
+                            reqs.limitations_noted.append(
+                                f"Ambiguous requirement vector: input ({inp}) matches multiple functions with same arity {arg_count} "
+                                f"({candidate_names}) without explicit function target. Cannot bind vector without clarification."
+                            )
+                            matching_funcs = []
+                        elif len(functions) == 1:
+                            matching_funcs = functions
+
+                    for fn, fn_args in matching_funcs:
+                        suffix = "" if idx == 1 else f"_{idx}"
+                        test_cases.append(f'''def test_{fn}_user_requirement{suffix}():
     assert callable({fn}), "Expected function '{fn}' to be callable"
     assert {fn}({inp}) == {exp}''')
 
@@ -364,6 +424,13 @@ _spec.loader.exec_module(_mod)'''
         else:
             test_cases.append('''def test_module_loads():
     assert _mod is not None, "Expected candidate module to load successfully"''')
+
+        has_req_tests = any("user_requirement" in tc or "behavior" in tc for tc in test_cases)
+        if not has_req_tests:
+            if not any("omitted concrete" in n or "ambiguous" in n.lower() or "unbound" in n.lower() for n in reqs.limitations_noted):
+                reqs.limitations_noted.append(
+                    "Natural-language behavioral contract specified in instruction has no executable behavioral test assertions; only interface smoke callability was verified."
+                )
 
         symbol_section = "\n".join(dict.fromkeys(symbol_imports))
         tests_section = "\n\n\n".join(test_cases)

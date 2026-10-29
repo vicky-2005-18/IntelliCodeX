@@ -1,0 +1,247 @@
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│        ▀██▀                                                                 │
+│   ▄▀▀▀▀▀▀▀▀▀▀▀▀▄                                                            │
+│  ████████████████                                                           │
+│   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀    INTELLICODEX INTERACTIVE CLI ASSISTANT                  │
+│     ▄▄▄▄▄▄▄▄▄▄      AI-Powered Repository Search, Dependency Analysis &     │
+│   █ ██▀▀██▀▀██ █    Code Intelligence                                       │
+│   ▀ ███▀██▀███ ▀                                                            │
+│      ▄▄▄  ▄▄▄                                                               │
+│      ▀▀▀  ▀▀▀                                                               │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+[*] Backend: Ollama AI (qwen2.5-coder:7b + nomic-embed-text)
+[*] Ingesting repository: C:\Users\vikas\Downloads\Major project 2 2026
+[*] Indexing repository code...
+[*] Generating Ollama AI embeddings (nomic-embed-text) for 23 code chunks...
+    -> Progress: 23/23 chunks (100.0%) | 0.0 chunks/s | Elapsed: 1ms | ETA: 0ms   
+
+[*] Embedding complete: 23/23 chunks in 3m 58s (0.1 chunks/s)
+┌───────────── Repository Welcome Summary — Major project 2 2026 ─────────────┐
+│                                                                             │
+│           ✓ Repository:  Major project 2 2026                               │
+│                          (C:\Users\vikas\Downloads\Major project 2 2026)    │
+│      ✓ Backend / Model:  OLLAMA (qwen2.5-coder:7b)                          │
+│    ✓ Active file scope:  None (searching all files)                         │
+│         ✓ Source files:  235 files analyzed                                 │
+│  ✓ Searchable sections:  2442 code sections indexed for retrieval           │
+│       ✓ Syntax-derived:  2262 syntax-derived functions & classes (plus 560  │
+│                          documentation sections, 156 structured config      │
+│                          blocks, 21 module-level code sections, 3 package   │
+│                          init/empty files)                                  │
+│  ✓ Graph relationships:  3194 file dependencies across 837 graph nodes,     │
+│                          2509 call links across 2442 symbol nodes           │
+│        ✓ Indexing mode:  Incremental Update (re-indexed modified files      │
+│                          while retaining index)                             │
+│         ✓ Elapsed time:  4m 01.3s (1.0 files/sec)                           │
+│    ✓ Automatic updates:  Active — real-time file watcher auto-updates       │
+│                          index on change                                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────── What would you like to do? ─────────────────────────┐
+│                                                                             │
+│  1.   Ask a question or search code                                         │
+│          Type any natural language query or scope to a file:                │
+│            >> >>> USER INPUT: fix:calculator_practice.py
+How does @calculator_practice.py handle errors?               │
+│            >> Where is add used and what does it do?                        │
+│                                                                             │
+│  2.   Explore relationships & call chains                                   │
+│          Inspect module dependencies or caller functions:                   │
+│            >> deps:calculator_practice.py    (View import & reverse         │
+│       dependencies)                                                         │
+│            >> callers:add (Find call sites calling this symbol)             │
+│                                                                             │
+│  3.   Diagnose & repair code (Safe Automated Repair)                        │
+│          Diagnose a bug and generate an automated unified diff:             │
+│            >> fix: @calculator_practice.py                                  │
+│          ⚠ Note on Safe Repair: Automated repairs never modify code         │
+│       silently.                                                             │
+│          All candidate patches undergo AST & sandbox verification and       │
+│       require                                                               │
+│          your explicit interactive approval [a]pprove & commit / [c]ancel   │
+│          (with timestamped backups automatically preserved).                │
+│                                                                             │
+│  4.   Inspect architecture & review patches                                 │
+│          View centrality, coupling, and review pending proposals:           │
+│            >> top          (PageRank architectural centrality hotspots)     │
+│            >> arch         (Circular dependency & coupling analysis)        │
+│            >> review       (List pending patch proposals awaiting review)   │
+│            >> repo remove <name|num> (Unregister repository registration)   │
+│                                                                             │
+│  •    Type wave to greet the mascot, help for complete command reference,   │
+│       or exit to quit.                                                      │
+│                                                                             │
+└────────────── Supported Commands & Active Repository Examples ──────────────┘
+
+      ▀██▀                                                                     
+ ▄▀▀▀▀▀▀▀▀▀▀▀▀▄                                                                
+████████████████                                                               
+ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀   IntelliCodeX ready. Type a question or 'help' for options,   
+   ▄▄▄▄▄▄▄▄▄▄     'exit' to quit.                                              
+ █ ██▀▀██▀▀██ █                                                                
+ ▀ ███▀██▀███ ▀                                                                
+    ▄▄▄  ▄▄▄                                                                   
+    ▀▀▀  ▀▀▀                                                                   
+
+>> [*] Target resolved to canonical path: 'calculator_practice.py'
+
+[*] No existing tests discovered for 'calculator_practice.py'.
+[*] Retrieving repository specifications, docstrings, README, and call sites...
+
+
+[!] SPECIFICATION AMBIGUITY DETECTED: Function 'divide' has unstated division 
+semantics (true float division vs integer floor division, and zero division 
+error handling).
+[*] Clarification Needed: For 'divide', which contract semantics are required?
+    [1] True float division (a / b), raising ZeroDivisionError on 0
+    [2] Integer floor division (a // b), raising ZeroDivisionError on 0
+    [3] Safe division returning None or 0 on zero division
+Please select option (1-3) or enter clarification:>>> USER INPUT: 1
+ [*] Specification clarified as: 'True float division (a / b), raising ZeroDivisionError on 0'
+[*] Generating candidate test contract grounded in identified sources...
+[!] Warning: Estimated prompt tokens (86254) exceed context window (8192)
+[*] Validating candidate tests inside Docker sandbox (intellicodex-sandbox:latest)...
+================================================================================
+                 INTELLICODEX AUTOMATIC TEST PROPOSAL (AI-GENERATED)           
+================================================================================
+Target File:         calculator_practice.py
+Disposable Storage:  C:\Users\vikas\AppData\Local\Temp\icx_proposed_tests\test_calculator_practice.py
+
+--- CONTRACT SOURCES IDENTIFIED ---
+  • Project Docs / README: # IntelliCodeX — System Architecture & Technical Design
+
+> **Document Version**: 1.0.0  
+> **Status*...
+  • Project Docs / README: # Execute benchmarking against sample_repo
+python cli.py sample_repo --benchmark
+```
+
+---
+
+## 3. Ver...
+  • Project Docs / README: {
+  "title": "IntelliCodeX Closed-Loop Repair Accuracy Benchmark Evidence Package",
+  "evaluation_ti...
+
+--- EXPLICIT VS INFERRED CONTRACTS ---
+Explicitly Documented:
+  ✓ Project documentation: # IntelliCodeX — System Architecture & Technical Design
+
+> **Document Version**: 1.0.0  
+> **Status**: Verified & Grounded in Inspected Code
+  ✓ Project documentation: # Execute benchmarking against sample_repo
+python cli.py sample_repo --benchmark
+```
+
+---
+
+## 3. Verified Test Scenarios & Acceptance Criter
+  ✓ Project documentation: {
+  "title": "IntelliCodeX Closed-Loop Repair Accuracy Benchmark Evidence Package",
+  "evaluation_timestamp": 1791995923.510811,
+  "reconcil
+  ✓ User Clarification: True float division (a / b), raising ZeroDivisionError on 0
+Merely Inferred:
+  ? Function 'add' has no docstring; contract inferred from signature add(a, b)
+  ? Function 'subtract' has no docstring; contract inferred from signature subtract(a, b)
+  ? Function 'multiply' has no docstring; contract inferred from signature multiply(a, b)
+  ? Function 'mod' has no docstring; contract inferred from signature mod(a, b)
+  ? Function 'binary_multiply' has no docstring; contract inferred from signature binary_multiply(a, b)
+User Clarification Grounding: True float division (a / b), raising ZeroDivisionError on 0
+
+--- DOCKER HARNESS VALIDATION ---
+  • Syntax Check:          PASSED
+  • Import / Dependency:   VALID
+  • Tests Collected:       13
+  • Assertions Count:      13
+  • Baseline Assertion Failures Detected: 10 (Indicates active defect on untouched code)
+================================================================================
+
+--- PROPOSED CANDIDATE TEST CODE (DISPOSABLE STORAGE) ---
+# [AI-GENERATED TEST PROPOSAL - REQUIRES USER REVIEW]
+# Grounded in: https://github.com/example/calculator_practice
+
+import pytest
+from calculator_practice import add, subtract, multiply, divide
+
+def test_add_happy_path():
+    # Grounded in: Happy path for addition
+    assert add(2, 3) == 5
+
+def test_add_edge_case_negative_numbers():
+    # Grounded in: Edge case with negative numbers
+    assert add(-1, -1) == -2
+
+def test_subtract_happy_path():
+    # Grounded in: Happy path for subtraction
+    assert subtract(5, 3) == 2
+
+def test_subtract_asymmetric_inputs():
+    # Grounded in: Asymmetric inputs for subtraction
+    assert subtract(3, 5) != subtract(5, 3)
+
+def test_multiply_happy_path():
+    # Grounded in: Happy path for multiplication
+    assert multiply(4, 3) == 12
+
+def test_divide_true_float_division():
+    # Grounded in: True float division
+    assert divide(5, 2) == 2.5
+
+def test_divide_integer_floor_division():
+    # Grounded in: Integer floor division
+    assert divide(5, 2) != 2
+
+def test_divide_by_zero_exception():
+    # Grounded in: Expected exception on division by zero
+    with pytest.raises(ZeroDivisionError):
+        divide(5, 0)
+
+def test_divide_asymmetric_inputs():
+    # Grounded in: Asymmetric inputs for division
+    assert divide(3, 2) != divide(2, 3)
+
+def test_subtract_edge_case_negative_numbers():
+    # Grounded in: Edge case with negative numbers
+    assert subtract(-1, -5) == 4
+
+def test_multiply_edge_case_zero():
+    # Grounded in: Edge case with zero multiplication
+    assert multiply(0, 5) == 0
+
+def test_divide_edge_case_large_numbers():
+    # Grounded in: Edge case with large numbers
+    assert divide(123456789, 987654321) == pytest.approx(0.0124937418)
+
+# Example usage of interactive functions or entry points like main()
+def test_main_callable():
+    # Grounded in: Main function is callable
+    from calculator_practice import main
+    assert callable(main)
+---------------------------------------------------------
+
+Candidate Test Action>>> USER INPUT: a
+ ([a]ccept & proceed to repair, [r]eject, [c]larify): [✓] Candidate test contract accepted and FROZEN at 'C:\Users\vikas\AppData\Local\Temp\icx_proposed_tests\test_calculator_practice.py'.
+[*] Running baseline test suite inside Docker sandbox for 'calculator_practice.py'...
+[*] Baseline test failure captured: 5 failed, 8 passed.
+    - [FAIL] test_calculator_practice.py::test_subtract_happy_path
+    - [FAIL] test_calculator_practice.py::test_divide_true_float_division
+    - [FAIL] test_calculator_practice.py::test_divide_integer_floor_division
+    - [FAIL] test_calculator_practice.py::test_subtract_edge_case_negative_numbers
+    - [FAIL] test_calculator_practice.py::test_divide_edge_case_large_numbers
+    - [PASS] test_calculator_practice.py::test_add_happy_path
+    - [PASS] test_calculator_practice.py::test_add_edge_case_negative_numbers
+    - [PASS] test_calculator_practice.py::test_subtract_asymmetric_inputs
+    - [PASS] test_calculator_practice.py::test_multiply_happy_path
+    - [PASS] test_calculator_practice.py::test_divide_by_zero_exception
+    - [PASS] test_calculator_practice.py::test_divide_asymmetric_inputs
+    - [PASS] test_calculator_practice.py::test_multiply_edge_case_zero
+    - [PASS] test_calculator_practice.py::test_main_callable
+
+[*] Analyzing error report & localizing bug root cause...
+[*] [1/3] Generating candidate patch (Turn 1/3)...
+[*] [1/3] Running sandbox test suite (Turn 1/3)...
+[*] [2/3] Generating candidate patch (Turn 2/3)...
+T

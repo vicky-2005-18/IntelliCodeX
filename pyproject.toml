@@ -55,6 +55,7 @@ dev = [
 
 [project.scripts]
 intellicodex = "cli:main"
+intellicodex-mcp = "core.mcp_server:run_stdio_server"
 
 [tool.setuptools]
 py-modules = ["cli"]

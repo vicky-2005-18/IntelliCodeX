@@ -1,0 +1,730 @@
+{
+  "timestamp": "2026-10-21 00:50:14",
+  "quick_mode": true,
+  "models": {
+    "codellama:7b": {
+      "parameter_tier": "7B Parameter Tier",
+      "overall_score": 93.0,
+      "track1": {
+        "total_cases": 7,
+        "tp": 4,
+        "fp": 2,
+        "fn": 0,
+        "tn": 1,
+        "precision": 0.6667,
+        "recall": 1.0,
+        "f1": 0.8,
+        "false_alarm_rate": 0.6667,
+        "avg_latency_s": 12.374,
+        "avg_tokens_per_sec": 7.37,
+        "details": [
+          {
+            "name": "calculate_total",
+            "type": "SyntaxError",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 24.186
+          },
+          {
+            "name": "bug2_undefined_variable",
+            "type": "UndefinedVariable",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 7.838
+          },
+          {
+            "name": "bug3_zero_division",
+            "type": "ZeroDivision",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 10.549
+          },
+          {
+            "name": "bug4_off_by_one",
+            "type": "IndexError",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 7.595
+          },
+          {
+            "name": "clean1_sum",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 9.933
+          },
+          {
+            "name": "clean2_is_even",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Buggy",
+            "status": "FP",
+            "latency": 14.672
+          },
+          {
+            "name": "clean3_format_name",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Buggy",
+            "status": "FP",
+            "latency": 11.848
+          }
+        ]
+      },
+      "track2": {
+        "total_cases": 2,
+        "syntax_valid_count": 2,
+        "syntax_valid_rate": 1.0,
+        "first_attempt_passed_count": 2,
+        "first_attempt_pass_rate": 1.0,
+        "closed_loop_passed_count": 2,
+        "closed_loop_pass_rate": 1.0,
+        "test_pass_rate": 1.0,
+        "avg_latency_s": 23.865,
+        "avg_tokens_per_sec": 6.63,
+        "details": [
+          {
+            "case_id": "bench_keyerror_nested_prefs",
+            "error_type": "KeyError",
+            "syntax_valid": true,
+            "first_attempt_passed": true,
+            "closed_loop_passed": true,
+            "attempts_used": 1,
+            "latency": 27.328,
+            "tokens_per_sec": 6.9
+          },
+          {
+            "case_id": "bench_indexerror_first_token",
+            "error_type": "IndexError",
+            "syntax_valid": true,
+            "first_attempt_passed": true,
+            "closed_loop_passed": true,
+            "attempts_used": 1,
+            "latency": 20.403,
+            "tokens_per_sec": 6.37
+          }
+        ]
+      },
+      "track3": {
+        "total_questions": 2,
+        "grounded_count": 2,
+        "grounding_rate": 1.0,
+        "avg_tokens_per_sec": 6.97,
+        "avg_latency_s": 79.333,
+        "avg_completion_tokens": 535.5,
+        "details": [
+          {
+            "id": "qa_flask_request_context",
+            "matched_keywords": [
+              "requestcontext",
+              "ctx.py",
+              "push",
+              "pop"
+            ],
+            "is_grounded": true,
+            "eval_count": 370,
+            "latency": 56.701,
+            "tokens_per_sec": 6.85
+          },
+          {
+            "id": "qa_flask_url_rules",
+            "matched_keywords": [
+              "add_url_rule",
+              "rule",
+              "map",
+              "endpoint"
+            ],
+            "is_grounded": true,
+            "eval_count": 701,
+            "latency": 101.965,
+            "tokens_per_sec": 7.09
+          }
+        ]
+      }
+    },
+    "qwen2.5-coder:7b": {
+      "parameter_tier": "7B Parameter Tier",
+      "overall_score": 90.0,
+      "track1": {
+        "total_cases": 7,
+        "tp": 4,
+        "fp": 0,
+        "fn": 0,
+        "tn": 3,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "false_alarm_rate": 0.0,
+        "avg_latency_s": 9.589,
+        "avg_tokens_per_sec": 8.22,
+        "details": [
+          {
+            "name": "calculate_total",
+            "type": "SyntaxError",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 20.342
+          },
+          {
+            "name": "bug2_undefined_variable",
+            "type": "UndefinedVariable",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 5.062
+          },
+          {
+            "name": "bug3_zero_division",
+            "type": "ZeroDivision",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 5.981
+          },
+          {
+            "name": "bug4_off_by_one",
+            "type": "IndexError",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 7.772
+          },
+          {
+            "name": "clean1_sum",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 7.246
+          },
+          {
+            "name": "clean2_is_even",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 10.225
+          },
+          {
+            "name": "clean3_format_name",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 10.498
+          }
+        ]
+      },
+      "track2": {
+        "total_cases": 2,
+        "syntax_valid_count": 2,
+        "syntax_valid_rate": 1.0,
+        "first_attempt_passed_count": 1,
+        "first_attempt_pass_rate": 0.5,
+        "closed_loop_passed_count": 2,
+        "closed_loop_pass_rate": 1.0,
+        "test_pass_rate": 1.0,
+        "avg_latency_s": 21.645,
+        "avg_tokens_per_sec": 8.24,
+        "details": [
+          {
+            "case_id": "bench_keyerror_nested_prefs",
+            "error_type": "KeyError",
+            "syntax_valid": true,
+            "first_attempt_passed": false,
+            "closed_loop_passed": true,
+            "attempts_used": 2,
+            "latency": 35.313,
+            "tokens_per_sec": 7.75
+          },
+          {
+            "case_id": "bench_indexerror_first_token",
+            "error_type": "IndexError",
+            "syntax_valid": true,
+            "first_attempt_passed": true,
+            "closed_loop_passed": true,
+            "attempts_used": 1,
+            "latency": 7.977,
+            "tokens_per_sec": 8.19
+          }
+        ]
+      },
+      "track3": {
+        "total_questions": 2,
+        "grounded_count": 1,
+        "grounding_rate": 0.5,
+        "avg_tokens_per_sec": 7.72,
+        "avg_latency_s": 85.51,
+        "avg_completion_tokens": 642.5,
+        "details": [
+          {
+            "id": "qa_flask_request_context",
+            "matched_keywords": [
+              "requestcontext",
+              "ctx.py",
+              "push",
+              "pop",
+              "_request_ctx_stack"
+            ],
+            "is_grounded": true,
+            "eval_count": 724,
+            "latency": 94.415,
+            "tokens_per_sec": 7.88
+          },
+          {
+            "id": "qa_flask_url_rules",
+            "matched_keywords": [
+              "rule"
+            ],
+            "is_grounded": false,
+            "eval_count": 561,
+            "latency": 76.604,
+            "tokens_per_sec": 7.57
+          }
+        ]
+      }
+    },
+    "deepseek-coder:6.7b": {
+      "parameter_tier": "7B Parameter Tier",
+      "overall_score": 100.0,
+      "track1": {
+        "total_cases": 7,
+        "tp": 4,
+        "fp": 0,
+        "fn": 0,
+        "tn": 3,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "false_alarm_rate": 0.0,
+        "avg_latency_s": 12.61,
+        "avg_tokens_per_sec": 7.85,
+        "details": [
+          {
+            "name": "calculate_total",
+            "type": "SyntaxError",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 13.947
+          },
+          {
+            "name": "bug2_undefined_variable",
+            "type": "UndefinedVariable",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 7.281
+          },
+          {
+            "name": "bug3_zero_division",
+            "type": "ZeroDivision",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 11.725
+          },
+          {
+            "name": "bug4_off_by_one",
+            "type": "IndexError",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 15.719
+          },
+          {
+            "name": "clean1_sum",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 15.706
+          },
+          {
+            "name": "clean2_is_even",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 12.218
+          },
+          {
+            "name": "clean3_format_name",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 11.673
+          }
+        ]
+      },
+      "track2": {
+        "total_cases": 2,
+        "syntax_valid_count": 2,
+        "syntax_valid_rate": 1.0,
+        "first_attempt_passed_count": 1,
+        "first_attempt_pass_rate": 0.5,
+        "closed_loop_passed_count": 2,
+        "closed_loop_pass_rate": 1.0,
+        "test_pass_rate": 1.0,
+        "avg_latency_s": 39.194,
+        "avg_tokens_per_sec": 8.18,
+        "details": [
+          {
+            "case_id": "bench_keyerror_nested_prefs",
+            "error_type": "KeyError",
+            "syntax_valid": true,
+            "first_attempt_passed": false,
+            "closed_loop_passed": true,
+            "attempts_used": 2,
+            "latency": 60.476,
+            "tokens_per_sec": 8.05
+          },
+          {
+            "case_id": "bench_indexerror_first_token",
+            "error_type": "IndexError",
+            "syntax_valid": true,
+            "first_attempt_passed": true,
+            "closed_loop_passed": true,
+            "attempts_used": 1,
+            "latency": 17.911,
+            "tokens_per_sec": 8.4
+          }
+        ]
+      },
+      "track3": {
+        "total_questions": 2,
+        "grounded_count": 2,
+        "grounding_rate": 1.0,
+        "avg_tokens_per_sec": 8.11,
+        "avg_latency_s": 69.16,
+        "avg_completion_tokens": 533.5,
+        "details": [
+          {
+            "id": "qa_flask_request_context",
+            "matched_keywords": [
+              "requestcontext",
+              "ctx.py",
+              "push",
+              "pop"
+            ],
+            "is_grounded": true,
+            "eval_count": 359,
+            "latency": 45.8,
+            "tokens_per_sec": 8.32
+          },
+          {
+            "id": "qa_flask_url_rules",
+            "matched_keywords": [
+              "rule",
+              "map",
+              "endpoint",
+              "url_map"
+            ],
+            "is_grounded": true,
+            "eval_count": 708,
+            "latency": 92.52,
+            "tokens_per_sec": 7.9
+          }
+        ]
+      }
+    },
+    "qwen2.5-coder:3b": {
+      "parameter_tier": "3B Parameter Tier",
+      "overall_score": 100.0,
+      "track1": {
+        "total_cases": 7,
+        "tp": 4,
+        "fp": 0,
+        "fn": 0,
+        "tn": 3,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "false_alarm_rate": 0.0,
+        "avg_latency_s": 3.64,
+        "avg_tokens_per_sec": 68.82,
+        "details": [
+          {
+            "name": "calculate_total",
+            "type": "SyntaxError",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 7.441
+          },
+          {
+            "name": "bug2_undefined_variable",
+            "type": "UndefinedVariable",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 2.892
+          },
+          {
+            "name": "bug3_zero_division",
+            "type": "ZeroDivision",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 2.812
+          },
+          {
+            "name": "bug4_off_by_one",
+            "type": "IndexError",
+            "expected": "Buggy",
+            "verdict": "Buggy",
+            "status": "TP",
+            "latency": 2.797
+          },
+          {
+            "name": "clean1_sum",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 3.139
+          },
+          {
+            "name": "clean2_is_even",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 3.264
+          },
+          {
+            "name": "clean3_format_name",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 3.138
+          }
+        ]
+      },
+      "track2": {
+        "total_cases": 2,
+        "syntax_valid_count": 2,
+        "syntax_valid_rate": 1.0,
+        "first_attempt_passed_count": 0,
+        "first_attempt_pass_rate": 0.0,
+        "closed_loop_passed_count": 2,
+        "closed_loop_pass_rate": 1.0,
+        "test_pass_rate": 1.0,
+        "avg_latency_s": 7.271,
+        "avg_tokens_per_sec": 73.25,
+        "details": [
+          {
+            "case_id": "bench_keyerror_nested_prefs",
+            "error_type": "KeyError",
+            "syntax_valid": true,
+            "first_attempt_passed": false,
+            "closed_loop_passed": true,
+            "attempts_used": 2,
+            "latency": 7.737,
+            "tokens_per_sec": 73.49
+          },
+          {
+            "case_id": "bench_indexerror_first_token",
+            "error_type": "IndexError",
+            "syntax_valid": true,
+            "first_attempt_passed": false,
+            "closed_loop_passed": true,
+            "attempts_used": 2,
+            "latency": 6.804,
+            "tokens_per_sec": 72.75
+          }
+        ]
+      },
+      "track3": {
+        "total_questions": 2,
+        "grounded_count": 2,
+        "grounding_rate": 1.0,
+        "avg_tokens_per_sec": 72.43,
+        "avg_latency_s": 9.163,
+        "avg_completion_tokens": 512.5,
+        "details": [
+          {
+            "id": "qa_flask_request_context",
+            "matched_keywords": [
+              "requestcontext",
+              "ctx.py",
+              "push",
+              "pop",
+              "_request_ctx_stack"
+            ],
+            "is_grounded": true,
+            "eval_count": 571,
+            "latency": 9.926,
+            "tokens_per_sec": 72.91
+          },
+          {
+            "id": "qa_flask_url_rules",
+            "matched_keywords": [
+              "add_url_rule",
+              "rule",
+              "map",
+              "endpoint",
+              "url_map"
+            ],
+            "is_grounded": true,
+            "eval_count": 454,
+            "latency": 8.401,
+            "tokens_per_sec": 71.95
+          }
+        ]
+      }
+    },
+    "starcoder2:3b": {
+      "parameter_tier": "3B Parameter Tier",
+      "overall_score": 42.5,
+      "track1": {
+        "total_cases": 7,
+        "tp": 0,
+        "fp": 0,
+        "fn": 4,
+        "tn": 3,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "false_alarm_rate": 0.0,
+        "avg_latency_s": 5.514,
+        "avg_tokens_per_sec": 83.89,
+        "details": [
+          {
+            "name": "calculate_total",
+            "type": "SyntaxError",
+            "expected": "Buggy",
+            "verdict": "Clean",
+            "status": "FN",
+            "latency": 17.631
+          },
+          {
+            "name": "bug2_undefined_variable",
+            "type": "UndefinedVariable",
+            "expected": "Buggy",
+            "verdict": "Clean",
+            "status": "FN",
+            "latency": 3.494
+          },
+          {
+            "name": "bug3_zero_division",
+            "type": "ZeroDivision",
+            "expected": "Buggy",
+            "verdict": "Clean",
+            "status": "FN",
+            "latency": 3.448
+          },
+          {
+            "name": "bug4_off_by_one",
+            "type": "IndexError",
+            "expected": "Buggy",
+            "verdict": "Clean",
+            "status": "FN",
+            "latency": 3.47
+          },
+          {
+            "name": "clean1_sum",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 3.413
+          },
+          {
+            "name": "clean2_is_even",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 3.482
+          },
+          {
+            "name": "clean3_format_name",
+            "type": "None",
+            "expected": "Clean",
+            "verdict": "Clean",
+            "status": "TN",
+            "latency": 3.662
+          }
+        ]
+      },
+      "track2": {
+        "total_cases": 2,
+        "syntax_valid_count": 2,
+        "syntax_valid_rate": 1.0,
+        "first_attempt_passed_count": 1,
+        "first_attempt_pass_rate": 0.5,
+        "closed_loop_passed_count": 1,
+        "closed_loop_pass_rate": 0.5,
+        "test_pass_rate": 0.5,
+        "avg_latency_s": 6.206,
+        "avg_tokens_per_sec": 83.59,
+        "details": [
+          {
+            "case_id": "bench_keyerror_nested_prefs",
+            "error_type": "KeyError",
+            "syntax_valid": true,
+            "first_attempt_passed": false,
+            "closed_loop_passed": false,
+            "attempts_used": 2,
+            "latency": 8.829,
+            "tokens_per_sec": 83.22
+          },
+          {
+            "case_id": "bench_indexerror_first_token",
+            "error_type": "IndexError",
+            "syntax_valid": true,
+            "first_attempt_passed": true,
+            "closed_loop_passed": true,
+            "attempts_used": 1,
+            "latency": 3.582,
+            "tokens_per_sec": 84.21
+          }
+        ]
+      },
+      "track3": {
+        "total_questions": 2,
+        "grounded_count": 2,
+        "grounding_rate": 1.0,
+        "avg_tokens_per_sec": 84.1,
+        "avg_latency_s": 9.19,
+        "avg_completion_tokens": 595.5,
+        "details": [
+          {
+            "id": "qa_flask_request_context",
+            "matched_keywords": [
+              "requestcontext",
+              "ctx.py",
+              "push",
+              "pop"
+            ],
+            "is_grounded": true,
+            "eval_count": 167,
+            "latency": 4.032,
+            "tokens_per_sec": 84.64
+          },
+          {
+            "id": "qa_flask_url_rules",
+            "matched_keywords": [
+              "add_url_rule",
+              "rule",
+              "endpoint"
+            ],
+            "is_grounded": true,
+            "eval_count": 1024,
+            "latency": 14.348,
+            "tokens_per_sec": 83.57
+          }
+        ]
+      }
+    }
+  }
+}

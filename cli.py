@@ -10,6 +10,7 @@ Examples:
 """
 import argparse
 import atexit
+import json
 import os
 import re
 import subprocess
@@ -125,8 +126,9 @@ def parse_mention(query: str) -> tuple[str, str]:
     # 2. Match standard unquoted @filename pattern
     match = re.search(r'@([\w\-.\/\\]+)', query)
     if match:
-        filename = match.group(1).replace("\\", "/")
-        cleaned_query = query.replace(f"@{filename}", "").strip()
+        raw_token = match.group(1)
+        filename = raw_token.rstrip(".,:;!?").replace("\\", "/")
+        cleaned_query = query.replace(f"@{raw_token}", "").strip()
         cleaned_query = re.sub(r'\s+', ' ', cleaned_query)
         return cleaned_query, filename
     return query, None
@@ -3703,8 +3705,27 @@ def main():
                         help="Severity threshold for security gate failure (default: HIGH)")
     parser.add_argument("--security-policy", type=str, default="strict", choices=["strict", "secrets_only", "STRICT", "SECRETS_ONLY"],
                         help="Security gate policy: 'strict' (default, rejects incomplete AST coverage) or 'secrets_only' (REQ-FUT-05)")
+    parser.add_argument("--mcp", action="store_true", default=False,
+                        help="Start IntelliCodeX as a Model Context Protocol (MCP) JSON-RPC 2.0 stdio server for IDEs")
+    parser.add_argument("--mcp-config", action="store_true", default=False,
+                        help="Generate and print ready-to-use MCP configuration JSON for Claude Desktop, Cursor, and Antigravity")
+    parser.add_argument("--gui", "--preview", action="store_true", default=False,
+                        help="Launch interactive noVNC virtual display GUI preview for graphical apps (Swing, AWT)")
     parser.add_argument("-v", "--version", action="version", version=f"IntelliCodeX CLI v{VERSION}")
     args = parser.parse_args()
+
+    # Immediate MCP Server & Config Handlers
+    if args.mcp_config:
+        from core.mcp_server import generate_ide_config_snippets
+        configs = generate_ide_config_snippets(args.repo_path)
+        print(json.dumps(configs, indent=2))
+        return 0
+
+    if args.mcp:
+        from core.mcp_server import run_stdio_server
+        target = resolve_repo_path(args.repo_path, full_history=args.full_history)
+        run_stdio_server(repo_path=target, backend=args.backend)
+        return 0
 
     if getattr(args, "mascot_mouse", False):
         os.environ["INTELLICODEX_MASCOT_MOUSE"] = "1"
@@ -4054,6 +4075,35 @@ def main():
                 bq, current_path, args=args, session=None, use_tui=False, engine=engine, candidate_files=all_indexed
             )
 
+        # Check if batch query is an explicit GUI preview request (e.g. 'preview @TodoApp.java', 'gui @TodoApp.java')
+        from core.gui_preview import parse_gui_preview_request, execute_gui_preview_command
+        all_indexed = [c.file_path for c in result.store.chunks] if hasattr(result, "store") and result.store and hasattr(result.store, "chunks") else None
+        is_gui_req, gui_target = parse_gui_preview_request(bq, repo_path=current_path, candidate_files=all_indexed)
+        if is_gui_req or getattr(args, "gui", False):
+            return execute_gui_preview_command(bq, current_path, candidate_files=all_indexed, is_batch=True)
+
+        # Check if batch query is an explicit source display request (e.g. 'show me code of @TodoApp.java')
+        from core.canonical_path import parse_source_display_request, render_source_display
+        all_indexed = [c.file_path for c in result.store.chunks] if hasattr(result, "store") and result.store and hasattr(result.store, "chunks") else None
+        is_src_req, src_target = parse_source_display_request(bq, repo_path=current_path, candidate_files=all_indexed)
+        if is_src_req and src_target:
+            render_source_display(current_path, src_target, candidate_files=all_indexed, HAS_RICH=HAS_RICH, console=console)
+            return 0
+
+        # Check if batch query is an explicit file-scoped modification request or patch command
+        from core.canonical_path import parse_file_modification_request, resolve_canonical_target_path
+        is_mod_req, mod_target, mod_inst = parse_file_modification_request(bq, repo_path=current_path, candidate_files=all_indexed)
+        patch_triggers = ("fix", "patch", "update", "change", "modify", "refactor", "apply")
+        is_patch_cmd = any(bq.lower().startswith(f"{t}:") or bq.lower().startswith(f"{t} ") for t in patch_triggers) or is_mod_req
+
+        if is_patch_cmd:
+            print(f"[*] Detected file modification request targeting '{mod_target or 'repository'}': '{mod_inst or bq}'")
+            print(f"[*] Per IntelliCodeX developer protection invariant: Modification requests require interactive patch review, diff inspection, and developer approval.")
+            print(f"[*] Automatic modification is blocked in non-interactive batch mode to prevent silent code alteration.")
+            print(f"[*] Please run without --query to review and approve the proposal interactively:")
+            print(f"    run_cli.bat\n")
+            return 0
+
         # Parse @mention from batch query as well
         cleaned_query, mention_file = parse_mention(args.query)
         
@@ -4294,6 +4344,11 @@ def main():
                     use_tui = False
                     query = input(">> ").strip()
             else:
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                except Exception:
+                    pass
                 query = input(">> ").strip()
         except (EOFError, KeyboardInterrupt):
             cleanup_cli_resources(watcher)
@@ -4378,6 +4433,21 @@ def main():
             )
             render_markdown_panel(arch_report.format_markdown(), title="Architecture Optimization Report")
             print(f"[*] [Time Consumed]: Architecture analysis in {format_time_consumed(time.perf_counter() - t_arch)}\n")
+            continue
+
+        if query.lower() in ("mcp", "mcp:config", "mcp-config"):
+            from core.mcp_server import generate_ide_config_snippets
+            configs = generate_ide_config_snippets(current_path)
+            cfg_json = json.dumps(configs, indent=2)
+            if HAS_RICH and console:
+                console.print(Panel(
+                    Syntax(cfg_json, "json", theme="monokai", line_numbers=True),
+                    title="[bold cyan]Model Context Protocol (MCP) Configuration[/bold cyan]",
+                    subtitle="Copy into claude_desktop_config.json, .cursor/mcp.json, or mcp_config.json",
+                    border_style="cyan"
+                ))
+            else:
+                print("\nModel Context Protocol (MCP) Configuration:\n" + cfg_json + "\n")
             continue
 
         if query.lower().startswith("why:") or query.lower().startswith("org:") or query.lower().startswith("history:"):
@@ -4923,20 +4993,65 @@ def main():
             )
             continue
 
+        # Interactive GUI Preview: preview @<file>, gui @<file>, run --gui @<file>
+        from core.gui_preview import parse_gui_preview_request, execute_gui_preview_command
+        all_indexed = [c.file_path for c in result.store.chunks] if hasattr(result, "store") and result.store and hasattr(result.store, "chunks") else None
+        is_gui_req, gui_target = parse_gui_preview_request(query, repo_path=current_path, candidate_files=all_indexed)
+        if is_gui_req:
+            execute_gui_preview_command(query, current_path, candidate_files=all_indexed, session=session, use_tui=use_tui, is_batch=False)
+            continue
+
+
+        # Explicit Source Display: show me code of @<file>, view @<file>, code: @<file>, cat @<file>
+        from core.canonical_path import parse_source_display_request, render_source_display
+        all_indexed = [c.file_path for c in result.store.chunks] if hasattr(result, "store") and result.store and hasattr(result.store, "chunks") else None
+        is_src_req, src_target = parse_source_display_request(query, repo_path=current_path, candidate_files=all_indexed)
+        if is_src_req and src_target:
+            render_source_display(current_path, src_target, candidate_files=all_indexed, HAS_RICH=HAS_RICH, console=console)
+            continue
+
+        from core.canonical_path import parse_file_modification_request, resolve_canonical_target_path, discover_relevant_tests
+        
+        is_mod_req, mod_target, mod_inst = parse_file_modification_request(query, repo_path=current_path, candidate_files=all_indexed)
+
+        # If target file does not exist on disk and intent is new creation, route to create: workflow
+        is_new_creation = False
+        if is_mod_req and mod_target:
+            canon_check, _ = resolve_canonical_target_path(current_path, mod_target, candidate_files=all_indexed)
+            if not canon_check and any(mod_inst.lower().startswith(v) for v in ("create", "build", "write", "generate")):
+                is_new_creation = True
+
+        if is_new_creation:
+            from core.code_creation import execute_create_command
+            create_query = f"create: {mod_inst} Target: {mod_target}"
+            res_c, eng_c = execute_create_command(
+                create_query, current_path, embedder, llm, args, session=session, use_tui=use_tui, is_batch=False
+            )
+            if res_c is not None and eng_c is not None:
+                result = res_c
+                engine = eng_c
+            else:
+                from core.persistence import get_repo_id, load_conversation_memory
+                load_conversation_memory(get_repo_id(current_path), engine.memory)
+            continue
 
         patch_triggers = ("fix", "patch", "update", "change", "modify", "refactor", "apply")
-        is_patch_cmd = any(query.lower().startswith(f"{t}:") or query.lower().startswith(f"{t} ") for t in patch_triggers)
+        is_patch_cmd = any(query.lower().startswith(f"{t}:") or query.lower().startswith(f"{t} ") for t in patch_triggers) or is_mod_req
         if is_patch_cmd:
-            if ":" in query:
+            if is_mod_req and mod_target:
+                mention_f = mod_target
+                clean_err = mod_inst
+                err_input = f"File modification instruction for {mod_target}: {clean_err}"
+            elif ":" in query and any(query.lower().startswith(f"{t}:") for t in patch_triggers):
                 err_input = query.split(":", 1)[1].strip()
-            else:
+                clean_err, mention_f = parse_mention(err_input)
+            elif any(query.lower().startswith(f"{t} ") for t in patch_triggers):
                 err_input = query.split(maxsplit=1)[1].strip()
+                clean_err, mention_f = parse_mention(err_input)
+            else:
+                err_input = query
+                clean_err, mention_f = parse_mention(err_input)
             
-            # Handle @file syntax in fix/update commands
-            clean_err, mention_f = parse_mention(err_input)
-            from core.canonical_path import resolve_canonical_target_path, discover_relevant_tests
-            all_indexed = [c.file_path for c in result.store.chunks] if hasattr(result, "store") and result.store and hasattr(result.store, "chunks") else None
-
             # If user didn't use @file but passed a filename or file path directly
             if not mention_f and err_input:
                 raw_cand = err_input.lstrip("@").strip()
@@ -4944,9 +5059,20 @@ def main():
                 if c_test:
                     mention_f = c_test
                     clean_err = ""
+                else:
+                    parts = err_input.split(maxsplit=1)
+                    if parts:
+                        token_cand = parts[0].lstrip("@").strip()
+                        c_test, _ = resolve_canonical_target_path(current_path, token_cand, candidate_files=all_indexed)
+                        if c_test:
+                            mention_f = c_test
+                            clean_err = parts[1] if len(parts) > 1 else ""
 
             repair_extra_files = None
             repair_contract_type = "existing_tests"
+            user_contract_spec = None
+            user_clarif = None
+            proposal = None
 
             if mention_f:
                 canon_path, disambig_err = resolve_canonical_target_path(current_path, mention_f, candidate_files=all_indexed)
@@ -5089,6 +5215,10 @@ def main():
                     repair_extra_files = {rel_test_file: proposal.test_code}
                     repair_contract_type = "ai_generated_proposal"
                     discovered_tests = [f"{rel_test_file} (AI-Generated Proposal)"]
+                    if user_clarif:
+                        user_contract_spec = user_clarif
+                    elif proposal and getattr(proposal, "contract_analysis", None):
+                        user_contract_spec = getattr(proposal.contract_analysis, "user_clarification", None)
                 else:
                     print(f"[*] Discovered {len(discovered_tests)} relevant test file(s): {', '.join(discovered_tests)}")
 
@@ -5130,6 +5260,9 @@ def main():
                     )
                     if clean_err and clean_err.strip():
                         err_input += f"\nUser Instruction / Additional Notes: {clean_err.strip()}\n"
+                        user_contract_spec = (user_contract_spec + "\n" if user_contract_spec else "") + f"User Instruction: {clean_err.strip()}"
+                    if user_contract_spec:
+                        err_input = f"[ACCEPTED CONTRACT SPECIFICATION (MANDATORY REQUIREMENT)]:\n{user_contract_spec}\n\n" + err_input
             else:
                 from core.sandbox_runner import SandboxRunner
                 sb_runner = SandboxRunner(
@@ -5164,6 +5297,7 @@ def main():
                 progress_callback=_on_fix_progress,
                 extra_files=repair_extra_files,
                 contract_type=repair_contract_type,
+                user_contract=user_contract_spec,
             )
             fix_time = time.perf_counter() - t_fix
 
@@ -5208,11 +5342,19 @@ def main():
                         mode=current_mode,
                         verification_info=patch_rec.get("sandbox_validation", {}),
                     )
-                    prompt_label = "Choose action ([a]pprove & commit, [c]ancel, [u] toggle view): "
+                    if is_verified:
+                        prompt_label = "Choose action ([a]pprove & commit, [c]ancel, [u] toggle view): "
+                    else:
+                        prompt_label = "Choose action ([c]ancel, [u] toggle view - approval unavailable while validation fails): "
                     try:
                         if session is not None and use_tui:
                             action = session.prompt(prompt_label).strip().lower()
                         else:
+                            try:
+                                sys.stdout.flush()
+                                sys.stderr.flush()
+                            except Exception:
+                                pass
                             action = input(prompt_label).strip().lower()
                     except (EOFError, KeyboardInterrupt):
                         action = "c"
@@ -5221,6 +5363,13 @@ def main():
                         current_mode = "unified" if current_mode == "side_by_side" else "side_by_side"
                         continue
                     elif action in ("a", "approve", "y", "yes"):
+                        if not is_verified:
+                            msg_unavail = "[!] Approval is unavailable: candidate patch failed validation and cannot be approved."
+                            if HAS_RICH and console:
+                                console.print(f"\n[bold red]{msg_unavail}[/bold red]\n")
+                            else:
+                                print(f"\n{msg_unavail}\n")
+                            continue
                         from core.patch_generator import evaluate_patch_approval_gate
                         from core.persistence import get_repo_id, save_repo_activity, load_conversation_memory
                         curr_repo_id = get_repo_id(current_path)

@@ -616,14 +616,17 @@ def test_java_todo_app_creation_workflow_and_approval(disposable_workspace):
 
         # Simulate verified candidate test execution to verify application gate passes and file saves
         simulated_proposal = dict(proposal)
+        simulated_proposal["test_provenance"] = "independently_supplied"
+        simulated_proposal["requirements_status"] = "grounded_contract"
         simulated_proposal["sandbox_validation"] = {
             "verified": True,
             "test_status": "passed",
             "passed_count": 4,
             "failed_count": 0,
             "total_count": 4,
+            "requirement_tests_passed_count": 4,
             "passed_tests": ["testAddAndList", "testCompleteTask", "testDeleteTask", "testInvalidInput"],
-            "test_result": {"success": True, "exit_code": 0, "passed_count": 4},
+            "test_result": {"success": True, "exit_code": 0, "passed_count": 4, "requirement_tests_passed_count": 4},
         }
         simulated_proposal["security_validation"] = {
             "security_status": "passed",
@@ -1598,6 +1601,205 @@ def test_grounded_requirements_incorporates_concrete_test_vectors(disposable_wor
     test_rel, test_code, notes = adapter.generate_candidate_tests("math_lib.py", code, reqs)
     assert "120" in test_code
     assert "test_factorial_user_requirement" in test_code
+
+
+def test_smoke_only_evidence_cannot_approve_creation(disposable_workspace):
+    """
+    Verifies that when a creation proposal only has smoke/interface tests (e.g. EventLogger),
+    it receives status='pending', requirements_status='interface_smoke_only', and is
+    strictly rejected by evaluate_patch_approval_gate.
+    """
+    root = disposable_workspace["root"]
+    engine = CodeCreationEngine(repo_path=root)
+    logger_inst = 'create: EventLogger class with log(msg) method Target: "logger.py"'
+    logger_code = 'class EventLogger:\n    def log(self, msg):\n        return f"[LOG] {msg}"\n'
+
+    proposal = engine.propose_creation(logger_inst, generate_tests=True, candidate_code=logger_code)
+    assert proposal["status"] == "pending"
+    assert proposal["requirements_status"] == "interface_smoke_only"
+    assert proposal["missing_coverage"] is not None
+    assert proposal["clarification_needed"] is not None
+    assert proposal["sandbox_validation"]["smoke_verified"] is True
+    assert proposal["sandbox_validation"]["verified"] is False
+
+    ok_gate, gate_msg = evaluate_patch_approval_gate(proposal)
+    assert ok_gate is False
+    assert "Approval rejected" in gate_msg
+
+    # Even if verified=True is manually set on a smoke-only proposal, the gate rejects
+    fabricated = dict(proposal)
+    fabricated["sandbox_validation"] = dict(proposal["sandbox_validation"])
+    fabricated["sandbox_validation"]["verified"] = True
+    ok_fab, msg_fab = evaluate_patch_approval_gate(fabricated)
+    assert ok_fab is False
+    assert "smoke/interface verification" in msg_fab
+
+
+def test_requirement_violating_implementation_is_rejected(disposable_workspace):
+    """
+    Verifies that when a candidate implementation violates an explicit requirement vector,
+    the generated test catches the violation (assertion failure), verified is False, and the gate rejects.
+    """
+    root = disposable_workspace["root"]
+    engine = CodeCreationEngine(repo_path=root)
+    inst = 'create: define calculate_discount(price, rate) that returns price * (1 - rate). Given (100, 0.2) returns 80.0 Target: "discount.py"'
+    violating_code = 'def calculate_discount(price, rate):\n    return price\n'
+
+    proposal = engine.propose_creation(inst, generate_tests=True, candidate_code=violating_code)
+    assert proposal["status"] == "pending"
+    assert proposal["sandbox_validation"]["verified"] is False
+    assert proposal["sandbox_validation"]["failure_category"] == "assertion_failure"
+    assert any("test_calculate_discount_user_requirement" in t for t in proposal["sandbox_validation"]["failed_tests"])
+
+    ok_gate, gate_msg = evaluate_patch_approval_gate(proposal)
+    assert ok_gate is False
+    assert "failed test" in gate_msg.lower() or "failing test" in gate_msg.lower()
+
+
+def test_correctly_mapped_requirement_test_passes_and_approves(disposable_workspace):
+    """
+    Verifies that when candidate code satisfies the requirement vector, the requirement test
+    passes, requirements_status is grounded_contract, status is verified, and the gate approves.
+    """
+    root = disposable_workspace["root"]
+    engine = CodeCreationEngine(repo_path=root)
+    inst = 'create: define calculate_discount(price, rate) that returns price * (1 - rate). Given (100, 0.2) returns 80.0 Target: "discount.py"'
+    correct_code = 'def calculate_discount(price, rate):\n    return price * (1.0 - rate)\n'
+
+    proposal = engine.propose_creation(inst, generate_tests=True, candidate_code=correct_code)
+    assert proposal["status"] == "verified"
+    assert proposal["requirements_status"] == "grounded_contract"
+    assert proposal["sandbox_validation"]["verified"] is True
+    assert proposal["sandbox_validation"]["requirement_tests_passed_count"] >= 1
+
+    ok_gate, gate_msg = evaluate_patch_approval_gate(proposal)
+    assert ok_gate is True
+    assert "passed" in gate_msg.lower()
+
+
+def test_unbound_ambiguous_requirements_cannot_claim_coverage(disposable_workspace):
+    """
+    Verifies that when an instruction provides a vector matching multiple same-arity functions,
+    the generator does NOT silently attach it. Coverage is not claimed and proposal remains smoke-only.
+    """
+    root = disposable_workspace["root"]
+    engine = CodeCreationEngine(repo_path=root)
+    inst = 'create: Math operations with add(a, b) and sub(a, b). Given (10, 20) returns 30 Target: "math_ops.py"'
+    code = 'def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n'
+
+    proposal = engine.propose_creation(inst, generate_tests=True, candidate_code=code)
+    assert proposal["status"] == "pending"
+    assert proposal["requirements_status"] == "interface_smoke_only"
+    assert proposal["sandbox_validation"]["verified"] is False
+    assert any("Ambiguous requirement vector" in note for note in proposal["requirements_evaluation"]["limitations_noted"])
+
+    ok_gate, gate_msg = evaluate_patch_approval_gate(proposal)
+    assert ok_gate is False
+
+
+def test_multiple_vectors_generate_unique_test_names():
+    """
+    Verifies that multiple test vectors produce unique test function identifiers
+    rather than overwriting one another in the generated module AST.
+    """
+    from core.creation_adapters import analyze_requirements, PythonLanguageAdapter
+    inst = 'create: square(n). when given 1 returns 1; when given 2 returns 4; when given 3 returns 9 Target: "square.py"'
+    reqs = analyze_requirements(inst)
+    assert len(reqs.test_vectors) == 3
+
+    adapter = PythonLanguageAdapter()
+    code = 'def square(n):\n    return n * n\n'
+    _, test_code, _ = adapter.generate_candidate_tests("square.py", code, reqs)
+
+    assert "def test_square_user_requirement():" in test_code
+    assert "def test_square_user_requirement_2():" in test_code
+    assert "def test_square_user_requirement_3():" in test_code
+    ast.parse(test_code)
+
+
+def test_smoke_assertion_with_behavioral_name_rejected_without_explicit_provenance():
+    """
+    Verifies that a smoke assertion named with a behavioral-looking name (e.g. test_process_payment)
+    CANNOT upgrade smoke checks into behavioral verification on an AI-generated candidate contract
+    when requirement metadata is missing.
+    Also verifies that explicit provenance (test_provenance='independently_supplied') allows
+    independently supplied test workflows to pass.
+    """
+    proposal = {
+        "target_file": "payment.py",
+        "suggested_patch": "def process_payment(amount):\n    return True\n",
+        "is_new_file": True,
+        "contract_type": "ai_generated_candidate_contract",
+        "requirements_status": "interface_smoke_only",
+        "repo_id": "owner_12345678",
+        "sandbox_validation": {
+            "verified": True,
+            "test_status": "passed",
+            "passed_count": 1,
+            "failed_count": 0,
+            "total_count": 1,
+            "passed_tests": ["test_process_payment"],
+            "test_result": {
+                "success": True,
+                "exit_code": 0,
+                "passed_count": 1,
+                "passed_tests": ["test_process_payment"],
+            },
+        },
+        "security_validation": {
+            "security_status": "passed",
+            "security_approved": True,
+            "security_policy": "strict",
+        },
+    }
+
+    # Without explicit provenance or requirement metadata, gate MUST reject
+    ok_gate, gate_msg = evaluate_patch_approval_gate(proposal, target_repo_id="owner_12345678")
+    assert ok_gate is False
+    assert "smoke/interface verification" in gate_msg
+
+    # With explicit independent provenance, the workflow is preserved and approved
+    independent_proposal = dict(proposal)
+    independent_proposal["test_provenance"] = "independently_supplied"
+    ok_indep, indep_msg = evaluate_patch_approval_gate(independent_proposal, target_repo_id="owner_12345678")
+    assert ok_indep is True
+    assert "passed" in indep_msg.lower()
+
+
+def test_partial_requirement_coverage_rejected_when_unbound_requirement_remains(disposable_workspace):
+    """
+    Verifies that when an instruction has multiple explicit requirements, and one requirement test
+    passes while another requirement is unbound/missing, the proposal receives:
+    - requirements_status = 'partial_coverage'
+    - missing_coverage detailing the unbound requirement
+    - status = 'pending'
+    - sandbox verified = False
+    - central gate strictly rejects approval citing partial coverage.
+    """
+    root = disposable_workspace["root"]
+    engine = CodeCreationEngine(repo_path=root)
+    inst = (
+        'create: calculate_discount(100, 0.2) returns 80.0. '
+        'Also extra_feature(5) returns 10. Target: "multi_req.py"'
+    )
+    code = (
+        'def calculate_discount(price, rate):\n'
+        '    return price * (1.0 - rate)\n'
+    )
+
+    proposal = engine.propose_creation(inst, generate_tests=True, candidate_code=code)
+    assert proposal["status"] == "pending"
+    assert proposal["requirements_status"] == "partial_coverage"
+    assert proposal["has_uncovered_requirements"] is True
+    assert "extra_feature" in str(proposal["missing_coverage"])
+    assert proposal["sandbox_validation"]["verified"] is False
+    assert proposal["sandbox_validation"]["requirement_tests_passed_count"] == 1
+
+    ok_gate, gate_msg = evaluate_patch_approval_gate(proposal, target_repo_path=root)
+    assert ok_gate is False
+    assert "partial requirement coverage" in gate_msg.lower()
+    assert "extra_feature" in gate_msg
+
 
 
 

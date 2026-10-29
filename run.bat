@@ -43,6 +43,10 @@ if "%~1"=="5" goto :INSTALL_DEPS
 if "%~1"=="--push" goto :UPDATE_GITHUB
 if "%~1"=="--sync" goto :UPDATE_GITHUB
 if "%~1"=="6" goto :UPDATE_GITHUB
+if "%~1"=="--mcp" goto :START_MCP
+if "%~1"=="7" goto :START_MCP
+if "%~1"=="--mcp-config" goto :MCP_CONFIG
+if "%~1"=="8" goto :MCP_CONFIG
 
 :MENU
 cls
@@ -56,11 +60,13 @@ echo   [3] Start Local Backend API Server (FastAPI - Port 8000)
 echo   [4] Run with Docker Compose (MongoDB + Ollama + Backend)
 echo   [5] Install / Update Python Dependencies
 echo   [6] Sync / Push Code to GitHub
-echo   [7] Exit
+echo   [7] Start Model Context Protocol (MCP) Server for IDEs (Cursor/VSCode/Antigravity)
+echo   [8] Print MCP IDE Configuration JSON
+echo   [9] Exit
 echo.
 echo =======================================================================
 set "choice="
-set /p "choice=Select an option (1-7): "
+set /p "choice=Select an option (1-9): "
 
 if "!choice!"=="1" goto :START_CLI
 if "!choice!"=="2" goto :START_CLI_OFFLINE
@@ -68,7 +74,9 @@ if "!choice!"=="3" goto :START_BACKEND
 if "!choice!"=="4" goto :START_DOCKER
 if "!choice!"=="5" goto :INSTALL_DEPS
 if "!choice!"=="6" goto :UPDATE_GITHUB
-if "!choice!"=="7" goto :END
+if "!choice!"=="7" goto :START_MCP
+if "!choice!"=="8" goto :MCP_CONFIG
+if "!choice!"=="9" goto :END
 echo Invalid choice, please try again.
 pause
 goto :MENU
@@ -126,6 +134,20 @@ if exist "%~dp0update_github.bat" (
     echo update_github.bat not found in script directory.
     pause
 )
+goto :MENU
+
+:START_MCP
+echo.
+echo Starting IntelliCodeX Model Context Protocol (MCP) stdio server...
+echo Point your IDE (Cursor, Claude Desktop, Antigravity) to this server process.
+"%PYTHON_EXE%" -m core.mcp_server --repo sample_repo
+goto :END
+
+:MCP_CONFIG
+echo.
+echo IntelliCodeX Model Context Protocol (MCP) Configuration for IDEs:
+"%PYTHON_EXE%" -m core.mcp_server --config
+pause
 goto :MENU
 
 :END

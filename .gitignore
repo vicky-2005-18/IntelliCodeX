@@ -23,6 +23,7 @@ frontend/dist/
 .repos/
 storage_data/
 repos_data/
+scratch/test_repo_remove_sandbox/
 
 # Tool folders
 .agent/

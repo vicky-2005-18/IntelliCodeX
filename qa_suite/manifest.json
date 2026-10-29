@@ -1,0 +1,200 @@
+{
+  "python_task1": {
+    "path": "error_in_this/python/task1",
+    "target_file": "stats_calculator.py",
+    "runtime": "python",
+    "test_command": "pytest test_stats_calculator.py",
+    "defects": [
+      "calculate_mean: raises ZeroDivisionError on empty list instead of ValueError",
+      "calculate_trimmed_mean: off-by-one right slice trims extra element",
+      "calculate_range: inverted return tuple order (max, min) instead of (min, max)"
+    ],
+    "initial_hashes": {
+      "stats_calculator.py": "f00d6ee3ee759654f1203650b28f3a56eab61ffccd1d157df2e2ec64e58780f8",
+      "test_stats_calculator.py": "be9add8b5c07f75f87f10305aee464a39be413901919e818f6d6447b72c6dc6f"
+    }
+  },
+  "python_task2": {
+    "path": "error_in_this/python/task2",
+    "target_file": "inventory/pricing.py",
+    "runtime": "python",
+    "test_command": "pytest tests/test_checkout_service.py",
+    "total_files": 108,
+    "defects": [
+      "calculate_discounted_total returns discount amount instead of discounted total (subtotal * (1 - discount_rate))",
+      "Cross-file caller checkout_service produces wrong invoice amounts"
+    ],
+    "initial_hashes": {
+      "analytics\\pricing.py": "f02deb82aff512c9f85f2b331065bda714f958d76341720d4077cc4a50bb8323",
+      "analytics\\__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "inventory\\pricing.py": "cb994e879c32104ffc1f97a1b8a576d4475027f5e1cd2b0d4ee6a6c622b67f81",
+      "inventory\\__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "models\\item_001.py": "e3eacc4620d0732afe23e78111eb1544f2c285361c074eb39fbaccd1bc171183",
+      "models\\item_002.py": "a9896a7bc9ff9b85fd481ceefcf0980fdd9c2202aaeea2cc15885cc74f489c72",
+      "models\\item_003.py": "5c022fb6b342bdb03cd86d129549c6b4563baa7f0e6e60e26f37147f0f94f9c7",
+      "models\\item_004.py": "7710fb1caca3d780dc1464a0077dfaa2141aa24053560144673d1342e5e03a24",
+      "models\\item_005.py": "2aef681cf6af3e03983eb803a3c6098537acfcbdc97090b1b098490533a2c804",
+      "models\\item_006.py": "3b2fdd79d7963464083be4323ac5e38829c6d378746aa5a9d02a93798ab25017",
+      "models\\item_007.py": "3ceb45d2ec4c1f6df63e7ae8c0d1a2b37421cba4f2f11f10c48eb0fce3260c77",
+      "models\\item_008.py": "2fe3c872e812006cf6d16030bccbe061c2ff9a6923669f88e5be662a365946e3",
+      "models\\item_009.py": "6275cad4dbca25909021b3d452e39693cb924b79f7e816f244185738c7d04270",
+      "models\\item_010.py": "7fa3f49a63be401c51f97467fcb4c4675394657a902937f52da3e50916f2eae6",
+      "models\\item_011.py": "1aa5c6e362c04d1a0bbeaa436f8aa5f24e0966ebff4aa7ad18888b8db5bf6797",
+      "models\\item_012.py": "91be761bc28bd7ec5bf3fd8c50e3458b2aaa1f608d040e0b89c551057a924644",
+      "models\\item_013.py": "ef72c9ef20eb36020d9dade6f4813f1e3db4b8e086cc907b3ec74a4538bbc4ea",
+      "models\\item_014.py": "f84864f3fb01dc0608b8a0dd892b0474bc513b23e5a9da382db29288113376da",
+      "models\\item_015.py": "3717ee752656c0335c688a7d780282bc85d5ce9e6849ddf9044c16b4272c1257",
+      "models\\item_016.py": "1e2ccb1898347eff856737a1dd5d492b83429c404164ccee32477e2f7107d519",
+      "models\\item_017.py": "73b374dd2164d09c489e1ed61c3e2a52e376241bda7c0a924cdfacbb2eef03df",
+      "models\\item_018.py": "c7f478e7e11b09a99a4a3616537a0b5e7f7c15d224eb7cc16b8a0e1016b4f860",
+      "models\\item_019.py": "a5a75ed81a05f268d2a205167da50342664540893fac59a32364aeaad2ade870",
+      "models\\item_020.py": "fc6dee5cb6066cba7af3121a5c282b6c78418d0308895fa984ca71c5aad51874",
+      "models\\item_021.py": "849b85b4c0f52f2174bab5a82a3874005aecf803ae29416c88717523a822edb8",
+      "models\\item_022.py": "acf37d0d0acdeafd17376c8228f95744ff28f66f43989ab98e700a79c0c7cb4b",
+      "models\\item_023.py": "1e987cc6277ac2a59d1ec9c7c722b9bbd363f710fe6d0a27e0fb0ca2453f980a",
+      "models\\item_024.py": "98734a2b4933be7d6228a994b99f15d0f58436bd206517a6c9159c1a7581520b",
+      "models\\item_025.py": "4d654bb4e8a174f05a15efbb6ac4e002a75a018c11fc5cb9b191ba278c88eaa9",
+      "models\\item_026.py": "98bf281a2357cf9123fbb5a8320f5d862643fa965cdf2af4d80a832a6e4b1d89",
+      "models\\item_027.py": "48de569d54303d0d58f852c107c213c8aa89f375e6f0ec1ab0f16a3c8bcc12ca",
+      "models\\item_028.py": "37d0682eacfe685bf59d09e050d6ccd5c1b394ecdac867552030a5369e4be6f4",
+      "models\\item_029.py": "2739239cc08d8c7c7336a25f05cb366ab966693c674cc76c6a346ca034bedac2",
+      "models\\item_030.py": "e93c62731b96df7e9c60a8e0b423357c981c25ab83c6a686e374c61568373572",
+      "models\\item_031.py": "f63a0ccfbbedcee7a493acb1da2d5e7bb2462b76201d18c06f516b1bb385b576",
+      "models\\item_032.py": "6fe5ce24f3d4e3c6e4db255bb62896218805e7b6f70f48a4075e70b2cf5226b9",
+      "models\\item_033.py": "897997e2dc87ebc8f58a8a207b21fb917e373e9e643fc1882b63218bb2eae93d",
+      "models\\item_034.py": "91d09a9f145c3c713f2a2e62f85a54b996091e31eb6760bae96599fa4d7d00e1",
+      "models\\item_035.py": "753f011d9a81f630ab334109e6c6d1559cd7c9df50f908a1d3dc79f919684c48",
+      "models\\item_036.py": "9e971be6ca5bc0a8680eff927f46937afb1268f4d4a4c029fbdb3d0a30343d3a",
+      "models\\item_037.py": "7f004642d20bfc5a0d4567bd4bf0a6237d1d81b8af9ce914f0e97886f9d443db",
+      "models\\item_038.py": "0800f3d839eaa95196ccd81a8da09240bd79651f49a175e0857774ae02e67fd4",
+      "models\\item_039.py": "97db5a382d2a3efd316365b4cc5296becb1acc0db6c4a10fabd0c6ea268e9b11",
+      "models\\item_040.py": "0fb76dc360acaa70fd2655e3eeb69d235b36eb9661fd7374683081325d16fcd0",
+      "models\\item_041.py": "50a8e55b0817d1352497803cb9963fdd68cc84ea8eddb15962eaa22673a317e6",
+      "models\\item_042.py": "c6e786fa29e7b00a5301266995de988675d3dd4ea2bdba84cfce52781d39d2d8",
+      "models\\item_043.py": "61332ee30b493bee8236f600ec4152196b4f6fb61621de00eedef932cbcc243e",
+      "models\\item_044.py": "777d2ea238de0b3e2d1ed4c46dbfa6382bc43e3925311daca599793086b920c5",
+      "models\\item_045.py": "8c895e04b189999d1f21525fdac93dd1ed3bddde2e50c46d02fa69794784cec4",
+      "models\\item_046.py": "c3279e99848623ad0db5406e5c2ebc222a645a579b6e3a5ec365d565a0aca61d",
+      "models\\item_047.py": "357fcae6d05e3f487f13fa1b562f9134d32116a38c7cd10fe97b2669ac00be23",
+      "models\\item_048.py": "6aec0376f7a187ac8c5dd775d24d24a124373e14e3647b27b1420f5e7e8bb4f3",
+      "models\\item_049.py": "1b96861cca5d1e9142fdb373236345a0dc40d9c3d1b9df7a71d0a612ba8832b0",
+      "models\\item_050.py": "3019af374ea11c7d4615586371f0245fd0759ceffed69c4a494944476b9a4cc5",
+      "models\\item_051.py": "379f1469a31edad6c690894b22ffae276eada18c9f601ca923a03cd1048c5cb8",
+      "models\\item_052.py": "317766b0abcd682bd51d2bb967ea4bfbe3f47887861a5c6a53d69c0639e382e8",
+      "models\\item_053.py": "a959ba9bb168a94d055d01a04bd5996831e087a59ed0d959c1d584d63be85c0c",
+      "models\\item_054.py": "f0a7accf1db3846dd963d78fb5120a28b042f662836f09a6def7e6e9e4294640",
+      "models\\item_055.py": "44c9cbfd3383a13629b11da1930a328a9a95d4c47b093937fba5e00ff15c3e38",
+      "models\\item_056.py": "bee36b52d42cb4254e2e8c158d40a05c661dffddad286b3a8d6c4c5df8cfbfde",
+      "models\\item_057.py": "e525a7448b227d8327db4aafe2ef1c040bf3ffce0ceb043533849835f47c3bed",
+      "models\\item_058.py": "6a603e3d34c0415d7b6e945907ce8f6cfefb7aafd83d00b682983465ce7cf4b0",
+      "models\\item_059.py": "8dcd5ba337cbdd94addeae560c9cd2e940bb08de8f2c7b4106d191f8996dd168",
+      "models\\item_060.py": "68a50d1c803c6c8d98a3f95cce79fdad51df28ed442b36a266c923d56a467672",
+      "models\\item_061.py": "581ff6108fcf2e7b45c417ad4960fe2e7b11fb1454cd7077d85eb39aae35eb39",
+      "models\\item_062.py": "f323b88bc3660bae43d24a3dd8e491364ce95b7c2873da91027dcf0c0af217e5",
+      "models\\item_063.py": "792ba06775e40cc404bb8b464ace9861969f656266aa07a3393c5284dbb028e4",
+      "models\\item_064.py": "2778c3bc61e7d57537a6478693463446bce29eed36c4e177b9cb66fa68caa30e",
+      "models\\item_065.py": "346603d68574bc4624cc71e0ae4f18c41bf7e90ee593c24c7916b83c4d97c11f",
+      "models\\item_066.py": "1307ae8898ce35e8908d0b94988fe8ac875d542ff633ace562e6c63f518f7464",
+      "models\\item_067.py": "3565c3b2f6dc70cb7fb94b27ea7a58e933e6fb05c0e2a05d430adedbeecf2216",
+      "models\\item_068.py": "140788904d08ce8cf74433039a5bda8d157b0bba6867e33a68d897c41843fab4",
+      "models\\item_069.py": "f1105a373222e3258d2fb05c115418cf2c6f34d1b80be4f0357bd4641a74a545",
+      "models\\item_070.py": "796028959986cd317a170b7acf0958070599cff56a980578abf5a1f3ff64ee19",
+      "models\\item_071.py": "cf4ae4dde3eda193bd7b9cc4e434536e8478bb315912e65a03bc710eafc7a295",
+      "models\\item_072.py": "20695d4b69ac2177201017583a46ddc7aa2b80bd34c0cf7b198bb98af0aa7ef7",
+      "models\\item_073.py": "bebc0822a1380bda33202c83d23e1ecb516d4c07df3eab7871c15ef2679781c6",
+      "models\\item_074.py": "c7c6092b2aa703230eed6446433d29b56b140104b00bfce6334c2002c0c732d2",
+      "models\\item_075.py": "ef03a8d4e749ea148db86e62fbed449bf457f925dc95a9007e894c0ed4c4621b",
+      "models\\item_076.py": "e77b347d3670cb5fd406f40433a6971fd568a84bdbc6b1a25037771eb6615113",
+      "models\\item_077.py": "1543a0b0fa20804d6232cccaee1667175c268c404e1614d8862dc0ef83a6f618",
+      "models\\item_078.py": "c8ca22cedb452b6866f58fea598c7dbbb66327a678c1e610216c40bd997dc096",
+      "models\\item_079.py": "6bca156defcb44caf1d4281ec1263085d57d1b5f7519f4a6a96a0146b464bcdb",
+      "models\\item_080.py": "6fc6d8e697aad9287770cc5b4b674f47383064c21090655062934edd50f3dc91",
+      "models\\item_081.py": "bcbf7285ba4e1e7313fdfc5bdea1642f84edc9b2d1e7b0290937283d0eda2bef",
+      "models\\item_082.py": "9caf9994d6c3ab9fd0c07ce29ac3c614370ce0e729248692629d3a57613935a5",
+      "models\\item_083.py": "e79bbd6c19fbfd4233613763b879809e07706a8693c14e107ed05445f329abc1",
+      "models\\item_084.py": "ebe0b5eafb4a50eecfbca56a8f8da4c073d5f3393171b312eb1bb0354f40dc8f",
+      "models\\item_085.py": "5e0c3ae49c8ba1b3356a595872c6129b6fe26bf51ef36ceeecc539bf417cfa28",
+      "models\\item_086.py": "c30d5c551668223d446cc027c0803420415ab7dc84bb3600ed7af51e30658846",
+      "models\\item_087.py": "9f074e77c3a6c1ac78e7840b891830be19a648a84f1b279a48408afaa8311102",
+      "models\\item_088.py": "9693362342cddfe52afae217a1cd2d901876b9df86d658b0b51095e47210d268",
+      "models\\item_089.py": "467d7ed6b887df98c045ff7f232b4ec57cc7e2ef421eb78f4ee53134afc7de67",
+      "models\\item_090.py": "9620fb1ce030d175699b70013884b3ce19dc73af0c9a460d7a9728f8a1d4d769",
+      "models\\item_091.py": "da3f703d013e31dd2e1365b77cd530335e6e3dc843b794d6ade48751fca82bd3",
+      "models\\item_092.py": "83df16e4087e8f0e2e940c09ddeb2e3f39bf273a1bcbc6a580ea40bcb3932717",
+      "models\\item_093.py": "f017093ea2ee7fca15325fa172d18c75c72e52f8767ce61f0795f7d6484254b3",
+      "models\\item_094.py": "06234f59dcbfac1fef151934a8f17d0b33cbbec62515329eee43a8bd1016d681",
+      "models\\item_095.py": "c96178fe8c4c466616f3e2fc40bdbe25e1daa4727892d3ac4b5f9262b31617ec",
+      "models\\item_096.py": "7c0918827fc15e8c066bcab26280c1af97a2d57afcfebf06c8c7f92ab3b68542",
+      "models\\item_097.py": "d8e3768ead51229c57d19ce0fd24207f64bd9b7ce14744a83c9cff315cbbccda",
+      "models\\item_098.py": "003b6c0d4893c32a689c1e3c715f2c355089585c314cc01d14cf39a503e0b03e",
+      "models\\item_099.py": "d99abdb97eecc4bfcfbf4afbdd0b8288c22483da207d169f9cc73024c5c8c978",
+      "models\\item_100.py": "eadf0fef87727ed179dd847aa0f3a9900387b2ed00b807209231ec783e0b97ed",
+      "models\\item_101.py": "0dec72dc01de96e0dec0050dc834d8dc1cc9e1843880430c3d959600ecdda262",
+      "models\\item_102.py": "e087ba662e40b90c30a125afd4e39a3a9f758dbf720b7d428a9360443bbabbd8",
+      "models\\__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "services\\checkout_service.py": "0bd17cc1670ce0241d523b20a4b9141aa4e907d5daddcab6691cc5a374582d8c",
+      "services\\__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tests\\test_checkout_service.py": "d923f5a3d4d05137d9737709a13d1a390649abaea1a9796578a77293d03743bf"
+    }
+  },
+  "java_task1": {
+    "path": "error_in_this/java/task1",
+    "target_file": "TextTransformer.java",
+    "runtime": "java",
+    "test_command": "java -jar /usr/share/java/junit-platform-console-standalone.jar -cp . --select-class task1.TextTransformerTest",
+    "defects": [
+      "truncate: off-by-one substring endIndex maxLength + 1",
+      "joinTokens: NullPointerException on null tokens list instead of safe empty string"
+    ],
+    "initial_hashes": {
+      "TextTransformer.java": "3f8a6190a4e3edaa7b3be2174403cc33774a323d1ffa9673c1bb134e35362f37",
+      "TextTransformerTest.java": "77e85f8152350a733cca6e1762bf5ffe478c2803d847ad893cdf9e128853b10d"
+    }
+  },
+  "java_task2": {
+    "path": "error_in_this/java/task2",
+    "target_file": "billing/DiscountCalculator.java",
+    "runtime": "java",
+    "test_command": "java -jar /usr/share/java/junit-platform-console-standalone.jar -cp . --select-class billing.OrderManagerTest",
+    "defects": [
+      "calculateNet(double, double): returns discount amount instead of net price amount * (1.0 - discountRate)",
+      "Contains valid Java overloads that must be preserved without duplicate signature errors"
+    ],
+    "initial_hashes": {
+      "billing\\DiscountCalculator.java": "43b6552f79ac4776dbc339bd2bf02b894618a577800928be4f62dfbc3bfc4766",
+      "billing\\OrderManager.java": "0bf89143c961d0b8f4f90fe432481d348d5bb0c8790a99e7031bc49f14ae4e30",
+      "billing\\OrderManagerTest.java": "45841e0f38b1f097eb2380aab42fa7a97533dc5de2d64e3fdd74fa88d09b3b8f"
+    }
+  },
+  "go_task1": {
+    "path": "error_in_this/go/task1",
+    "target_file": "slice_ops.go",
+    "runtime": "go",
+    "test_command": "go test -v .",
+    "defects": [
+      "MinMax: inverted return values (max, min) instead of (min, max)",
+      "Average: returns NaN or nil error on empty slice instead of returning error"
+    ],
+    "initial_hashes": {
+      "go.mod": "cf9223ba5ec1c4b7d27c47d775e59944aac2343388696eb0b79453dbd6f247bd",
+      "slice_ops.go": "ed49b45491dbfded54c3ff908cc881bfb674322ca04efff4516ef12ca05537f0",
+      "slice_ops_test.go": "acef82538163079c76999a22faf924ab379e0553a0fd9f4622e2333c8fe770f5"
+    }
+  },
+  "go_task2": {
+    "path": "error_in_this/go/task2",
+    "target_file": "pkg/format/formatter.go",
+    "runtime": "go",
+    "test_command": "go test -v ./pkg/service",
+    "defects": [
+      "JoinClean appends extraneous trailing separator to joined string",
+      "Cross-package caller BuildTagHeader fails expectation"
+    ],
+    "initial_hashes": {
+      "go.mod": "b144f49e385c6fd8975fe6faaec2469640bbd247a5f0d87eaba99d79979961a2",
+      "pkg\\format\\formatter.go": "b83e846c0ccfff2411b0f75baa224b4486a3e59a6787b08c0b7e07d730d40b4e",
+      "pkg\\service\\header.go": "4a75757a9289c25da735f34197f8a96a653071f34f4ddf623bf0491188e7cb45",
+      "pkg\\service\\header_test.go": "7c14b97d4cb0c8fd7771bca1c2516372562edc04bf00254307661da299f498f0"
+    }
+  }
+}

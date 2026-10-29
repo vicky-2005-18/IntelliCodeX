@@ -355,14 +355,20 @@ class CodeCreationEngine:
         return get_adapter_for_language("python").extract_interface(code)
 
     def generate_candidate_tests(
-        self, target_file: str, language: str, code: str, instruction: str
+        self,
+        target_file: str,
+        language: str,
+        code: str,
+        instruction: str,
+        reqs: Optional[RequirementSpec] = None,
     ) -> Tuple[str, str]:
         """
         Generates candidate unit tests explicitly labeled as AI-generated contract.
         Derives tests strictly from user requirements and the candidate's actual interface.
         Never derives classes from filenames, invents unrequested tasks, or hardcodes arithmetic values.
         """
-        reqs = analyze_requirements(instruction)
+        if reqs is None:
+            reqs = analyze_requirements(instruction)
         adapter = get_adapter_for_language(language)
         test_rel, test_code, _ = adapter.generate_candidate_tests(
             target_file, code, reqs, llm=self.llm
@@ -450,7 +456,7 @@ class CodeCreationEngine:
             blocker = infra["infrastructure_blocker"]
             compilation_status = "blocked"
             compilation_details = f"Toolchain execution blocked: {blocker}"
-            behavioral_status = f"blocked (0 tests executed: {blocker})"
+            behavioral_status = f"blocked (0 tests executed: zero tests executed as consequence: {blocker})"
             test_result_data = {
                 "success": False,
                 "exit_code": 1,
@@ -483,6 +489,13 @@ class CodeCreationEngine:
                         total_count = res.total_count
                         passed_tests = res.passed_tests
                         failed_tests = res.failed_tests
+
+                        passed_req_tests = [t for t in passed_tests if any(k in t for k in ("user_requirement", "behavior", "requirement"))]
+                        passed_smoke_tests = [t for t in passed_tests if t not in passed_req_tests]
+                        req_passed_cnt = len(passed_req_tests)
+                        test_result_data["requirement_tests_passed_count"] = req_passed_cnt
+                        test_result_data["passed_requirement_tests"] = passed_req_tests
+                        test_result_data["passed_smoke_tests"] = passed_smoke_tests
 
                         if res.success and passed_count > 0 and failed_count == 0 and not res.collection_errors:
                             behavioral_status = "passed"
@@ -609,18 +622,24 @@ class CodeCreationEngine:
                             )
 
                             if r_code == 0 and "ALL TESTS PASSED" in r_out:
+                                passed_tests = [line.split("PASS: ", 1)[1].strip() for line in r_out.splitlines() if "PASS: " in line]
+                                if not passed_tests:
+                                    passed_tests = ["testInstantiation"]
+                                passed_count = len(passed_tests)
+                                total_count = passed_count
+                                passed_req_tests = [t for t in passed_tests if "instantiation" not in t.lower()]
+                                req_passed_cnt = len(passed_req_tests)
                                 behavioral_status = "passed"
-                                passed_count = 4
-                                total_count = 4
-                                passed_tests = ["testAddAndList", "testCompleteTask", "testDeleteTask", "testInvalidInput"]
                                 test_result_data = {
                                     "success": True,
                                     "exit_code": 0,
                                     "failure_category": None,
-                                    "passed_count": 4,
+                                    "passed_count": passed_count,
                                     "failed_count": 0,
-                                    "total_count": 4,
+                                    "total_count": total_count,
                                     "passed_tests": passed_tests,
+                                    "requirement_tests_passed_count": req_passed_cnt,
+                                    "passed_requirement_tests": passed_req_tests,
                                     "stdout": r_out,
                                 }
                             else:
@@ -726,13 +745,18 @@ class CodeCreationEngine:
             "findings": normalized_findings,
         }
 
-        # Invariant: Zero tests must remain behaviorally unverified
-        verified = (
+        # Invariant: Smoke tests alone cannot satisfy behavioral verification
+        req_passed_cnt = test_result_data.get("requirement_tests_passed_count", 0)
+        smoke_verified = (
             syntax_status == "passed"
             and compilation_status == "passed"
-            and behavioral_status == "passed"
             and passed_count >= 1
             and failed_count == 0
+        )
+        verified = (
+            smoke_verified
+            and behavioral_status == "passed"
+            and req_passed_cnt >= 1
         )
 
         return {
@@ -750,6 +774,8 @@ class CodeCreationEngine:
             "failed_tests": failed_tests,
             "failure_category": test_result_data.get("failure_category"),
             "verified": verified,
+            "smoke_verified": smoke_verified,
+            "requirement_tests_passed_count": req_passed_cnt,
             "test_status": "passed" if behavioral_status == "passed" else ("failed" if behavioral_status == "failed" else "unverified"),
             "test_result": test_result_data,
             "security_validation": sec_val,
@@ -825,7 +851,7 @@ class CodeCreationEngine:
                 "syntax_details": "Skipped: backend infrastructure probe failed before generation.",
                 "compilation_status": "blocked",
                 "compilation_details": f"Toolchain execution blocked: {blocker}",
-                "behavioral_status": f"blocked (0 tests executed: {blocker})",
+                "behavioral_status": f"blocked (0 tests executed: zero tests executed as consequence: {blocker})",
                 "sandbox_validation": {
                     "verified": False,
                     "test_status": "blocked",
@@ -882,7 +908,9 @@ class CodeCreationEngine:
         test_file = None
         test_code = None
         if generate_tests:
-            test_file, test_code = self.generate_candidate_tests(target_file, language, generated_code, clean_inst)
+            test_file, test_code = self.generate_candidate_tests(
+                target_file, language, generated_code, clean_inst, reqs=reqs
+            )
 
         # 3. Sandbox verification
         val_res = self.validate_in_sandbox(
@@ -900,6 +928,39 @@ class CodeCreationEngine:
             f"Behavioral Testing: {val_res['behavioral_status']}."
         )
 
+        req_cnt = val_res.get("requirement_tests_passed_count", 0)
+        uncovered_notes = [note for note in reqs.limitations_noted if any(k in note.lower() for k in ("unbound", "ambiguous", "no executable"))]
+        total_vectors = len(reqs.test_vectors)
+        has_partial_vectors = bool(total_vectors > 0 and req_cnt < total_vectors)
+
+        if req_cnt == 0:
+            req_status = "interface_smoke_only"
+            has_uncovered = True
+            missing_cov = (
+                uncovered_notes[0]
+                if uncovered_notes
+                else "No executable requirement-grounded tests were executed; interface smoke verified only."
+            )
+            clarification_msg = (
+                "Please specify concrete input/output test vectors or expected behavioral assertions for full verification."
+            )
+        elif uncovered_notes or has_partial_vectors:
+            req_status = "partial_coverage"
+            has_uncovered = True
+            missing_cov = (
+                uncovered_notes[0]
+                if uncovered_notes
+                else f"Partial requirement coverage: only {req_cnt} of {total_vectors} requirement vectors were verified."
+            )
+            clarification_msg = (
+                "Please clarify ambiguous, unbound, or missing requirement vectors for full verification."
+            )
+        else:
+            req_status = "grounded_contract"
+            has_uncovered = False
+            missing_cov = None
+            clarification_msg = None
+
         return {
             "proposal_id": str(uuid.uuid4()),
             "repo_id": get_repo_id(self.repo_path),
@@ -915,9 +976,12 @@ class CodeCreationEngine:
             "contract_disclaimer": "AI-Generated Candidate Contract (Does Not Imply Independent Correctness)",
             "candidate_test_file": test_file,
             "candidate_test_code": test_code,
-            "requirements_status": "grounded_contract",
+            "requirements_status": req_status,
+            "has_uncovered_requirements": has_uncovered,
             "requirements_evaluation": reqs.to_dict(),
             "requirements_notes": reqs.limitations_noted[0] if reqs.limitations_noted else "User requirements verified against candidate interface.",
+            "missing_coverage": missing_cov,
+            "clarification_needed": clarification_msg,
             "capability_notes": capability_notes,
             "execution_backend": val_res["execution_backend"],
             "infrastructure": val_res["infrastructure"],
@@ -930,7 +994,9 @@ class CodeCreationEngine:
             "behavioral_status": val_res["behavioral_status"],
             "failure_category": val_res.get("failure_category"),
             "sandbox_validation": {
-                "verified": val_res["verified"],
+                "verified": val_res["verified"] and not has_uncovered,
+                "smoke_verified": val_res.get("smoke_verified", False),
+                "requirement_tests_passed_count": req_cnt,
                 "test_status": val_res["test_status"],
                 "passed_count": val_res["passed_count"],
                 "failed_count": val_res["failed_count"],
@@ -942,7 +1008,7 @@ class CodeCreationEngine:
                 "test_result": val_res["test_result"],
             },
             "security_validation": val_res["security_validation"],
-            "status": "verified" if val_res["verified"] else "pending",
+            "status": "verified" if (val_res["verified"] and req_cnt > 0 and not has_uncovered) else "pending",
             "explanation": explanation,
             "error": None,
         }
