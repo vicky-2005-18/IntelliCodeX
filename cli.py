@@ -80,18 +80,7 @@ if "ingest_repository" not in __all__:
     __all__.append("ingest_repository")
 
 
-def main(argv=None):
-    """
-    Main CLI entrypoint. Delegates directly to core.cli.main().
-    """
-    if argv is not None:
-        old_argv = sys.argv
-        sys.argv = argv
-        try:
-            return _core_cli.main()
-        finally:
-            sys.argv = old_argv
-    return _core_cli.main()
+main = _core_cli.main
 
 
 if __name__ == "__main__":

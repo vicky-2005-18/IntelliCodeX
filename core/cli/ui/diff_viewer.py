@@ -208,12 +208,12 @@ def render_interactive_diff(
                 on_action("apply")
             return ActionStr("apply")
 
-        elif choice in ("r", "reject", "discard", "d"):
+        elif choice in ("r", "reject", "discard", "d", "n", "no"):
             if on_action:
                 on_action("reject")
             return ActionStr("reject")
 
-        elif choice in ("c", "cancel", "q", "quit"):
+        elif choice in ("c", "cancel", "q", "quit", "exit"):
             if on_action:
                 on_action("cancel")
             return ActionStr("cancel")
@@ -255,7 +255,7 @@ def render_interactive_diff(
             continue
 
         else:
-            c.print(f"[red]Unknown option '{choice}'. Please enter [a], [t], [v], [r], or [c].[/red]")
+            c.print(f"[red]Unknown option '{choice}'. Please enter \\[a], \\[t], \\[v], \\[r], or \\[c].[/red]")
 
 
 __all__ = [

@@ -178,7 +178,13 @@ class FixHandler(CommandHandler):
                 verify_in_sandbox=True,
                 max_iterations=3,
             )
-            render_interactive_diff(patch_rec)
+            action = render_interactive_diff(patch_rec)
+            if action in ("a", "apply", "approve", "yes", "y"):
+                ok_app, msg_app = patch_engine.apply_patch(patch_rec)
+                if ok_app:
+                    print(f"[✓] {msg_app}\n")
+                else:
+                    print(f"[!] {msg_app}\n")
         except Exception as err:
             logger.error("Fix handler error: %s", err, exc_info=True)
             print(f"[!] Error during fix generation: {err}\n")
