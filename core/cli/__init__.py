@@ -9,6 +9,16 @@ from core.cli.terminal_safety import (
     MOUSE_DISABLE_SEQUENCES,
 )
 from core.cli.completers import IntelliCodeXCompleter, build_completer_commands
+from core.cli.commands import (
+    CommandHandler,
+    CommandRegistry,
+    create_default_registry,
+    WatchHandler,
+    RepoHandler,
+    AuditHandler,
+    FixHandler,
+    QueryHandler,
+)
 
 __all__ = [
     "CLISessionState",
@@ -19,4 +29,12 @@ __all__ = [
     "MOUSE_DISABLE_SEQUENCES",
     "IntelliCodeXCompleter",
     "build_completer_commands",
+    "CommandHandler",
+    "CommandRegistry",
+    "create_default_registry",
+    "WatchHandler",
+    "RepoHandler",
+    "AuditHandler",
+    "FixHandler",
+    "QueryHandler",
 ]
