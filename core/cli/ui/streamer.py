@@ -7,15 +7,24 @@ or asterisks). Upon generation completion, renders the accumulated text as a pol
 Rich Markdown panel.
 """
 
-from typing import Callable, Iterable, List, Optional
+from typing import Any, Callable, Iterable, List, Optional
 import sys
 import time
 
-from rich.console import Console
-from rich.live import Live
-from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.text import Text
+try:
+    from rich.console import Console
+    from rich.live import Live
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.text import Text
+    HAS_RICH = True
+except ImportError:
+    Console = None  # type: ignore
+    Live = None     # type: ignore
+    Markdown = None # type: ignore
+    Panel = None    # type: ignore
+    Text = None     # type: ignore
+    HAS_RICH = False
 
 
 def _suspend_active_spinners() -> None:
@@ -39,13 +48,16 @@ class TokenStreamer:
 
     def __init__(
         self,
-        console: Optional[Console] = None,
+        console: Optional[Any] = None,
         refresh_per_second: float = 15.0,
     ) -> None:
-        self.console: Console = console if console is not None else Console()
+        if HAS_RICH and Console is not None:
+            self.console = console if console is not None else Console()
+        else:
+            self.console = None
         self.refresh_per_second: float = refresh_per_second
         self._cancelled: bool = False
-        self._live: Optional[Live] = None
+        self._live: Optional[Any] = None
 
     def cancel(self) -> None:
         """Safely halts streaming and flushes partial output."""
@@ -58,6 +70,11 @@ class TokenStreamer:
         border_style: str = "cyan",
     ) -> None:
         """Renders formatted Markdown panel inside the console."""
+        if not HAS_RICH or self.console is None or Markdown is None or Panel is None:
+            print(f"\n--- {title} ---")
+            print(text)
+            print()
+            return
         try:
             md = Markdown(text)
             panel = Panel(
@@ -69,13 +86,18 @@ class TokenStreamer:
             self.console.print(panel)
         except Exception:
             # Fallback to plain Text panel if Markdown parsing or rendering encounters an issue
-            panel = Panel(
-                Text(text),
-                title=f"[bold {border_style}]{title}[/bold {border_style}]",
-                border_style=border_style,
-                padding=(1, 2),
-            )
-            self.console.print(panel)
+            if Text is not None:
+                panel = Panel(
+                    Text(text),
+                    title=f"[bold {border_style}]{title}[/bold {border_style}]",
+                    border_style=border_style,
+                    padding=(1, 2),
+                )
+                self.console.print(panel)
+            else:
+                print(f"\n--- {title} ---")
+                print(text)
+                print()
 
     def stream(
         self,
@@ -92,6 +114,24 @@ class TokenStreamer:
         _suspend_active_spinners()
 
         accumulated: List[str] = []
+
+        if not HAS_RICH or Live is None or self.console is None:
+            try:
+                for token in token_generator:
+                    if self._cancelled:
+                        break
+                    accumulated.append(token)
+                    if on_token is not None:
+                        try:
+                            on_token(token)
+                        except Exception:
+                            pass
+                    sys.stdout.write(token)
+                    sys.stdout.flush()
+                print()
+            except KeyboardInterrupt:
+                print("\n[!] Stream interrupted by user.")
+            return "".join(accumulated)
         interval: float = 1.0 / self.refresh_per_second if self.refresh_per_second > 0 else 0.0
         last_refresh: float = 0.0
 

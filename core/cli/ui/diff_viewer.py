@@ -9,11 +9,20 @@ from typing import Any, Callable, Dict, Optional
 import os
 import sys
 
-from rich.console import Console
-from rich.panel import Panel
-from rich.syntax import Syntax
-from rich.table import Table
-from rich.text import Text
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.syntax import Syntax
+    from rich.table import Table
+    from rich.text import Text
+    HAS_RICH = True
+except ImportError:
+    Console = None  # type: ignore
+    Panel = None    # type: ignore
+    Syntax = None   # type: ignore
+    Table = None    # type: ignore
+    Text = None     # type: ignore
+    HAS_RICH = False
 
 
 class ActionStr(str):
@@ -52,11 +61,20 @@ def format_time_consumed(seconds: float) -> str:
         return f"{m}m {s:.1f}s"
 
 
-def render_diff(diff_text: str, console: Optional[Console] = None) -> None:
+def render_diff(diff_text: str, console: Optional[Any] = None) -> None:
     """
     Renders unified Git diff with syntax highlighting and line numbers.
     Drop-in replacement for legacy cli.render_diff.
     """
+    if not HAS_RICH or Console is None:
+        print("\n--- Unified Git Diff ---")
+        if diff_text and diff_text.strip():
+            print(diff_text)
+        else:
+            print("No diff changes to display.")
+        print()
+        return
+
     c = console if console is not None else Console()
     if diff_text and diff_text.strip():
         try:
@@ -72,13 +90,24 @@ def render_diff(diff_text: str, console: Optional[Console] = None) -> None:
 def render_patch_card(
     patch_rec: Dict[str, Any],
     fix_time: float = 0.0,
-    console: Optional[Console] = None,
+    console: Optional[Any] = None,
     show_diff: bool = True,
 ) -> None:
     """
     Renders automated patch diagnosis and git diff, separating execution
     results from model claims. Drop-in replacement for legacy cli.render_patch_card.
     """
+    if not HAS_RICH or Console is None or Table is None or Panel is None:
+        print("\n=======================================================================")
+        print("                 INTELLICODEX AUTOMATED CODE PATCH")
+        print("=======================================================================")
+        print(f"Canonical Target: {patch_rec.get('target_file')}")
+        print(f"Explanation: {patch_rec.get('explanation')}")
+        if show_diff:
+            print(f"Diff:\n{patch_rec.get('git_diff', '')}")
+        print("=======================================================================\n")
+        return
+
     c = console if console is not None else Console()
     sb_val = patch_rec.get("sandbox_validation") or {}
     sb_status = sb_val.get("test_status", "skipped").upper()
@@ -163,7 +192,7 @@ def render_interactive_diff(
     prompt_fn: Optional[Callable[[str], str]] = None,
     sandbox_test_fn: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     on_action: Optional[Callable[[str], Any]] = None,
-    console: Optional[Console] = None,
+    console: Optional[Any] = None,
     show_diff: bool = True,
 ) -> ActionStr:
     """
@@ -179,20 +208,24 @@ def render_interactive_diff(
     Returns:
         ActionStr: "apply", "reject", or "cancel"
     """
-    c = console if console is not None else Console()
+    if HAS_RICH and Console is not None:
+        c = console if console is not None else Console()
+    else:
+        c = None
     _prompt = prompt_fn if prompt_fn is not None else input
 
     # Initial render of patch card and diff
     render_patch_card(patch_rec, console=c, show_diff=show_diff)
 
+    def _safe_print(msg: str):
+        if c is not None:
+            c.print(msg)
+        else:
+            print(msg)
+
     while True:
         prompt_text = (
-            "\n[bold cyan]Patch Review Action[/bold cyan] "
-            "([bold green][A]pply[/bold green], "
-            "[bold blue][T]est sandbox[/bold blue], "
-            "[bold yellow][V]iew toggle diff[/bold yellow], "
-            "[bold red][R]eject[/bold red], "
-            "[dim][C]ancel[/dim]): "
+            "\nPatch Review Action ([A]pply, [T]est sandbox, [V]iew toggle diff, [R]eject, [C]ancel): "
         )
         try:
             raw = _prompt(prompt_text)
@@ -221,17 +254,17 @@ def render_interactive_diff(
         elif choice in ("v", "view", "toggle", "u"):
             show_diff = not show_diff
             if show_diff:
-                c.print("[bold green]--- Showing Unified Git Diff ---[/bold green]")
+                _safe_print("--- Showing Unified Git Diff ---")
                 render_diff(patch_rec.get("git_diff", ""), console=c)
             else:
-                c.print("[dim]--- Diff display hidden ---[/dim]")
+                _safe_print("--- Diff display hidden ---")
             if on_action:
                 on_action("toggle_diff")
             continue
 
         elif choice in ("t", "test"):
             if sandbox_test_fn is not None:
-                c.print("[cyan]Running automated test validation in sandbox...[/cyan]")
+                _safe_print("Running automated test validation in sandbox...")
                 try:
                     test_result = sandbox_test_fn(patch_rec)
                     if isinstance(test_result, dict):
@@ -243,19 +276,19 @@ def render_interactive_diff(
                             patch_rec["sandbox_validation"].update(test_result)
                         if "status" in test_result:
                             patch_rec["status"] = test_result["status"]
-                    c.print("[green]Sandbox test execution complete.[/green]")
+                    _safe_print("Sandbox test execution complete.")
                 except Exception as e:
-                    c.print(f"[bold red]Sandbox test failed to execute:[/bold red] {e}")
+                    _safe_print(f"Sandbox test failed to execute: {e}")
                 # Re-render patch card with updated results
                 render_patch_card(patch_rec, console=c, show_diff=False)
             else:
-                c.print("[yellow]No sandbox test runner configured.[/yellow]")
+                _safe_print("No sandbox test runner configured.")
             if on_action:
                 on_action("test")
             continue
 
         else:
-            c.print(f"[red]Unknown option '{choice}'. Please enter \\[a], \\[t], \\[v], \\[r], or \\[c].[/red]")
+            _safe_print(f"Unknown option '{choice}'. Please enter [a], [t], [v], [r], or [c].")
 
 
 __all__ = [

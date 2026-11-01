@@ -27,6 +27,22 @@ if exist "%~dp0.venv\Scripts\python.exe" (
 ) else if exist "%~dp0..\venv\Scripts\python.exe" (
     set "PYTHON_EXE=%~dp0..\venv\Scripts\python.exe"
     call "%~dp0..\venv\Scripts\activate.bat" >nul 2>&1
+) else (
+    :: Fallback: verify default python has dependencies; if not, check py launcher for Python 3.12/3.14
+    "%PYTHON_EXE%" -c "import rich, requests" >nul 2>&1
+    if not "!ERRORLEVEL!"=="0" (
+    for /f "delims=" %%I in ('py -3.12 -c "import sys; print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%I"
+    if "!PYTHON_EXE!"=="python" (
+        for /f "delims=" %%I in ('py -3.14 -c "import sys; print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%I"
+    )
+    if "!PYTHON_EXE!"=="python" (
+        if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
+            set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+        ) else if exist "%ProgramFiles%\Python314\python.exe" (
+            set "PYTHON_EXE=%ProgramFiles%\Python314\python.exe"
+        )
+    )
+    )
 )
 
 :: Check CLI arguments
