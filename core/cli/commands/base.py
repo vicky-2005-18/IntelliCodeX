@@ -144,3 +144,4 @@ def create_default_registry(fallback_to_query: bool = False) -> CommandRegistry:
         QueryHandler(fallback=fallback_to_query),
     ]
     return CommandRegistry(handlers=handlers, fallback_to_query=fallback_to_query)
+

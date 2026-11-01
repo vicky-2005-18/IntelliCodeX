@@ -85,32 +85,12 @@ class WatchHandler(CommandHandler):
 
         # 3. Status inspection
         watcher = state.watcher
-        is_active = bool(watcher and getattr(watcher, "is_alive", lambda: False)())
         try:
-            from rich.console import Console
-            from rich.table import Table
-            from rich.panel import Panel
-
-            console = Console()
-            grid = Table.grid(padding=(0, 2))
-            grid.add_column(style="bold cyan", justify="right")
-            grid.add_column(style="white")
-            grid.add_row(
-                "Status:",
-                "[bold green]ACTIVE ●[/bold green]" if is_active else "[bold red]INACTIVE[/bold red]",
-            )
-            grid.add_row("Target:", state.repo_path)
-            grid.add_row("Debounce:", "500 ms")
-            grid.add_row("Auto-reindex:", "[green]Enabled[/green]" if is_active else "[dim]Disabled[/dim]")
-
-            console.print(
-                Panel(
-                    grid,
-                    title="[bold cyan]Filesystem Watcher Status[/bold cyan]",
-                    border_style="cyan",
-                )
-            )
+            from cli import render_watch_panel
+            render_watch_panel(watcher, state.repo_path)
         except Exception:
-            print(f"\n[*] Watcher Status: {'ACTIVE' if is_active else 'INACTIVE'} on '{state.repo_path}'\n")
+            is_active = bool(watcher and getattr(watcher, "is_alive", lambda: False)())
+            print(f"\n[*] Real-Time Filesystem Watcher Status: {'ACTIVE' if is_active else 'INACTIVE'} on '{state.repo_path}'\n")
 
         return True
+

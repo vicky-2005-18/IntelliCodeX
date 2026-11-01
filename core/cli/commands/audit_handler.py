@@ -153,3 +153,4 @@ class AuditHandler(CommandHandler):
             return True
 
         return False
+

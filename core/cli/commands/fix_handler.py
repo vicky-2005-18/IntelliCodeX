@@ -184,3 +184,4 @@ class FixHandler(CommandHandler):
             print(f"[!] Error during fix generation: {err}\n")
 
         return True
+

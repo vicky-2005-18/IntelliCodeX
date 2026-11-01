@@ -127,6 +127,13 @@ class RepoHandler(CommandHandler):
         # 6. repo <path_or_id> / use / ingest
         target = raw_input.split(":", 1)[1].strip() if ":" in raw_input else raw_input.split(maxsplit=1)[1].strip()
         if target:
-            state.switch_repo(target)
-            print(f"\n[*] Switched active repository to '{state.repo_path}'.\n")
+            try:
+                from cli import resolve_repo_path
+                resolved = resolve_repo_path(target)
+                state.switch_repo(resolved)
+                print(f"[*] Successfully switched active repository to '{resolved}'!\n")
+            except Exception as err:
+                state.switch_repo(target)
+                print(f"[!] Error switching repository: {err}\n")
         return True
+

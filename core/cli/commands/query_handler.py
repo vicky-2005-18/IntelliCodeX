@@ -129,7 +129,8 @@ class QueryHandler(CommandHandler):
             eq = raw_input.split(":", 1)[1].strip() if ":" in raw_input else raw_input.split(maxsplit=1)[1].strip()
             try:
                 from cli import execute_explain_command
-                execute_explain_command(state.engine, getattr(state.engine, "result", None), eq, active_file_filter=state.active_file_filter)
+                res = getattr(state, "result", None) or getattr(state.engine, "result", None)
+                execute_explain_command(state.engine, res, raw_input, active_file_filter=state.active_file_filter)
             except Exception:
                 try:
                     results = state.engine.retrieve_expanded(eq, top_k=5, file_filter=state.active_file_filter) if state.engine else []
@@ -147,8 +148,14 @@ class QueryHandler(CommandHandler):
 
         try:
             if state.engine is not None and callable(getattr(state.engine, "ask", None)):
+                try:
+                    retrieved_chunks = state.engine.retrieve_expanded(cleaned_query, file_filter=effective_file_filter) if hasattr(state.engine, "retrieve_expanded") else []
+                    print(f"--- Retrieved {len(retrieved_chunks)} chunks ---")
+                except Exception:
+                    pass
                 ans_dict = state.engine.ask(cleaned_query, file_filter=effective_file_filter)
                 ans_text = ans_dict.get("answer", "") if isinstance(ans_dict, dict) else str(ans_dict)
+                setattr(state, "last_answer", ans_text)
                 render_markdown_panel(ans_text, title=f"Answer ({state.model_name})")
             else:
                 print(f"\n[*] Query processed for '{cleaned_query}'. (Engine offline)\n")
@@ -157,3 +164,4 @@ class QueryHandler(CommandHandler):
             print(f"[!] Error answering query: {err}\n")
 
         return True
+
