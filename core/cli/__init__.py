@@ -1,5 +1,6 @@
 """IntelliCodeX CLI Subsystem."""
 
+from core.cli.state import CLISessionState
 from core.cli.terminal_safety import (
     restore_terminal_mouse_modes,
     cleanup_cli_resources,
@@ -9,6 +10,7 @@ from core.cli.terminal_safety import (
 )
 
 __all__ = [
+    "CLISessionState",
     "restore_terminal_mouse_modes",
     "cleanup_cli_resources",
     "register_active_watcher",
