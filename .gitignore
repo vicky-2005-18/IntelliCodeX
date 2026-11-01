@@ -32,6 +32,8 @@ scratch/test_repo_remove_sandbox/
 gsd-core/
 get-shit-done/
 .planning/
+.worktrees/
+.superpowers/
 
 # Graphify output
 graphify-out/
